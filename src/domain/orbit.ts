@@ -26,3 +26,9 @@ export type SatelliteSnapshot = {
   trajectory?: OrbitState[];
   error?: string;
 };
+
+export type RangeMeasurement = {
+  primary: SatelliteSnapshot;
+  secondary: SatelliteSnapshot;
+  distanceKm: number;
+};

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { OrbitState, SatelliteSnapshot } from "@/domain/orbit";
+import type { OrbitState, RangeMeasurement, SatelliteSnapshot } from "@/domain/orbit";
 
 type CesiumModule = typeof import("cesium");
 type Viewer = import("cesium").Viewer;
@@ -11,6 +11,7 @@ type Cartesian3 = import("cesium").Cartesian3;
 type CesiumGlobeProps = {
   snapshots: SatelliteSnapshot[];
   orbitSnapshots: SatelliteSnapshot[];
+  rangeMeasurement: RangeMeasurement | null;
   selectedSatelliteId: string | null;
   showAllOrbits: boolean;
   showLabels: boolean;
@@ -65,6 +66,7 @@ function stateToCartesian(Cesium: CesiumModule, state: OrbitState): Cartesian3 {
 export function CesiumGlobe({
   snapshots,
   orbitSnapshots,
+  rangeMeasurement,
   selectedSatelliteId,
   showAllOrbits,
   showLabels,
@@ -76,6 +78,9 @@ export function CesiumGlobe({
   const viewerRef = useRef<Viewer | null>(null);
   const entitiesRef = useRef<Map<string, Entity>>(new Map());
   const orbitEntitiesRef = useRef<Map<string, Entity>>(new Map());
+  const rangeEntityRef = useRef<Entity | null>(null);
+  const rangeLabelEntityRef = useRef<Entity | null>(null);
+  const rangeDotEntitiesRef = useRef<Entity[]>([]);
   const [hoverInfo, setHoverInfo] = useState<HoverInfo>(null);
   const [viewerReady, setViewerReady] = useState(false);
 
@@ -174,6 +179,9 @@ export function CesiumGlobe({
       }
       viewerRef.current = null;
       setViewerReady(false);
+      rangeEntityRef.current = null;
+      rangeLabelEntityRef.current = null;
+      rangeDotEntitiesRef.current = [];
       entityMap.clear();
       orbitEntityMap.clear();
     };
@@ -307,6 +315,117 @@ export function CesiumGlobe({
       }
     });
   }, [orbitSnapshots, selectedSatelliteId, showAllOrbits, viewerReady]);
+
+  useEffect(() => {
+    const Cesium = cesiumRef.current;
+    const viewer = viewerRef.current;
+    if (!viewerReady || !Cesium || !viewer) {
+      return;
+    }
+
+    if (!rangeMeasurement?.primary.state || !rangeMeasurement.secondary.state) {
+      if (rangeEntityRef.current) {
+        viewer.entities.remove(rangeEntityRef.current);
+        rangeEntityRef.current = null;
+      }
+      if (rangeLabelEntityRef.current) {
+        viewer.entities.remove(rangeLabelEntityRef.current);
+        rangeLabelEntityRef.current = null;
+      }
+      rangeDotEntitiesRef.current.forEach((entity) => viewer.entities.remove(entity));
+      rangeDotEntitiesRef.current = [];
+      return;
+    }
+
+    const primaryPosition = stateToCartesian(Cesium, rangeMeasurement.primary.state);
+    const secondaryPosition = stateToCartesian(Cesium, rangeMeasurement.secondary.state);
+    const midpoint = Cesium.Cartesian3.midpoint(primaryPosition, secondaryPosition, new Cesium.Cartesian3());
+    const dotPositions = Array.from({ length: 19 }, (_, index) =>
+      Cesium.Cartesian3.lerp(
+        primaryPosition,
+        secondaryPosition,
+        index / 18,
+        new Cesium.Cartesian3(),
+      ),
+    );
+    const labelText = `${rangeMeasurement.distanceKm.toLocaleString("en", {
+      maximumFractionDigits: 1,
+      minimumFractionDigits: 1,
+    })} km`;
+
+    if (!rangeEntityRef.current) {
+      rangeEntityRef.current = viewer.entities.add({
+        id: "range-measurement-line",
+        name: "Satellite range measurement",
+        polyline: {
+          positions: [primaryPosition, secondaryPosition],
+          width: 5,
+          material: new Cesium.PolylineDashMaterialProperty({
+            color: Cesium.Color.MAGENTA.withAlpha(0.98),
+            dashLength: 20,
+          }),
+          depthFailMaterial: new Cesium.PolylineDashMaterialProperty({
+            color: Cesium.Color.CYAN.withAlpha(0.95),
+            dashLength: 20,
+          }),
+          arcType: Cesium.ArcType.NONE,
+        },
+      });
+    }
+
+    if (rangeDotEntitiesRef.current.length !== dotPositions.length) {
+      rangeDotEntitiesRef.current.forEach((entity) => viewer.entities.remove(entity));
+      rangeDotEntitiesRef.current = dotPositions.map((position, index) =>
+        viewer.entities.add({
+          id: `range-measurement-dot-${index}`,
+          name: "Satellite range measurement dot",
+          position,
+          point: {
+            color: index === 0 || index === dotPositions.length - 1
+              ? Cesium.Color.WHITE.withAlpha(1)
+              : Cesium.Color.MAGENTA.withAlpha(0.95),
+            pixelSize: index === 0 || index === dotPositions.length - 1 ? 8 : 5,
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 1,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+        }),
+      );
+    }
+
+    if (!rangeLabelEntityRef.current) {
+      rangeLabelEntityRef.current = viewer.entities.add({
+        id: "range-measurement-label",
+        name: "Satellite range distance",
+        position: midpoint,
+        label: {
+          text: labelText,
+          font: "600 14px sans-serif",
+          fillColor: Cesium.Color.WHITE,
+          outlineColor: Cesium.Color.BLACK,
+          outlineWidth: 2,
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          showBackground: true,
+          backgroundColor: Cesium.Color.BLACK.withAlpha(0.82),
+          backgroundPadding: new Cesium.Cartesian2(8, 5),
+          pixelOffset: new Cesium.Cartesian2(0, -12),
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+      });
+    }
+
+    if (rangeEntityRef.current.polyline) {
+      rangeEntityRef.current.polyline.positions = new Cesium.ConstantProperty([primaryPosition, secondaryPosition]);
+      rangeEntityRef.current.polyline.width = new Cesium.ConstantProperty(5);
+    }
+    rangeDotEntitiesRef.current.forEach((entity, index) => {
+      entity.position = new Cesium.ConstantPositionProperty(dotPositions[index]);
+    });
+    rangeLabelEntityRef.current.position = new Cesium.ConstantPositionProperty(midpoint);
+    if (rangeLabelEntityRef.current.label) {
+      rangeLabelEntityRef.current.label.text = new Cesium.ConstantProperty(labelText);
+    }
+  }, [rangeMeasurement, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;

@@ -16,6 +16,7 @@ The app loads TLE data, propagates satellite positions, and renders satellites o
 - Propagates satellite positions using SatelliteJS.
 - Renders satellites on a CesiumJS Earth globe.
 - Shows satellite labels, selected satellite details, and basic playback controls.
+- Calculates current simulation-time distance between two selected satellites.
 - Keeps propagation logic separate from Cesium rendering logic.
 
 ## Tech Stack
@@ -84,7 +85,8 @@ npm run start
 7. Use Play/Pause and speed controls.
 8. Toggle satellite labels.
 9. Toggle `Show all orbits`.
-10. Paste a CelesTrak URL and click `Load`.
+10. Use `Range check` to select two satellites and confirm the distance line appears.
+11. Paste a CelesTrak URL and click `Load`.
 
 Example endpoint:
 
@@ -231,6 +233,7 @@ Included:
 - Satellite propagation
 - Satellite markers and labels
 - Orbit visualization
+- Distance/range check between two selected satellites
 - Play/pause/time speed controls
 - Selected satellite info panel
 - Camera reset

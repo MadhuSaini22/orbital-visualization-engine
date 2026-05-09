@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SatelliteObject, SatelliteSnapshot } from "@/domain/orbit";
 import { sampleTle } from "@/data/sampleTle";
 import { MAX_TLE_OBJECTS, parseTleText } from "@/domain/tle";
+import { distanceBetweenOrbitStatesKm } from "@/geometry/distance";
 import { formatNumber, formatUtc } from "@/geometry/format";
 import { SatelliteJsPropagator } from "@/propagation/SatelliteJsPropagator";
 
@@ -28,12 +29,26 @@ function getTleFetchUrl(value: string) {
   return isExternalEndpoint(trimmed) ? `/api/tle?url=${encodeURIComponent(trimmed)}` : trimmed;
 }
 
+function getDefaultRangeIds(satellites: SatelliteObject[]) {
+  return {
+    primaryId: satellites[0]?.id ?? "",
+    secondaryId: satellites[1]?.id ?? "",
+  };
+}
+
+function getFirstDifferentSatelliteId(satellites: SatelliteObject[], id: string) {
+  return satellites.find((satellite) => satellite.id !== id)?.id ?? "";
+}
+
 export function OrbitalDashboard() {
   const [tleUrl, setTleUrl] = useState(sampleUrl);
   const initialParsed = useMemo(() => parseTleText(sampleTle), []);
+  const initialRangeIds = useMemo(() => getDefaultRangeIds(initialParsed.satellites), [initialParsed.satellites]);
   const [satellites, setSatellites] = useState<SatelliteObject[]>(initialParsed.satellites);
   const [messages, setMessages] = useState<string[]>(initialParsed.errors);
   const [selectedSatelliteId, setSelectedSatelliteId] = useState<string | null>(initialParsed.satellites[0]?.id ?? null);
+  const [rangePrimaryId, setRangePrimaryId] = useState(initialRangeIds.primaryId);
+  const [rangeSecondaryId, setRangeSecondaryId] = useState(initialRangeIds.secondaryId);
   const [simTime, setSimTime] = useState(() => initialSimulationTime);
   const [isPlaying, setIsPlaying] = useState(true);
   const [speed, setSpeed] = useState(60);
@@ -66,12 +81,29 @@ export function OrbitalDashboard() {
   }, [propagator, satellites]);
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === selectedSatelliteId) ?? snapshots[0];
   const validCount = snapshots.filter((item) => item.state).length;
+  const primaryRangeSnapshot = snapshots.find((item) => item.satellite.id === rangePrimaryId);
+  const secondaryRangeSnapshot = snapshots.find((item) => item.satellite.id === rangeSecondaryId);
+  const rangeDistanceKm = distanceBetweenOrbitStatesKm(
+    primaryRangeSnapshot?.state ?? null,
+    secondaryRangeSnapshot?.state ?? null,
+  );
+  const rangeMeasurement =
+    primaryRangeSnapshot && secondaryRangeSnapshot && rangeDistanceKm !== null
+      ? {
+          primary: primaryRangeSnapshot,
+          secondary: secondaryRangeSnapshot,
+          distanceKm: rangeDistanceKm,
+        }
+      : null;
 
   const loadTleText = useCallback((raw: string) => {
     const result = parseTleText(raw);
+    const defaultRangeIds = getDefaultRangeIds(result.satellites);
     setMessages(result.errors);
     setSatellites(result.satellites);
     setSelectedSatelliteId(result.satellites[0]?.id ?? null);
+    setRangePrimaryId(defaultRangeIds.primaryId);
+    setRangeSecondaryId(defaultRangeIds.secondaryId);
   }, []);
 
   const loadFromUrl = useCallback(async () => {
@@ -242,6 +274,55 @@ export function OrbitalDashboard() {
             </label>
           </section>
 
+          <section className="mt-6 space-y-3 rounded-md border border-white/10 bg-black/20 p-3">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Range check</label>
+              <span className="rounded bg-cyan-300/10 px-2 py-1 font-mono text-xs text-cyan-200">
+                {rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : "--"}
+              </span>
+            </div>
+
+            {satellites.length < 2 ? (
+              <p className="text-sm leading-5 text-zinc-400">Load at least 2 satellites to calculate distance.</p>
+            ) : (
+              <>
+                <div className="grid gap-2">
+                  <select
+                    value={rangePrimaryId}
+                    onChange={(event) => {
+                      const nextPrimaryId = event.target.value;
+                      setRangePrimaryId(nextPrimaryId);
+                      if (nextPrimaryId === rangeSecondaryId) {
+                        setRangeSecondaryId(getFirstDifferentSatelliteId(satellites, nextPrimaryId));
+                      }
+                    }}
+                    className="rounded-md border border-white/10 bg-[#11151d] px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-cyan-300"
+                  >
+                    {satellites.map((satellite) => (
+                      <option key={satellite.id} value={satellite.id}>
+                        Primary: {satellite.name}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={rangeSecondaryId}
+                    onChange={(event) => setRangeSecondaryId(event.target.value)}
+                    className="rounded-md border border-white/10 bg-[#11151d] px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-cyan-300"
+                  >
+                    {satellites.map((satellite) => (
+                      <option key={satellite.id} value={satellite.id} disabled={satellite.id === rangePrimaryId}>
+                        Secondary: {satellite.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <p className="text-xs leading-5 text-zinc-500">
+                  Distance is calculated at the current simulation time.
+                </p>
+              </>
+            )}
+          </section>
+
           <section className="mt-6 space-y-2">
             <label className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Satellites</label>
             <div className="max-h-64 space-y-2 overflow-auto pr-1">
@@ -268,6 +349,7 @@ export function OrbitalDashboard() {
             <CesiumGlobe
               snapshots={snapshots}
               orbitSnapshots={orbitSnapshots}
+              rangeMeasurement={rangeMeasurement}
               selectedSatelliteId={selectedSatelliteId}
               showAllOrbits={showAllOrbits}
               showLabels={showLabels}
