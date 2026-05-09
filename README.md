@@ -1,36 +1,47 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# MOSAIC Phase 0 Orbital Viewer
 
-## Getting Started
+A small Next.js + TypeScript + Tailwind app for the Phase 0 orbital visualization MVP.
 
-First, run the development server:
+## Features
+
+- Cesium Earth globe
+- Load TLE data from `/public/data/sample.tle`, a URL, or a local `.tle` / `.txt` file
+- Parse one or many TLE entries
+- Enforce a maximum of 15 TLE objects
+- Show clear messages for invalid TLEs, checksum failures, empty files, and over-limit files
+- Propagate satellite positions with SatelliteJS
+- Render one moving marker per satellite
+- Render orbit arcs around Earth
+- Use local Cesium Natural Earth imagery, so the globe works without an Ion token
+- Toggle satellite labels
+- Hover or click a satellite marker to identify it
+- Play, pause, reset current time, and change simulation speed
+- Reset camera view
+- Select a satellite and inspect latitude, longitude, altitude, velocity, and frame
+
+## Run
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```text
+http://localhost:3000
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Build
 
-## Learn More
+```bash
+npm run build
+```
 
-To learn more about Next.js, take a look at the following resources:
+## Architecture
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```text
+TLE text -> TLE parser -> SatelliteJS propagator -> OrbitState snapshots -> Cesium renderer -> UI panels
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+The renderer only displays propagated states. SatelliteJS stays inside the propagation layer so it can be replaced later.
