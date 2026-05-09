@@ -16,6 +16,7 @@ The app loads TLE data, propagates satellite positions, and renders satellites o
 - Propagates satellite positions using SatelliteJS.
 - Renders satellites on a CesiumJS Earth globe.
 - Shows satellite labels, selected satellite details, and basic playback controls.
+- Toggles individual satellite orbit visibility by clicking satellites on the globe or in the side panel.
 - Calculates current simulation-time distance between two selected satellites.
 - Keeps propagation logic separate from Cesium rendering logic.
 
@@ -81,12 +82,14 @@ npm run start
 3. Confirm the Cesium Earth globe appears.
 4. Confirm sample satellites load from `/data/sample.tle`.
 5. Click each satellite in the left panel.
-6. Confirm the selected satellite details update.
+6. Confirm clicking a satellite toggles its orbit on/off.
 7. Use Play/Pause and speed controls.
 8. Toggle satellite labels.
-9. Toggle `Show all orbits`.
-10. Use `Range check` to select two satellites and confirm the distance line appears.
-11. Paste a CelesTrak URL and click `Load`.
+9. Toggle `Show all orbits` and confirm all orbit paths appear.
+10. Uncheck `Show all orbits` and confirm only selected satellite orbits appear.
+11. Click two satellites and confirm `Range check` updates to that pair.
+12. Confirm the dotted distance line appears between the two selected satellites.
+13. Paste a CelesTrak URL and click `Load`.
 
 Example endpoint:
 
@@ -233,6 +236,7 @@ Included:
 - Satellite propagation
 - Satellite markers and labels
 - Orbit visualization
+- Click-to-toggle orbit selection for up to 2 satellites
 - Distance/range check between two selected satellites
 - Play/pause/time speed controls
 - Selected satellite info panel

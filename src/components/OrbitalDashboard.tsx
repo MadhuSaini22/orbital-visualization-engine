@@ -29,26 +29,28 @@ function getTleFetchUrl(value: string) {
   return isExternalEndpoint(trimmed) ? `/api/tle?url=${encodeURIComponent(trimmed)}` : trimmed;
 }
 
-function getDefaultRangeIds(satellites: SatelliteObject[]) {
-  return {
-    primaryId: satellites[0]?.id ?? "",
-    secondaryId: satellites[1]?.id ?? "",
-  };
+function getInitialSelectedIds(satellites: SatelliteObject[]) {
+  return satellites.slice(0, 1).map((satellite) => satellite.id);
 }
 
 function getFirstDifferentSatelliteId(satellites: SatelliteObject[], id: string) {
   return satellites.find((satellite) => satellite.id !== id)?.id ?? "";
 }
 
+function getRangePair(selectedSatelliteIds: string[]) {
+  return {
+    primaryId: selectedSatelliteIds[0] ?? "",
+    secondaryId: selectedSatelliteIds[1] ?? "",
+  };
+}
+
 export function OrbitalDashboard() {
   const [tleUrl, setTleUrl] = useState(sampleUrl);
   const initialParsed = useMemo(() => parseTleText(sampleTle), []);
-  const initialRangeIds = useMemo(() => getDefaultRangeIds(initialParsed.satellites), [initialParsed.satellites]);
+  const initialSelectedSatelliteIds = useMemo(() => getInitialSelectedIds(initialParsed.satellites), [initialParsed.satellites]);
   const [satellites, setSatellites] = useState<SatelliteObject[]>(initialParsed.satellites);
   const [messages, setMessages] = useState<string[]>(initialParsed.errors);
-  const [selectedSatelliteId, setSelectedSatelliteId] = useState<string | null>(initialParsed.satellites[0]?.id ?? null);
-  const [rangePrimaryId, setRangePrimaryId] = useState(initialRangeIds.primaryId);
-  const [rangeSecondaryId, setRangeSecondaryId] = useState(initialRangeIds.secondaryId);
+  const [selectedSatelliteIds, setSelectedSatelliteIds] = useState<string[]>(initialSelectedSatelliteIds);
   const [simTime, setSimTime] = useState(() => initialSimulationTime);
   const [isPlaying, setIsPlaying] = useState(true);
   const [speed, setSpeed] = useState(60);
@@ -79,8 +81,10 @@ export function OrbitalDashboard() {
       trajectory: propagator.getTrajectory(satellite.id, startUtc, endUtc, 60),
     }));
   }, [propagator, satellites]);
-  const selectedSnapshot = snapshots.find((item) => item.satellite.id === selectedSatelliteId) ?? snapshots[0];
+  const latestSelectedId = selectedSatelliteIds.at(-1) ?? null;
+  const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
   const validCount = snapshots.filter((item) => item.state).length;
+  const { primaryId: rangePrimaryId, secondaryId: rangeSecondaryId } = getRangePair(selectedSatelliteIds);
   const primaryRangeSnapshot = snapshots.find((item) => item.satellite.id === rangePrimaryId);
   const secondaryRangeSnapshot = snapshots.find((item) => item.satellite.id === rangeSecondaryId);
   const rangeDistanceKm = distanceBetweenOrbitStatesKm(
@@ -98,13 +102,45 @@ export function OrbitalDashboard() {
 
   const loadTleText = useCallback((raw: string) => {
     const result = parseTleText(raw);
-    const defaultRangeIds = getDefaultRangeIds(result.satellites);
+    const defaultSelectedIds = getInitialSelectedIds(result.satellites);
     setMessages(result.errors);
     setSatellites(result.satellites);
-    setSelectedSatelliteId(result.satellites[0]?.id ?? null);
-    setRangePrimaryId(defaultRangeIds.primaryId);
-    setRangeSecondaryId(defaultRangeIds.secondaryId);
+    setSelectedSatelliteIds(defaultSelectedIds);
   }, []);
+
+  const toggleSatelliteSelection = useCallback((satelliteId: string) => {
+    setSelectedSatelliteIds((current) => {
+      if (current.includes(satelliteId)) {
+        return current.filter((id) => id !== satelliteId);
+      }
+
+      if (current.length >= 2) {
+        return [current[1], satelliteId];
+      }
+
+      return [...current, satelliteId];
+    });
+  }, []);
+
+  const updateRangePrimary = useCallback((satelliteId: string) => {
+    setSelectedSatelliteIds((current) => {
+      const currentSecondaryId = current[1] && current[1] !== satelliteId
+        ? current[1]
+        : getFirstDifferentSatelliteId(satellites, satelliteId);
+
+      return currentSecondaryId ? [satelliteId, currentSecondaryId] : [satelliteId];
+    });
+  }, [satellites]);
+
+  const updateRangeSecondary = useCallback((satelliteId: string) => {
+    setSelectedSatelliteIds((current) => {
+      const currentPrimaryId = current[0] && current[0] !== satelliteId
+        ? current[0]
+        : getFirstDifferentSatelliteId(satellites, satelliteId);
+
+      return currentPrimaryId ? [currentPrimaryId, satelliteId] : [satelliteId];
+    });
+  }, [satellites]);
 
   const loadFromUrl = useCallback(async () => {
     const source = tleUrl.trim();
@@ -132,6 +168,7 @@ export function OrbitalDashboard() {
     } catch (error) {
       setMessages([error instanceof Error ? error.message : "Unable to load TLE data from the URL."]);
       setSatellites([]);
+      setSelectedSatelliteIds([]);
     }
   }, [loadTleText, tleUrl]);
 
@@ -263,6 +300,10 @@ export function OrbitalDashboard() {
                 className="h-4 w-4 accent-cyan-300"
               />
             </label>
+            <div className="flex items-center justify-between rounded-md border border-white/10 px-3 py-2 text-sm text-zinc-300">
+              Selected orbits
+              <span className="font-mono text-xs text-cyan-200">{selectedSatelliteIds.length}/2</span>
+            </div>
             <label className="flex items-center justify-between rounded-md border border-white/10 px-3 py-2 text-sm text-zinc-300">
               Show all orbits
               <input
@@ -289,15 +330,10 @@ export function OrbitalDashboard() {
                 <div className="grid gap-2">
                   <select
                     value={rangePrimaryId}
-                    onChange={(event) => {
-                      const nextPrimaryId = event.target.value;
-                      setRangePrimaryId(nextPrimaryId);
-                      if (nextPrimaryId === rangeSecondaryId) {
-                        setRangeSecondaryId(getFirstDifferentSatelliteId(satellites, nextPrimaryId));
-                      }
-                    }}
+                    onChange={(event) => updateRangePrimary(event.target.value)}
                     className="rounded-md border border-white/10 bg-[#11151d] px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-cyan-300"
                   >
+                    {!rangePrimaryId && <option value="">Primary: Select satellite</option>}
                     {satellites.map((satellite) => (
                       <option key={satellite.id} value={satellite.id}>
                         Primary: {satellite.name}
@@ -306,9 +342,10 @@ export function OrbitalDashboard() {
                   </select>
                   <select
                     value={rangeSecondaryId}
-                    onChange={(event) => setRangeSecondaryId(event.target.value)}
+                    onChange={(event) => updateRangeSecondary(event.target.value)}
                     className="rounded-md border border-white/10 bg-[#11151d] px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-cyan-300"
                   >
+                    {!rangeSecondaryId && <option value="">Secondary: Select satellite</option>}
                     {satellites.map((satellite) => (
                       <option key={satellite.id} value={satellite.id} disabled={satellite.id === rangePrimaryId}>
                         Secondary: {satellite.name}
@@ -317,7 +354,7 @@ export function OrbitalDashboard() {
                   </select>
                 </div>
                 <p className="text-xs leading-5 text-zinc-500">
-                  Distance is calculated at the current simulation time.
+                  Click satellites on the globe or list to toggle their orbit. Distance appears when 2 are selected.
                 </p>
               </>
             )}
@@ -329,15 +366,22 @@ export function OrbitalDashboard() {
               {snapshots.map((snapshot) => (
                 <button
                   key={snapshot.satellite.id}
-                  onClick={() => setSelectedSatelliteId(snapshot.satellite.id)}
+                  onClick={() => toggleSatelliteSelection(snapshot.satellite.id)}
                   className={`w-full rounded-md border px-3 py-2 text-left transition ${
-                    selectedSatelliteId === snapshot.satellite.id
+                    selectedSatelliteIds.includes(snapshot.satellite.id)
                       ? "border-cyan-300 bg-cyan-300/10"
                       : "border-white/10 bg-black/20 hover:border-white/30"
                   }`}
                 >
-                  <span className="block text-sm font-medium text-white">{snapshot.satellite.name}</span>
-                  <span className="font-mono text-xs text-zinc-500">NORAD {snapshot.satellite.id}</span>
+                  <span className="flex items-center justify-between gap-2 text-sm font-medium text-white">
+                    {snapshot.satellite.name}
+                    {selectedSatelliteIds.includes(snapshot.satellite.id) && (
+                      <span className="rounded bg-cyan-300/10 px-2 py-0.5 font-mono text-[11px] text-cyan-200">
+                        SAT {selectedSatelliteIds.indexOf(snapshot.satellite.id) + 1}
+                      </span>
+                    )}
+                  </span>
+                  <span className="mt-1 block font-mono text-xs text-zinc-500">NORAD {snapshot.satellite.id}</span>
                 </button>
               ))}
             </div>
@@ -350,10 +394,10 @@ export function OrbitalDashboard() {
               snapshots={snapshots}
               orbitSnapshots={orbitSnapshots}
               rangeMeasurement={rangeMeasurement}
-              selectedSatelliteId={selectedSatelliteId}
+              selectedSatelliteIds={selectedSatelliteIds}
               showAllOrbits={showAllOrbits}
               showLabels={showLabels}
-              onSelectSatellite={setSelectedSatelliteId}
+              onToggleSatellite={toggleSatelliteSelection}
               resetSignal={resetSignal}
             />
           </div>

@@ -12,10 +12,10 @@ type CesiumGlobeProps = {
   snapshots: SatelliteSnapshot[];
   orbitSnapshots: SatelliteSnapshot[];
   rangeMeasurement: RangeMeasurement | null;
-  selectedSatelliteId: string | null;
+  selectedSatelliteIds: string[];
   showAllOrbits: boolean;
   showLabels: boolean;
-  onSelectSatellite: (satelliteId: string) => void;
+  onToggleSatellite: (satelliteId: string) => void;
   resetSignal: number;
 };
 
@@ -67,10 +67,10 @@ export function CesiumGlobe({
   snapshots,
   orbitSnapshots,
   rangeMeasurement,
-  selectedSatelliteId,
+  selectedSatelliteIds,
   showAllOrbits,
   showLabels,
-  onSelectSatellite,
+  onToggleSatellite,
   resetSignal,
 }: CesiumGlobeProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -140,7 +140,7 @@ export function CesiumGlobe({
         const picked = viewer.scene.pick(movement.position);
         const pickedId = picked?.id?.properties?.satelliteId?.getValue();
         if (typeof pickedId === "string") {
-          onSelectSatellite(pickedId);
+          onToggleSatellite(pickedId);
         }
       }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
       handler.setInputAction((movement: import("cesium").ScreenSpaceEventHandler.MotionEvent) => {
@@ -185,7 +185,7 @@ export function CesiumGlobe({
       entityMap.clear();
       orbitEntityMap.clear();
     };
-  }, [onSelectSatellite]);
+  }, [onToggleSatellite]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;
@@ -207,7 +207,7 @@ export function CesiumGlobe({
         return;
       }
 
-      const isSelected = snapshot.satellite.id === selectedSatelliteId;
+      const isSelected = selectedSatelliteIds.includes(snapshot.satellite.id);
       const color = Cesium.Color.fromCssColorString(palette[index % palette.length]);
       const position = stateToCartesian(Cesium, snapshot.state);
 
@@ -258,7 +258,7 @@ export function CesiumGlobe({
         entity.label.scale = new Cesium.ConstantProperty(isSelected ? 1.08 : 0.95);
       }
     });
-  }, [snapshots, selectedSatelliteId, showLabels, viewerReady]);
+  }, [snapshots, selectedSatelliteIds, showLabels, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;
@@ -269,7 +269,7 @@ export function CesiumGlobe({
 
     const visibleOrbitSnapshots = showAllOrbits
       ? orbitSnapshots
-      : orbitSnapshots.filter((item) => item.satellite.id === selectedSatelliteId);
+      : orbitSnapshots.filter((item) => selectedSatelliteIds.includes(item.satellite.id));
     const activeIds = new Set(visibleOrbitSnapshots.map((item) => item.satellite.id));
     for (const [id, entity] of orbitEntitiesRef.current) {
       if (!activeIds.has(id)) {
@@ -279,7 +279,7 @@ export function CesiumGlobe({
     }
 
     visibleOrbitSnapshots.forEach((snapshot, index) => {
-      const isSelected = snapshot.satellite.id === selectedSatelliteId;
+      const isSelected = selectedSatelliteIds.includes(snapshot.satellite.id);
       const color = Cesium.Color.fromCssColorString(palette[index % palette.length]);
       const orbitColor = isSelected ? color : color.withAlpha(0.55);
       const orbitPositions: Cartesian3[] =
@@ -314,7 +314,7 @@ export function CesiumGlobe({
         );
       }
     });
-  }, [orbitSnapshots, selectedSatelliteId, showAllOrbits, viewerReady]);
+  }, [orbitSnapshots, selectedSatelliteIds, showAllOrbits, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;
