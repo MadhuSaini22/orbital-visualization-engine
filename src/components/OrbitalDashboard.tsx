@@ -19,6 +19,15 @@ const CesiumGlobe = dynamic(
 const sampleUrl = "/data/sample.tle";
 const initialSimulationTime = new Date("2026-05-08T00:00:00.000Z");
 
+function isExternalEndpoint(value: string) {
+  return /^https?:\/\//i.test(value.trim());
+}
+
+function getTleFetchUrl(value: string) {
+  const trimmed = value.trim();
+  return isExternalEndpoint(trimmed) ? `/api/tle?url=${encodeURIComponent(trimmed)}` : trimmed;
+}
+
 export function OrbitalDashboard() {
   const [tleUrl, setTleUrl] = useState(sampleUrl);
   const initialParsed = useMemo(() => parseTleText(sampleTle), []);
@@ -66,11 +75,26 @@ export function OrbitalDashboard() {
   }, []);
 
   const loadFromUrl = useCallback(async () => {
-    setMessages([`Loading TLE data from ${tleUrl}...`]);
+    const source = tleUrl.trim();
+    if (!source) {
+      setMessages(["Enter a TLE endpoint URL before loading."]);
+      return;
+    }
+
+    setMessages([`Loading TLE data from ${source}...`]);
     try {
-      const response = await fetch(tleUrl, { cache: "no-store" });
+      const response = await fetch(getTleFetchUrl(source), { cache: "no-store" });
       if (!response.ok) {
-        throw new Error(`Request failed with ${response.status}`);
+        let message = `Request failed with ${response.status}`;
+        try {
+          const body = await response.json();
+          if (typeof body.error === "string") {
+            message = body.error;
+          }
+        } catch {
+          // The endpoint may return plain text for non-JSON errors.
+        }
+        throw new Error(message);
       }
       loadTleText(await response.text());
     } catch (error) {
@@ -109,18 +133,18 @@ export function OrbitalDashboard() {
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-300">Phase 0</p>
             <h1 className="text-2xl font-semibold text-white">Orbital Viewer</h1>
             <p className="text-sm leading-6 text-zinc-400">
-              Load up to {MAX_TLE_OBJECTS} TLE objects, inspect satellites, and view orbit arcs around Earth.
+              Load up to {MAX_TLE_OBJECTS} TLE objects from a TLE endpoint, inspect satellites, and view orbit arcs.
             </p>
           </div>
 
           <section className="mt-6 space-y-3">
-            <label className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">TLE source</label>
+            <label className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">TLE endpoint</label>
             <div className="flex gap-2">
               <input
                 value={tleUrl}
                 onChange={(event) => setTleUrl(event.target.value)}
                 className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-cyan-300"
-                placeholder="/data/sample.tle"
+                placeholder="https://celestrak.org/NORAD/elements/gp.php?CATNR=25544"
               />
               <button
                 onClick={loadFromUrl}
