@@ -1,0 +1,73 @@
+{
+  "satellites": [
+    {
+      "id": "25544",
+      "name": "ISS (ZARYA)",
+      "noradId": "25544",
+      "sourceType": "TLE",
+      "tle": {
+        "line1": "1 25544U 98067A   26128.19937109  .00004920  00000+0  96926-4 0  9998",
+        "line2": "2 25544  51.6308 138.0417 0007476  35.9089 324.2400 15.49139257565554"
+      },
+      "visual": {
+        "color": "#63e6be",
+        "showMarker": true,
+        "showLabel": true,
+        "showOrbit": true,
+        "showGroundTrack": true,
+        "showTrail": true
+      },
+      "metadata": {
+        "owner": "International",
+        "mission": "Crewed LEO platform",
+        "objectType": "payload"
+      }
+    },
+    {
+      "id": "33591",
+      "name": "NOAA 19",
+      "noradId": "33591",
+      "sourceType": "TLE",
+      "tle": {
+        "line1": "1 33591U 09005A   26127.80537625  .00000077  00000+0  74208-4 0  9997",
+        "line2": "2 33591  99.1938 155.2748 0014341 119.2104 241.0501 14.12516480888880"
+      },
+      "visual": {
+        "color": "#74c0fc",
+        "showMarker": true,
+        "showLabel": true,
+        "showOrbit": true,
+        "showGroundTrack": false,
+        "showTrail": false
+      },
+      "metadata": {
+        "owner": "NOAA",
+        "mission": "Weather observation",
+        "objectType": "payload"
+      }
+    },
+    {
+      "id": "39084",
+      "name": "LANDSAT 8",
+      "noradId": "39084",
+      "sourceType": "TLE",
+      "tle": {
+        "line1": "1 39084U 13008A   26127.83261343  .00001563  00000+0  34857-3 0  9998",
+        "line2": "2 39084  98.2088 204.2315 0001293  90.7148 269.4201 14.57111222699994"
+      },
+      "visual": {
+        "color": "#ffd43b",
+        "showMarker": true,
+        "showLabel": true,
+        "showOrbit": true,
+        "showGroundTrack": false,
+        "showTrail": false
+      },
+      "metadata": {
+        "owner": "NASA/USGS",
+        "mission": "Earth observation",
+        "objectType": "payload"
+      }
+    }
+  ]
+}

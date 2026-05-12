@@ -2,12 +2,14 @@
 
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { SatelliteObject, SatelliteSnapshot } from "@/domain/orbit";
+import type { SatelliteObject, SatelliteSnapshot, SatelliteVisualSettings } from "@/domain/orbit";
 import { sampleTle } from "@/data/sampleTle";
-import { MAX_TLE_OBJECTS, parseTleText } from "@/domain/tle";
+import { parseSatelliteSource } from "@/domain/satelliteConfig";
+import { MAX_TLE_OBJECTS } from "@/domain/tle";
 import { distanceBetweenOrbitStatesKm } from "@/geometry/distance";
 import { formatNumber, formatUtc } from "@/geometry/format";
 import { SatelliteJsPropagator } from "@/propagation/SatelliteJsPropagator";
+import { StateCacheService } from "@/services/StateCacheService";
 
 const CesiumGlobe = dynamic(
   () => import("@/components/CesiumGlobe").then((mod) => mod.CesiumGlobe),
@@ -19,6 +21,12 @@ const CesiumGlobe = dynamic(
 
 const sampleUrl = "/data/sample.tle";
 const initialSimulationTime = new Date("2026-05-08T00:00:00.000Z");
+const trajectoryOptions = {
+  futureMinutes: 110,
+  pastMinutes: 35,
+  stepSec: 60,
+};
+const trajectoryBucketMs = 5 * 60 * 1000;
 
 function isExternalEndpoint(value: string) {
   return /^https?:\/\//i.test(value.trim());
@@ -46,7 +54,7 @@ function getRangePair(selectedSatelliteIds: string[]) {
 
 export function OrbitalDashboard() {
   const [tleUrl, setTleUrl] = useState(sampleUrl);
-  const initialParsed = useMemo(() => parseTleText(sampleTle), []);
+  const initialParsed = useMemo(() => parseSatelliteSource(sampleTle), []);
   const initialSelectedSatelliteIds = useMemo(() => getInitialSelectedIds(initialParsed.satellites), [initialParsed.satellites]);
   const [satellites, setSatellites] = useState<SatelliteObject[]>(initialParsed.satellites);
   const [messages, setMessages] = useState<string[]>(initialParsed.errors);
@@ -57,30 +65,18 @@ export function OrbitalDashboard() {
   const [showLabels, setShowLabels] = useState(true);
   const [showAllOrbits, setShowAllOrbits] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
+  const [focusRequest, setFocusRequest] = useState<{ satelliteId: string; sequence: number } | null>(null);
   const lastTickRef = useRef<number | null>(null);
 
   const propagator = useMemo(() => new SatelliteJsPropagator(satellites), [satellites]);
+  const stateCache = useMemo(() => new StateCacheService(propagator, satellites), [propagator, satellites]);
+  const trajectoryAnchorMs = Math.floor(simTime.getTime() / trajectoryBucketMs) * trajectoryBucketMs;
   const snapshots: SatelliteSnapshot[] = useMemo(() => {
-    const timeUtc = simTime.toISOString();
-    return satellites.map((satellite) => {
-      const state = propagator.getState(satellite.id, timeUtc);
-      return {
-        satellite,
-        state,
-        error: state ? undefined : "No propagated position for this time.",
-      };
-    });
-  }, [propagator, satellites, simTime]);
+    return stateCache.getCurrentSnapshots(simTime.toISOString());
+  }, [stateCache, simTime]);
   const orbitSnapshots: SatelliteSnapshot[] = useMemo(() => {
-    const startUtc = initialSimulationTime.toISOString();
-    const endUtc = new Date(initialSimulationTime.getTime() + 110 * 60 * 1000).toISOString();
-
-    return satellites.map((satellite) => ({
-      satellite,
-      state: null,
-      trajectory: propagator.getTrajectory(satellite.id, startUtc, endUtc, 60),
-    }));
-  }, [propagator, satellites]);
+    return stateCache.getWindowedSnapshots(new Date(trajectoryAnchorMs).toISOString(), trajectoryOptions);
+  }, [stateCache, trajectoryAnchorMs]);
   const latestSelectedId = selectedSatelliteIds.at(-1) ?? null;
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
   const validCount = snapshots.filter((item) => item.state).length;
@@ -101,12 +97,58 @@ export function OrbitalDashboard() {
       : null;
 
   const loadTleText = useCallback((raw: string) => {
-    const result = parseTleText(raw);
+    const result = parseSatelliteSource(raw);
     const defaultSelectedIds = getInitialSelectedIds(result.satellites);
     setMessages(result.errors);
     setSatellites(result.satellites);
     setSelectedSatelliteIds(defaultSelectedIds);
   }, []);
+
+  const updateSatelliteVisual = useCallback((
+    satelliteId: string,
+    key: keyof SatelliteVisualSettings,
+    value: boolean,
+  ) => {
+    setSatellites((current) =>
+      current.map((satellite) =>
+        satellite.id === satelliteId
+          ? {
+              ...satellite,
+              visual: {
+                ...satellite.visual,
+                [key]: value,
+              },
+            }
+          : satellite,
+      ),
+    );
+  }, []);
+
+  const keepSatelliteInSelection = useCallback((satelliteId: string) => {
+    setSelectedSatelliteIds((current) => {
+      if (current.includes(satelliteId)) {
+        return current;
+      }
+
+      if (current.length >= 2) {
+        return [current[1], satelliteId];
+      }
+
+      return [...current, satelliteId];
+    });
+  }, []);
+
+  const updateSatelliteLayer = useCallback((
+    satelliteId: string,
+    key: keyof SatelliteVisualSettings,
+    value: boolean,
+  ) => {
+    updateSatelliteVisual(satelliteId, key, value);
+
+    if (value && ["showOrbit", "showTrail", "showGroundTrack"].includes(key)) {
+      keepSatelliteInSelection(satelliteId);
+    }
+  }, [keepSatelliteInSelection, updateSatelliteVisual]);
 
   const toggleSatelliteSelection = useCallback((satelliteId: string) => {
     setSelectedSatelliteIds((current) => {
@@ -173,25 +215,22 @@ export function OrbitalDashboard() {
   }, [loadTleText, tleUrl]);
 
   useEffect(() => {
-    let frameId = 0;
+    lastTickRef.current = Date.now();
 
-    function tick(now: number) {
-      if (lastTickRef.current === null) {
-        lastTickRef.current = now;
-      }
-
-      const elapsedMs = now - lastTickRef.current;
+    const intervalId = window.setInterval(() => {
+      const now = Date.now();
+      const elapsedMs = lastTickRef.current === null ? 0 : Math.min(now - lastTickRef.current, 1000);
       lastTickRef.current = now;
 
-      if (isPlaying) {
-        setSimTime((current) => new Date(current.getTime() + elapsedMs * speed));
+      if (isPlaying && elapsedMs > 0) {
+        setSimTime((current) => {
+          const nextTime = current.getTime() + elapsedMs * speed;
+          return nextTime === current.getTime() ? current : new Date(nextTime);
+        });
       }
+    }, 1000);
 
-      frameId = requestAnimationFrame(tick);
-    }
-
-    frameId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frameId);
+    return () => window.clearInterval(intervalId);
   }, [isPlaying, speed]);
 
   return (
@@ -199,21 +238,21 @@ export function OrbitalDashboard() {
       <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[360px_1fr]">
         <aside className="border-b border-white/10 bg-[#11151d] p-5 lg:border-r lg:border-b-0">
           <div className="space-y-1">
-            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-300">Phase 0</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-300">Phase 1</p>
             <h1 className="text-2xl font-semibold text-white">Orbital Viewer</h1>
             <p className="text-sm leading-6 text-zinc-400">
-              Load up to {MAX_TLE_OBJECTS} TLE objects from a TLE endpoint, inspect satellites, and view orbit arcs.
+              Load up to {MAX_TLE_OBJECTS} TLE objects or a JSON config, inspect satellites, and view orbit layers.
             </p>
           </div>
 
           <section className="mt-6 space-y-3">
-            <label className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">TLE endpoint</label>
+            <label className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">TLE / JSON endpoint</label>
             <div className="flex gap-2">
               <input
                 value={tleUrl}
                 onChange={(event) => setTleUrl(event.target.value)}
                 className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-cyan-300"
-                placeholder="https://celestrak.org/NORAD/elements/gp.php?CATNR=25544"
+                placeholder="/data/satellites.json"
               />
               <button
                 onClick={loadFromUrl}
@@ -226,7 +265,7 @@ export function OrbitalDashboard() {
             <label className="block rounded-md border border-dashed border-white/15 bg-black/20 px-3 py-3 text-sm text-zinc-300 transition hover:border-cyan-300/60">
               <input
                 type="file"
-                accept=".tle,.txt"
+                accept=".tle,.txt,.json"
                 className="sr-only"
                 onChange={async (event) => {
                   const file = event.target.files?.[0];
@@ -235,7 +274,7 @@ export function OrbitalDashboard() {
                   }
                 }}
               />
-              Choose local TLE file
+              Choose local TLE or JSON file
             </label>
           </section>
 
@@ -354,7 +393,7 @@ export function OrbitalDashboard() {
                   </select>
                 </div>
                 <p className="text-xs leading-5 text-zinc-500">
-                  Click satellites on the globe or list to toggle their orbit. Distance appears when 2 are selected.
+                  Click satellites on the globe or list to select up to 2. Distance appears when 2 are selected.
                 </p>
               </>
             )}
@@ -364,25 +403,80 @@ export function OrbitalDashboard() {
             <label className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Satellites</label>
             <div className="max-h-64 space-y-2 overflow-auto pr-1">
               {snapshots.map((snapshot) => (
-                <button
+                <div
                   key={snapshot.satellite.id}
-                  onClick={() => toggleSatelliteSelection(snapshot.satellite.id)}
                   className={`w-full rounded-md border px-3 py-2 text-left transition ${
                     selectedSatelliteIds.includes(snapshot.satellite.id)
                       ? "border-cyan-300 bg-cyan-300/10"
                       : "border-white/10 bg-black/20 hover:border-white/30"
                   }`}
                 >
-                  <span className="flex items-center justify-between gap-2 text-sm font-medium text-white">
-                    {snapshot.satellite.name}
-                    {selectedSatelliteIds.includes(snapshot.satellite.id) && (
-                      <span className="rounded bg-cyan-300/10 px-2 py-0.5 font-mono text-[11px] text-cyan-200">
-                        SAT {selectedSatelliteIds.indexOf(snapshot.satellite.id) + 1}
-                      </span>
-                    )}
-                  </span>
-                  <span className="mt-1 block font-mono text-xs text-zinc-500">NORAD {snapshot.satellite.id}</span>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => toggleSatelliteSelection(snapshot.satellite.id)}
+                    className="w-full text-left"
+                  >
+                    <span className="flex items-center justify-between gap-2 text-sm font-medium text-white">
+                      {snapshot.satellite.name}
+                      {selectedSatelliteIds.includes(snapshot.satellite.id) && (
+                        <span className="rounded bg-cyan-300/10 px-2 py-0.5 font-mono text-[11px] text-cyan-200">
+                          SAT {selectedSatelliteIds.indexOf(snapshot.satellite.id) + 1}
+                        </span>
+                      )}
+                    </span>
+                    <span className="mt-1 block font-mono text-xs text-zinc-500">
+                      NORAD {snapshot.satellite.noradId ?? snapshot.satellite.id}
+                    </span>
+                  </button>
+                  <div className="mt-3 grid grid-cols-3 gap-2">
+                    <VisualToggle
+                      label="Orbit"
+                      description="future path"
+                      checked={snapshot.satellite.visual.showOrbit}
+                      onChange={(checked) => updateSatelliteLayer(snapshot.satellite.id, "showOrbit", checked)}
+                    />
+                    <VisualToggle
+                      label="Trail"
+                      description="recent path"
+                      checked={snapshot.satellite.visual.showTrail}
+                      onChange={(checked) => updateSatelliteLayer(snapshot.satellite.id, "showTrail", checked)}
+                    />
+                    <VisualToggle
+                      label="Ground"
+                      description="map trace"
+                      checked={snapshot.satellite.visual.showGroundTrack}
+                      onChange={(checked) => updateSatelliteLayer(snapshot.satellite.id, "showGroundTrack", checked)}
+                    />
+                  </div>
+                  <div className="mt-2 grid grid-cols-3 gap-2">
+                    <VisualToggle
+                      label="Marker"
+                      description="dot"
+                      checked={snapshot.satellite.visual.showMarker}
+                      onChange={(checked) => updateSatelliteVisual(snapshot.satellite.id, "showMarker", checked)}
+                    />
+                    <VisualToggle
+                      label="Label"
+                      description="name"
+                      checked={snapshot.satellite.visual.showLabel}
+                      onChange={(checked) => updateSatelliteVisual(snapshot.satellite.id, "showLabel", checked)}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        keepSatelliteInSelection(snapshot.satellite.id);
+                        setFocusRequest((request) => ({
+                          satelliteId: snapshot.satellite.id,
+                          sequence: (request?.sequence ?? 0) + 1,
+                        }));
+                      }}
+                      className="rounded border border-white/10 px-2 py-1 text-xs text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100"
+                      title="Move camera near this satellite"
+                    >
+                      Focus
+                    </button>
+                  </div>
+                </div>
               ))}
             </div>
           </section>
@@ -397,6 +491,7 @@ export function OrbitalDashboard() {
               selectedSatelliteIds={selectedSatelliteIds}
               showAllOrbits={showAllOrbits}
               showLabels={showLabels}
+              focusRequest={focusRequest}
               onToggleSatellite={toggleSatelliteSelection}
               resetSignal={resetSignal}
             />
@@ -404,10 +499,13 @@ export function OrbitalDashboard() {
 
           <div className="mt-4 grid gap-3 md:grid-cols-4">
             <Detail label="Selected" value={selectedSnapshot?.satellite.name ?? "--"} />
+            <Detail label="NORAD" value={selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? "--"} />
             <Detail label="Latitude" value={`${formatNumber(selectedSnapshot?.state?.latitudeDeg)} deg`} />
             <Detail label="Longitude" value={`${formatNumber(selectedSnapshot?.state?.longitudeDeg)} deg`} />
             <Detail label="Altitude" value={`${formatNumber(selectedSnapshot?.state?.altitudeKm)} km`} />
             <Detail label="Velocity" value={`${formatNumber(selectedSnapshot?.state?.velocityKmps)} km/s`} />
+            <Detail label="Source" value={selectedSnapshot?.satellite.sourceType ?? "--"} />
+            <Detail label="Mission" value={selectedSnapshot?.satellite.metadata?.mission ?? "--"} />
             <Detail label="Frame" value={selectedSnapshot?.state?.frame ?? "--"} />
             <Detail label="Objects cap" value={`${MAX_TLE_OBJECTS} max`} />
             <Detail label="Source entries" value={`${satellites.length} loaded`} />
@@ -415,6 +513,35 @@ export function OrbitalDashboard() {
         </section>
       </div>
     </main>
+  );
+}
+
+function VisualToggle({
+  label,
+  description,
+  checked,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={checked}
+      onClick={() => onChange(!checked)}
+      className={`rounded border px-2 py-1 text-left transition ${
+        checked
+          ? "border-cyan-300/70 bg-cyan-300/10 text-cyan-100"
+          : "border-white/10 text-zinc-400 hover:border-white/30 hover:text-zinc-200"
+      }`}
+      title={`${label}: ${description}`}
+    >
+      <span className="block text-[11px] font-medium">{label}</span>
+      <span className="block text-[10px] text-zinc-500">{description}</span>
+    </button>
   );
 }
 

@@ -2,6 +2,14 @@ import type { SatelliteObject } from "@/domain/orbit";
 
 export const MAX_TLE_OBJECTS = 15;
 
+export const DEFAULT_SATELLITE_VISUAL = {
+  showMarker: true,
+  showLabel: true,
+  showOrbit: true,
+  showGroundTrack: false,
+  showTrail: false,
+} as const;
+
 export type TleParseResult = {
   satellites: SatelliteObject[];
   errors: string[];
@@ -84,7 +92,10 @@ export function parseTleText(raw: string): TleParseResult {
     satellites.push({
       id: idFromLine1 || `sat-${satellites.length + 1}`,
       name,
+      noradId: idFromLine1,
+      sourceType: "TLE",
       tle: { line1, line2 },
+      visual: { ...DEFAULT_SATELLITE_VISUAL },
     });
 
     index += hasName ? 3 : 2;

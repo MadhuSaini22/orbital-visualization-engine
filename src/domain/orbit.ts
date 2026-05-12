@@ -1,9 +1,26 @@
+export type SatelliteVisualSettings = {
+  color?: string;
+  showMarker: boolean;
+  showLabel: boolean;
+  showOrbit: boolean;
+  showGroundTrack: boolean;
+  showTrail: boolean;
+};
+
 export type SatelliteObject = {
   id: string;
   name: string;
+  noradId?: string;
+  sourceType: "TLE" | "EPHEMERIS" | "MANUAL_STATE";
   tle: {
     line1: string;
     line2: string;
+  };
+  visual: SatelliteVisualSettings;
+  metadata?: {
+    owner?: string;
+    mission?: string;
+    objectType?: "payload" | "debris" | "rocket_body" | "unknown";
   };
 };
 
@@ -24,6 +41,9 @@ export type SatelliteSnapshot = {
   satellite: SatelliteObject;
   state: OrbitState | null;
   trajectory?: OrbitState[];
+  futureTrajectory?: OrbitState[];
+  pastTrail?: OrbitState[];
+  groundTrack?: OrbitState[];
   error?: string;
 };
 
