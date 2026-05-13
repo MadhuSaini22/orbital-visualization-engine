@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { OrbitState, RangeMeasurement, SatelliteSnapshot } from "@/domain/orbit";
+import type { ManeuverSnapshot } from "@/domain/maneuver";
+import { getManeuverTone } from "@/domain/maneuver";
 import { splitGroundTrackByLongitudeWrap } from "@/geometry/groundTrack";
 
 type CesiumModule = typeof import("cesium");
@@ -18,6 +20,10 @@ type CesiumGlobeProps = {
   showAllOrbits: boolean;
   showLabels: boolean;
   focusRequest: { satelliteId: string; sequence: number } | null;
+  maneuverSnapshots: ManeuverSnapshot[];
+  selectedManeuverId: string | null;
+  showManeuvers: boolean;
+  onSelectManeuver: (maneuverId: string) => void;
   onToggleSatellite: (satelliteId: string) => void;
   resetSignal: number;
 };
@@ -72,6 +78,10 @@ export function CesiumGlobe({
   showAllOrbits,
   showLabels,
   focusRequest,
+  maneuverSnapshots,
+  selectedManeuverId,
+  showManeuvers,
+  onSelectManeuver,
   onToggleSatellite,
   resetSignal,
 }: CesiumGlobeProps) {
@@ -83,6 +93,7 @@ export function CesiumGlobe({
   const rangeEntityRef = useRef<Entity | null>(null);
   const rangeLabelEntityRef = useRef<Entity | null>(null);
   const rangeDotEntitiesRef = useRef<Entity[]>([]);
+  const maneuverEntitiesRef = useRef<Map<string, Entity>>(new Map());
   const latestSnapshotsRef = useRef<SatelliteSnapshot[]>(snapshots);
   const hoverInfoRef = useRef<HoverInfo>(null);
   const [layerStats, setLayerStats] = useState({
@@ -130,6 +141,7 @@ export function CesiumGlobe({
   useEffect(() => {
     let isMounted = true;
     const entityMap = entitiesRef.current;
+    const maneuverEntityMap = maneuverEntitiesRef.current;
 
     async function boot() {
       if (!containerRef.current || viewerRef.current) {
@@ -186,6 +198,12 @@ export function CesiumGlobe({
       const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
       handler.setInputAction((movement: import("cesium").ScreenSpaceEventHandler.PositionedEvent) => {
         const picked = viewer.scene.pick(movement.position);
+        const pickedManeuverId = picked?.id?.properties?.maneuverId?.getValue();
+        if (typeof pickedManeuverId === "string") {
+          onSelectManeuver(pickedManeuverId);
+          return;
+        }
+
         const pickedId = picked?.id?.properties?.satelliteId?.getValue();
         if (typeof pickedId === "string") {
           onToggleSatellite(pickedId);
@@ -230,11 +248,12 @@ export function CesiumGlobe({
       rangeEntityRef.current = null;
       rangeLabelEntityRef.current = null;
       rangeDotEntitiesRef.current = [];
+      maneuverEntityMap.clear();
       pathPrimitiveRef.current = null;
       hoverInfoRef.current = null;
       entityMap.clear();
     };
-  }, [onToggleSatellite]);
+  }, [onSelectManeuver, onToggleSatellite]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;
@@ -430,6 +449,80 @@ export function CesiumGlobe({
     });
     viewer.scene.requestRender();
   }, [orbitSnapshots, selectedSatelliteIds, showAllOrbits, viewerReady]);
+
+  useEffect(() => {
+    const Cesium = cesiumRef.current;
+    const viewer = viewerRef.current;
+    if (!viewerReady || !Cesium || !viewer) {
+      return;
+    }
+
+    const activeManeuverIds = new Set(
+      showManeuvers ? maneuverSnapshots.map((snapshot) => snapshot.event.id) : [],
+    );
+
+    for (const [id, entity] of maneuverEntitiesRef.current) {
+      if (!activeManeuverIds.has(id)) {
+        viewer.entities.remove(entity);
+        maneuverEntitiesRef.current.delete(id);
+      }
+    }
+
+    if (!showManeuvers) {
+      return;
+    }
+
+    maneuverSnapshots.forEach((maneuverSnapshot) => {
+      if (!maneuverSnapshot.state) {
+        return;
+      }
+
+      const tone = getManeuverTone(maneuverSnapshot.event.status);
+      const color = Cesium.Color.fromCssColorString(tone.color);
+      const isSelected = selectedManeuverId === maneuverSnapshot.event.id;
+      const position = stateToCartesian(Cesium, maneuverSnapshot.state);
+      let entity = maneuverEntitiesRef.current.get(maneuverSnapshot.event.id);
+
+      if (!entity) {
+        entity = viewer.entities.add({
+          id: maneuverSnapshot.event.id,
+          name: maneuverSnapshot.event.title,
+          position,
+          point: {
+            color: color.withAlpha(0.95),
+            pixelSize: isSelected ? 17 : 12,
+            outlineColor: Cesium.Color.WHITE,
+            outlineWidth: isSelected ? 3 : 1.5,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+          label: {
+            text: "MNV",
+            font: "800 12px monospace",
+            fillColor: color.brighten(0.25, new Cesium.Color()),
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 2,
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            pixelOffset: new Cesium.Cartesian2(0, -30),
+            showBackground: true,
+            backgroundColor: Cesium.Color.BLACK.withAlpha(0.72),
+            backgroundPadding: new Cesium.Cartesian2(7, 4),
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+          properties: {
+            maneuverId: maneuverSnapshot.event.id,
+          },
+        });
+        maneuverEntitiesRef.current.set(maneuverSnapshot.event.id, entity);
+      }
+
+      entity.position = new Cesium.ConstantPositionProperty(position);
+      if (entity.point) {
+        entity.point.pixelSize = new Cesium.ConstantProperty(isSelected ? 17 : 12);
+        entity.point.color = new Cesium.ConstantProperty(color.withAlpha(isSelected ? 1 : 0.82));
+      }
+    });
+    viewer.scene.requestRender();
+  }, [maneuverSnapshots, selectedManeuverId, showManeuvers, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;

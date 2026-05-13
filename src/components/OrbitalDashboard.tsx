@@ -7,6 +7,9 @@ import type { SatelliteObject, SatelliteSnapshot, SatelliteVisualSettings } from
 import { GroundTrackMiniMap } from "@/components/GroundTrackMiniMap";
 import type { GroundTrackRangeId, GroundTrackRangeOption } from "@/components/GroundTrackMiniMap";
 import { sampleTle } from "@/data/sampleTle";
+import { sampleManeuvers } from "@/data/sampleManeuvers";
+import type { ManeuverEvent, ManeuverSnapshot } from "@/domain/maneuver";
+import { getManeuverTone } from "@/domain/maneuver";
 import { parseSatelliteSource } from "@/domain/satelliteConfig";
 import { MAX_TLE_OBJECTS } from "@/domain/tle";
 import { distanceBetweenOrbitStatesKm } from "@/geometry/distance";
@@ -109,6 +112,9 @@ export function OrbitalDashboard() {
   const [showLabels, setShowLabels] = useState(true);
   const [showAllOrbits, setShowAllOrbits] = useState(false);
   const [groundTrackRangeId, setGroundTrackRangeId] = useState<GroundTrackRangeId>("live");
+  const [showManeuvers, setShowManeuvers] = useState(false);
+  const [maneuverEvents] = useState<ManeuverEvent[]>(sampleManeuvers);
+  const [selectedManeuverId, setSelectedManeuverId] = useState<string | null>(sampleManeuvers[0]?.id ?? null);
   const [resetSignal, setResetSignal] = useState(0);
   const [focusRequest, setFocusRequest] = useState<{ satelliteId: string; sequence: number } | null>(null);
   const lastTickRef = useRef<number | null>(null);
@@ -130,6 +136,22 @@ export function OrbitalDashboard() {
       stepSec: groundTrackRange.stepSec,
     });
   }, [groundTrackAnchorMs, groundTrackRange.pastMinutes, groundTrackRange.stepSec, stateCache]);
+  const maneuverSnapshots: ManeuverSnapshot[] = useMemo(() => {
+    return maneuverEvents.flatMap((event) => {
+      const satellite = satellites.find((item) => item.id === event.satelliteId || item.noradId === event.satelliteId);
+      if (!satellite) {
+        return [];
+      }
+
+      return [{
+        event,
+        satellite,
+        state: propagator.getState(satellite.id, event.timeUtc),
+        minutesFromSimulationTime: (new Date(event.timeUtc).getTime() - simTime.getTime()) / 60000,
+      }];
+    });
+  }, [maneuverEvents, propagator, satellites, simTime]);
+  const selectedManeuver = maneuverSnapshots.find((snapshot) => snapshot.event.id === selectedManeuverId) ?? maneuverSnapshots[0] ?? null;
   const latestSelectedId = selectedSatelliteIds.at(-1) ?? null;
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
   const validCount = snapshots.filter((item) => item.state).length;
@@ -301,6 +323,10 @@ export function OrbitalDashboard() {
           showAllOrbits={showAllOrbits}
           showLabels={showLabels}
           focusRequest={focusRequest}
+          maneuverSnapshots={maneuverSnapshots}
+          selectedManeuverId={selectedManeuver?.event.id ?? null}
+          showManeuvers={showManeuvers}
+          onSelectManeuver={setSelectedManeuverId}
           onToggleSatellite={toggleSatelliteSelection}
           resetSignal={resetSignal}
         />
@@ -396,7 +422,7 @@ export function OrbitalDashboard() {
         />
       </section>
 
-      <section className="pointer-events-auto absolute top-24 right-4 z-20 w-[340px] max-w-[calc(100vw-2rem)] space-y-3 max-xl:top-auto max-xl:right-4 max-xl:bottom-28 max-sm:hidden">
+      <section className="pointer-events-auto absolute top-24 right-4 bottom-4 z-20 w-[340px] max-w-[calc(100vw-2rem)] space-y-3 overflow-y-auto pr-1 max-sm:hidden">
         <HudPanel>
           <div className="flex items-center justify-between gap-3">
             <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Sat Filter</p>
@@ -414,7 +440,7 @@ export function OrbitalDashboard() {
             <span>Selected track pair</span>
             <span className="font-mono text-cyan-200">{selectedSatelliteIds.length}/2</span>
           </div>
-          <div className="mt-3 max-h-[42vh] space-y-2 overflow-auto pr-1">
+          <div className="mt-3 max-h-[34vh] space-y-2 overflow-auto pr-1">
             {snapshots.map((snapshot) => (
               <SatelliteControl
                 key={snapshot.satellite.id}
@@ -471,6 +497,14 @@ export function OrbitalDashboard() {
             </div>
           )}
         </HudPanel>
+
+        <ManeuverPanel
+          maneuverSnapshots={maneuverSnapshots}
+          selectedManeuverId={selectedManeuver?.event.id ?? null}
+          showManeuvers={showManeuvers}
+          onSelectManeuver={setSelectedManeuverId}
+          onToggleManeuvers={() => setShowManeuvers((value) => !value)}
+        />
       </section>
 
       <section className="pointer-events-auto absolute right-1/2 bottom-4 z-20 w-[min(900px,calc(100vw-2rem))] translate-x-1/2 border border-cyan-300/25 bg-[#071016]/88 px-4 py-3 shadow-2xl backdrop-blur-md">
@@ -545,6 +579,15 @@ function Telemetry({ label, value }: { label: string; value: string }) {
   );
 }
 
+function DetailMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-cyan-300/55">{label}</p>
+      <p className="mt-1 break-words font-mono text-xs font-semibold leading-5 text-zinc-100">{value}</p>
+    </div>
+  );
+}
+
 function ControlButton({ label, onClick }: { label: string; onClick: () => void }) {
   return (
     <button
@@ -610,6 +653,112 @@ function LayerToggle({
     >
       {label}
     </button>
+  );
+}
+
+function formatRelativeMinutes(minutes: number) {
+  const absoluteMinutes = Math.abs(minutes);
+  if (absoluteMinutes < 1) {
+    return "now";
+  }
+
+  const value = absoluteMinutes >= 60
+    ? `${formatNumber(absoluteMinutes / 60, 1)}h`
+    : `${formatNumber(absoluteMinutes, 0)}m`;
+
+  return minutes >= 0 ? `T+${value}` : `T-${value}`;
+}
+
+function ManeuverPanel({
+  maneuverSnapshots,
+  selectedManeuverId,
+  showManeuvers,
+  onSelectManeuver,
+  onToggleManeuvers,
+}: {
+  maneuverSnapshots: ManeuverSnapshot[];
+  selectedManeuverId: string | null;
+  showManeuvers: boolean;
+  onSelectManeuver: (maneuverId: string) => void;
+  onToggleManeuvers: () => void;
+}) {
+  const selectedManeuver = maneuverSnapshots.find((snapshot) => snapshot.event.id === selectedManeuverId);
+  const handleToggleManeuvers = () => {
+    if (!showManeuvers && !selectedManeuverId && maneuverSnapshots[0]) {
+      onSelectManeuver(maneuverSnapshots[0].event.id);
+    }
+
+    onToggleManeuvers();
+  };
+
+  return (
+    <HudPanel>
+      <div className="flex items-center justify-between gap-3">
+        <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Maneuvers</p>
+        <button
+          type="button"
+          aria-pressed={showManeuvers}
+          onClick={handleToggleManeuvers}
+          className={`flex min-w-16 items-center gap-2 border px-2 py-1 font-mono text-[10px] uppercase transition ${
+            showManeuvers ? "border-fuchsia-300 bg-fuchsia-300/15 text-fuchsia-100" : "border-white/10 text-zinc-500 hover:border-fuchsia-300"
+          }`}
+        >
+          <span className={`h-2.5 w-2.5 rounded-full ${showManeuvers ? "bg-fuchsia-300" : "bg-zinc-600"}`} />
+          {showManeuvers ? "On" : "Off"}
+        </button>
+      </div>
+      <p className="mt-1 text-[11px] text-zinc-500">
+        {showManeuvers ? `${maneuverSnapshots.length} event markers visible` : "Enable to show maneuver markers and event details."}
+      </p>
+
+      {showManeuvers && (
+        <>
+          <div className="mt-3 max-h-52 space-y-2 overflow-auto pr-1">
+            {maneuverSnapshots.map((snapshot) => {
+              const tone = getManeuverTone(snapshot.event.status);
+              const isSelected = selectedManeuverId === snapshot.event.id;
+
+              return (
+                <button
+                  key={snapshot.event.id}
+                  type="button"
+                  onClick={() => onSelectManeuver(snapshot.event.id)}
+                  className={`w-full border p-3 text-left transition ${
+                    isSelected ? "border-fuchsia-300 bg-fuchsia-300/10" : "border-white/10 bg-black/30 hover:border-fuchsia-300/45"
+                  }`}
+                >
+                  <span className="flex items-start justify-between gap-3">
+                    <span>
+                      <span className="block text-sm font-semibold text-white">{snapshot.event.title}</span>
+                      <span className="mt-1 block font-mono text-[10px] uppercase text-zinc-500">{snapshot.satellite.name}</span>
+                    </span>
+                    <span className="border px-2 py-0.5 font-mono text-[10px]" style={{ borderColor: tone.color, color: tone.color }}>
+                      {tone.label}
+                    </span>
+                  </span>
+                  <span className="mt-2 flex items-center justify-between font-mono text-[11px] text-zinc-400">
+                    <span>{formatRelativeMinutes(snapshot.minutesFromSimulationTime)}</span>
+                    <span>{formatNumber(snapshot.event.deltaVMps, 2)} m/s</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          {selectedManeuver && (
+            <div className="mt-3 border border-white/10 bg-black/35 p-3">
+              <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-fuchsia-200">Selected Maneuver</p>
+              <p className="mt-2 text-xs leading-5 text-zinc-300">{selectedManeuver.event.description}</p>
+              <div className="mt-3 grid grid-cols-2 gap-3">
+                <DetailMetric label="Type" value={selectedManeuver.event.type.replaceAll("_", " ")} />
+                <DetailMetric label="Burn" value={`${selectedManeuver.event.durationSec}s`} />
+                <DetailMetric label="Time" value={formatUtc(new Date(selectedManeuver.event.timeUtc))} />
+                <DetailMetric label="Altitude" value={`${formatNumber(selectedManeuver.state?.altitudeKm)} km`} />
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </HudPanel>
   );
 }
 

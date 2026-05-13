@@ -1,6 +1,6 @@
 # orbit-visualization-engine
 
-A Phase 1 orbital visualization MVP built with Next.js, TypeScript, CesiumJS, and SatelliteJS.
+A Phase 2 orbital visualization MVP built with Next.js, TypeScript, CesiumJS, and SatelliteJS.
 
 The app loads TLE data, propagates satellite positions, and renders satellites on a 3D Earth globe. It is intended as the visual foundation for a larger MOSAIC-like space-domain operations interface.
 
@@ -21,7 +21,9 @@ The app loads TLE data, propagates satellite positions, and renders satellites o
 - Supports per-satellite marker, label, orbit, trail, and ground-track toggles.
 - Renders future orbit paths, recent past trails, and projected ground tracks.
 - Provides a focus control to fly the camera to a selected satellite.
+- Shows a 2D ground-track map with an expanded modal and selectable time ranges.
 - Calculates current simulation-time distance between two selected satellites.
+- Shows sample maneuver events on the globe and in an operations panel.
 - Keeps propagation logic separate from Cesium rendering logic.
 
 ## Tech Stack
@@ -289,7 +291,7 @@ The TLE parser checks:
 
 If more than 15 valid TLEs are provided, only the first 15 are loaded and a message is shown.
 
-## Current Phase 1 Scope
+## Current Phase 2 Scope
 
 Included:
 
@@ -305,16 +307,21 @@ Included:
 - Per-satellite marker, label, orbit, trail, and ground-track toggles
 - Future orbit path and past trail visualization
 - Ground-track visualization with longitude-wrap handling
+- 2D ground-track mini map
+- Expanded ground-track modal with selectable history ranges
 - Camera focus for individual satellites
 - Basic state-cache service for trajectory windows
 - Distance/range check between two selected satellites
+- Maneuver event model
+- Sample planned, candidate, and executed maneuver events
+- Maneuver markers on the globe
+- Maneuver operations panel with status, delta-v, timing, and selected-event details
 - Play/pause/time speed controls
 - Selected satellite info panel
 - Camera reset
 
 Not included yet:
 
-- Maneuver markers
 - Conjunction analysis
 - Mission event timeline
 - Ground stations
