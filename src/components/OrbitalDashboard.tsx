@@ -4,6 +4,8 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { SatelliteObject, SatelliteSnapshot, SatelliteVisualSettings } from "@/domain/orbit";
+import { GroundTrackMiniMap } from "@/components/GroundTrackMiniMap";
+import type { GroundTrackRangeId, GroundTrackRangeOption } from "@/components/GroundTrackMiniMap";
 import { sampleTle } from "@/data/sampleTle";
 import { parseSatelliteSource } from "@/domain/satelliteConfig";
 import { MAX_TLE_OBJECTS } from "@/domain/tle";
@@ -28,6 +30,47 @@ const trajectoryOptions = {
   stepSec: 60,
 };
 const trajectoryBucketMs = 5 * 60 * 1000;
+const groundTrackRangeOptions = [
+  {
+    id: "live",
+    label: "Live 3h",
+    pastMinutes: 180,
+    stepSec: 60,
+    bucketMs: 60 * 1000,
+  },
+  {
+    id: "day",
+    label: "Last 24h",
+    pastMinutes: 24 * 60,
+    stepSec: 3 * 60,
+    bucketMs: 10 * 60 * 1000,
+  },
+  {
+    id: "week",
+    label: "Last 7d",
+    pastMinutes: 7 * 24 * 60,
+    stepSec: 15 * 60,
+    bucketMs: 60 * 60 * 1000,
+  },
+  {
+    id: "twoMonths",
+    label: "Last 2mo",
+    pastMinutes: 60 * 24 * 60,
+    stepSec: 60 * 60,
+    bucketMs: 6 * 60 * 60 * 1000,
+  },
+  {
+    id: "twoYears",
+    label: "Last 2y",
+    pastMinutes: 730 * 24 * 60,
+    stepSec: 6 * 60 * 60,
+    bucketMs: 24 * 60 * 60 * 1000,
+  },
+] satisfies Array<GroundTrackRangeOption & {
+  pastMinutes: number;
+  stepSec: number;
+  bucketMs: number;
+}>;
 
 function isExternalEndpoint(value: string) {
   return /^https?:\/\//i.test(value.trim());
@@ -65,19 +108,28 @@ export function OrbitalDashboard() {
   const [speed, setSpeed] = useState(60);
   const [showLabels, setShowLabels] = useState(true);
   const [showAllOrbits, setShowAllOrbits] = useState(false);
+  const [groundTrackRangeId, setGroundTrackRangeId] = useState<GroundTrackRangeId>("live");
   const [resetSignal, setResetSignal] = useState(0);
   const [focusRequest, setFocusRequest] = useState<{ satelliteId: string; sequence: number } | null>(null);
   const lastTickRef = useRef<number | null>(null);
 
   const propagator = useMemo(() => new SatelliteJsPropagator(satellites), [satellites]);
   const stateCache = useMemo(() => new StateCacheService(propagator, satellites), [propagator, satellites]);
+  const groundTrackRange = groundTrackRangeOptions.find((option) => option.id === groundTrackRangeId) ?? groundTrackRangeOptions[0];
   const trajectoryAnchorMs = Math.floor(simTime.getTime() / trajectoryBucketMs) * trajectoryBucketMs;
+  const groundTrackAnchorMs = Math.floor(simTime.getTime() / groundTrackRange.bucketMs) * groundTrackRange.bucketMs;
   const snapshots: SatelliteSnapshot[] = useMemo(() => {
     return stateCache.getCurrentSnapshots(simTime.toISOString());
   }, [stateCache, simTime]);
   const orbitSnapshots: SatelliteSnapshot[] = useMemo(() => {
     return stateCache.getWindowedSnapshots(new Date(trajectoryAnchorMs).toISOString(), trajectoryOptions);
   }, [stateCache, trajectoryAnchorMs]);
+  const groundTrackSnapshots: SatelliteSnapshot[] = useMemo(() => {
+    return stateCache.getGroundTrackSnapshots(new Date(groundTrackAnchorMs).toISOString(), {
+      pastMinutes: groundTrackRange.pastMinutes,
+      stepSec: groundTrackRange.stepSec,
+    });
+  }, [groundTrackAnchorMs, groundTrackRange.pastMinutes, groundTrackRange.stepSec, stateCache]);
   const latestSelectedId = selectedSatelliteIds.at(-1) ?? null;
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
   const validCount = snapshots.filter((item) => item.state).length;
@@ -332,6 +384,16 @@ export function OrbitalDashboard() {
             </div>
           )}
         </HudPanel>
+
+        <GroundTrackMiniMap
+          currentSnapshots={snapshots}
+          groundTrackSnapshots={groundTrackSnapshots}
+          selectedSatelliteIds={selectedSatelliteIds}
+          rangeLabel={groundTrackRange.label}
+          rangeOptions={groundTrackRangeOptions}
+          selectedRangeId={groundTrackRangeId}
+          onRangeChange={setGroundTrackRangeId}
+        />
       </section>
 
       <section className="pointer-events-auto absolute top-24 right-4 z-20 w-[340px] max-w-[calc(100vw-2rem)] space-y-3 max-xl:top-auto max-xl:right-4 max-xl:bottom-28 max-sm:hidden">

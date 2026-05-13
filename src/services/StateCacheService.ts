@@ -7,6 +7,11 @@ export type TrajectoryWindowOptions = {
   stepSec: number;
 };
 
+export type GroundTrackWindowOptions = {
+  pastMinutes: number;
+  stepSec: number;
+};
+
 function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * 60 * 1000);
 }
@@ -70,5 +75,22 @@ export class StateCacheService {
         groundTrack,
       };
     });
+  }
+
+  getGroundTrackSnapshots(timeUtc: string, options: GroundTrackWindowOptions): SatelliteSnapshot[] {
+    const endTime = new Date(timeUtc);
+    const startUtc = addMinutes(endTime, -options.pastMinutes).toISOString();
+    const endUtc = endTime.toISOString();
+
+    return this.satellites.map((satellite) => ({
+      satellite,
+      state: null,
+      groundTrack: this.propagator.getTrajectory(
+        satellite.id,
+        startUtc,
+        endUtc,
+        options.stepSec,
+      ),
+    }));
   }
 }
