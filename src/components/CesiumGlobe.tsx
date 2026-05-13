@@ -35,6 +35,12 @@ const palette = [
   "#d8f5a2",
 ];
 
+const DEFAULT_CAMERA_VIEW = {
+  longitudeDeg: 78,
+  latitudeDeg: 20,
+  heightMeters: 28000000,
+};
+
 type HoverInfo = {
   name: string;
   noradId: string;
@@ -90,6 +96,22 @@ export function CesiumGlobe({
   useEffect(() => {
     latestSnapshotsRef.current = snapshots;
   }, [snapshots]);
+
+  function zoomCamera(direction: "in" | "out") {
+    const viewer = viewerRef.current;
+    if (!viewer || viewer.isDestroyed()) {
+      return;
+    }
+
+    const cameraHeight = viewer.camera.positionCartographic.height;
+    const amount = Math.max(cameraHeight * 0.38, 250000);
+
+    if (direction === "in") {
+      viewer.camera.zoomIn(amount);
+    } else {
+      viewer.camera.zoomOut(amount);
+    }
+  }
 
   function updateHoverInfo(nextHoverInfo: HoverInfo) {
     const previous = hoverInfoRef.current;
@@ -153,7 +175,11 @@ export function CesiumGlobe({
         viewer.scene.skyAtmosphere.show = true;
       }
       viewer.camera.setView({
-        destination: Cesium.Cartesian3.fromDegrees(78, 20, 15000000),
+        destination: Cesium.Cartesian3.fromDegrees(
+          DEFAULT_CAMERA_VIEW.longitudeDeg,
+          DEFAULT_CAMERA_VIEW.latitudeDeg,
+          DEFAULT_CAMERA_VIEW.heightMeters,
+        ),
       });
       pathPrimitiveRef.current = viewer.scene.primitives.add(new Cesium.PrimitiveCollection());
 
@@ -243,15 +269,15 @@ export function CesiumGlobe({
           position,
           point: {
             color,
-            pixelSize: isSelected ? 18 : 14,
-            outlineColor: Cesium.Color.WHITE,
-            outlineWidth: 2,
+            pixelSize: isSelected ? 15 : 11,
+            outlineColor: isSelected ? Cesium.Color.WHITE : Cesium.Color.BLACK,
+            outlineWidth: isSelected ? 3 : 1,
             disableDepthTestDistance: Number.POSITIVE_INFINITY,
           },
           label: {
             text: snapshot.satellite.name,
-            font: "600 15px sans-serif",
-            fillColor: Cesium.Color.WHITE,
+            font: "700 13px monospace",
+            fillColor: color.brighten(0.35, new Cesium.Color()),
             outlineColor: Cesium.Color.BLACK,
             outlineWidth: 2,
             style: Cesium.LabelStyle.FILL_AND_OUTLINE,
@@ -274,7 +300,7 @@ export function CesiumGlobe({
       entity.position = new Cesium.ConstantPositionProperty(position);
       if (entity.point) {
         entity.point.show = new Cesium.ConstantProperty(snapshot.satellite.visual.showMarker);
-        entity.point.pixelSize = new Cesium.ConstantProperty(isSelected ? 18 : 14);
+        entity.point.pixelSize = new Cesium.ConstantProperty(isSelected ? 15 : 11);
         entity.point.color = new Cesium.ConstantProperty(color.withAlpha(isSelected ? 1 : 0.82));
       }
       if (entity.label) {
@@ -325,9 +351,9 @@ export function CesiumGlobe({
 
       pathPrimitives.add(new Cesium.PolylineCollection()).add({
         positions: orbitPositions,
-        width: isSelected ? 7 : 4,
+        width: isSelected ? 3.2 : 1.5,
         material: Cesium.Material.fromType("Color", {
-          color: orbitColor.withAlpha(isSelected ? 1 : 0.72),
+          color: orbitColor.withAlpha(isSelected ? 0.9 : 0.42),
         }),
       });
     });
@@ -341,6 +367,7 @@ export function CesiumGlobe({
 
     visibleTrailSnapshots.forEach((snapshot, index) => {
       const color = getSnapshotColor(Cesium, snapshot, index);
+      const trailColor = color.brighten(0.18, new Cesium.Color());
       const trailPositions = snapshot.pastTrail?.map((state) => stateToCartesian(Cesium, state)) ?? [];
 
       if (trailPositions.length < 2) {
@@ -349,10 +376,10 @@ export function CesiumGlobe({
 
       pathPrimitives.add(new Cesium.PolylineCollection()).add({
         positions: trailPositions,
-        width: 4,
+        width: 2.4,
         material: Cesium.Material.fromType("PolylineDash", {
-          color: color.withAlpha(0.9),
-          dashLength: 18,
+          color: trailColor.withAlpha(0.82),
+          dashLength: 16,
         }),
       });
     });
@@ -364,17 +391,21 @@ export function CesiumGlobe({
       return showAllOrbits || selectedSatelliteIds.includes(item.satellite.id);
     });
 
-    visibleGroundTrackSnapshots.forEach((snapshot, index) => {
-      const color = getSnapshotColor(Cesium, snapshot, index);
+    visibleGroundTrackSnapshots.forEach((snapshot) => {
+      const isSelected = selectedSatelliteIds.includes(snapshot.satellite.id);
+      const groundColor = Cesium.Color.LIME.withAlpha(isSelected ? 0.52 : 0.24);
       const segments = splitGroundTrackByLongitudeWrap(snapshot.groundTrack ?? []);
 
       segments.forEach((segment) => {
+        const sampledSegment = segment.filter((_, pointIndex) => pointIndex % 3 === 0);
+        const positions = sampledSegment.length > 1 ? sampledSegment : segment;
+
         pathPrimitives.add(new Cesium.PolylineCollection()).add({
-          positions: segment.map((state) => stateToGroundCartesian(Cesium, state)),
-          width: 3,
+          positions: positions.map((state) => stateToGroundCartesian(Cesium, state)),
+          width: isSelected ? 1.5 : 1,
           material: Cesium.Material.fromType("PolylineDash", {
-            color: color.withAlpha(0.85),
-            dashLength: 14,
+            color: groundColor,
+            dashLength: 18,
           }),
         });
       });
@@ -424,14 +455,6 @@ export function CesiumGlobe({
     const primaryPosition = stateToCartesian(Cesium, rangeMeasurement.primary.state);
     const secondaryPosition = stateToCartesian(Cesium, rangeMeasurement.secondary.state);
     const midpoint = Cesium.Cartesian3.midpoint(primaryPosition, secondaryPosition, new Cesium.Cartesian3());
-    const dotPositions = Array.from({ length: 19 }, (_, index) =>
-      Cesium.Cartesian3.lerp(
-        primaryPosition,
-        secondaryPosition,
-        index / 18,
-        new Cesium.Cartesian3(),
-      ),
-    );
     const labelText = `${rangeMeasurement.distanceKm.toLocaleString("en", {
       maximumFractionDigits: 1,
       minimumFractionDigits: 1,
@@ -443,38 +466,14 @@ export function CesiumGlobe({
         name: "Satellite range measurement",
         polyline: {
           positions: [primaryPosition, secondaryPosition],
-          width: 5,
+          width: 4,
           material: new Cesium.PolylineDashMaterialProperty({
-            color: Cesium.Color.MAGENTA.withAlpha(0.98),
-            dashLength: 20,
-          }),
-          depthFailMaterial: new Cesium.PolylineDashMaterialProperty({
-            color: Cesium.Color.CYAN.withAlpha(0.95),
-            dashLength: 20,
+            color: Cesium.Color.fromCssColorString("#ff4dff").withAlpha(0.96),
+            dashLength: 26,
           }),
           arcType: Cesium.ArcType.NONE,
         },
       });
-    }
-
-    if (rangeDotEntitiesRef.current.length !== dotPositions.length) {
-      rangeDotEntitiesRef.current.forEach((entity) => viewer.entities.remove(entity));
-      rangeDotEntitiesRef.current = dotPositions.map((position, index) =>
-        viewer.entities.add({
-          id: `range-measurement-dot-${index}`,
-          name: "Satellite range measurement dot",
-          position,
-          point: {
-            color: index === 0 || index === dotPositions.length - 1
-              ? Cesium.Color.WHITE.withAlpha(1)
-              : Cesium.Color.MAGENTA.withAlpha(0.95),
-            pixelSize: index === 0 || index === dotPositions.length - 1 ? 8 : 5,
-            outlineColor: Cesium.Color.BLACK,
-            outlineWidth: 1,
-            disableDepthTestDistance: Number.POSITIVE_INFINITY,
-          },
-        }),
-      );
     }
 
     if (!rangeLabelEntityRef.current) {
@@ -500,11 +499,12 @@ export function CesiumGlobe({
 
     if (rangeEntityRef.current.polyline) {
       rangeEntityRef.current.polyline.positions = new Cesium.ConstantProperty([primaryPosition, secondaryPosition]);
-      rangeEntityRef.current.polyline.width = new Cesium.ConstantProperty(5);
+      rangeEntityRef.current.polyline.width = new Cesium.ConstantProperty(4);
+      rangeEntityRef.current.polyline.material = new Cesium.PolylineDashMaterialProperty({
+        color: Cesium.Color.fromCssColorString("#ff4dff").withAlpha(0.96),
+        dashLength: 26,
+      });
     }
-    rangeDotEntitiesRef.current.forEach((entity, index) => {
-      entity.position = new Cesium.ConstantPositionProperty(dotPositions[index]);
-    });
     rangeLabelEntityRef.current.position = new Cesium.ConstantPositionProperty(midpoint);
     if (rangeLabelEntityRef.current.label) {
       rangeLabelEntityRef.current.label.text = new Cesium.ConstantProperty(labelText);
@@ -541,7 +541,11 @@ export function CesiumGlobe({
     }
 
     viewer.camera.flyTo({
-      destination: Cesium.Cartesian3.fromDegrees(78, 20, 15000000),
+      destination: Cesium.Cartesian3.fromDegrees(
+        DEFAULT_CAMERA_VIEW.longitudeDeg,
+        DEFAULT_CAMERA_VIEW.latitudeDeg,
+        DEFAULT_CAMERA_VIEW.heightMeters,
+      ),
       duration: 0.8,
     });
   }, [resetSignal, viewerReady]);
@@ -561,12 +565,39 @@ export function CesiumGlobe({
           <p className="font-mono text-xs text-zinc-400">NORAD {hoverInfo.noradId}</p>
         </div>
       )}
-      <div className="pointer-events-none absolute right-3 bottom-3 rounded-md border border-white/10 bg-black/65 px-3 py-2 font-mono text-[11px] text-zinc-300 shadow-xl backdrop-blur">
-        <span className="text-cyan-200">{layerStats.orbits}</span> orbit
-        <span className="px-2 text-zinc-600">|</span>
-        <span className="text-cyan-200">{layerStats.trails}</span> trail
-        <span className="px-2 text-zinc-600">|</span>
-        <span className="text-cyan-200">{layerStats.groundTracks}</span> ground
+      <div className="pointer-events-none absolute right-3 bottom-3 space-y-1 border border-white/10 bg-black/70 px-3 py-2 font-mono text-[11px] text-zinc-300 shadow-xl backdrop-blur">
+        <div className="flex items-center gap-2">
+          <span className="h-[2px] w-8 bg-cyan-200" />
+          <span><span className="text-cyan-200">{layerStats.orbits}</span> orbit arc</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="h-[2px] w-8 border-t border-dashed border-cyan-100" />
+          <span><span className="text-cyan-200">{layerStats.trails}</span> recent trail</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="h-[2px] w-8 border-t border-dotted border-lime-300" />
+          <span><span className="text-lime-300">{layerStats.groundTracks}</span> ground trace</span>
+        </div>
+      </div>
+      <div className="absolute top-28 left-[420px] z-30 flex overflow-hidden border border-cyan-300/45 bg-black/80 shadow-2xl backdrop-blur max-lg:left-4 max-lg:top-28">
+        <button
+          type="button"
+          onClick={() => zoomCamera("in")}
+          className="h-14 w-14 border-r border-cyan-300/25 font-mono text-4xl font-black leading-none text-cyan-100 transition hover:bg-cyan-300/20 hover:text-white"
+          aria-label="Zoom in"
+          title="Zoom in"
+        >
+          +
+        </button>
+        <button
+          type="button"
+          onClick={() => zoomCamera("out")}
+          className="h-14 w-14 font-mono text-4xl font-black leading-none text-cyan-100 transition hover:bg-cyan-300/20 hover:text-white"
+          aria-label="Zoom out"
+          title="Zoom out"
+        >
+          -
+        </button>
       </div>
     </div>
   );

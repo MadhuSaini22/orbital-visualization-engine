@@ -2,6 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { SatelliteObject, SatelliteSnapshot, SatelliteVisualSettings } from "@/domain/orbit";
 import { sampleTle } from "@/data/sampleTle";
 import { parseSatelliteSource } from "@/domain/satelliteConfig";
@@ -214,12 +215,16 @@ export function OrbitalDashboard() {
     }
   }, [loadTleText, tleUrl]);
 
+  const shiftSimulationTime = useCallback((minutes: number) => {
+    setSimTime((current) => new Date(current.getTime() + minutes * 60 * 1000));
+  }, []);
+
   useEffect(() => {
     lastTickRef.current = Date.now();
 
     const intervalId = window.setInterval(() => {
       const now = Date.now();
-      const elapsedMs = lastTickRef.current === null ? 0 : Math.min(now - lastTickRef.current, 1000);
+      const elapsedMs = lastTickRef.current === null ? 0 : Math.min(now - lastTickRef.current, 250);
       lastTickRef.current = now;
 
       if (isPlaying && elapsedMs > 0) {
@@ -228,337 +233,379 @@ export function OrbitalDashboard() {
           return nextTime === current.getTime() ? current : new Date(nextTime);
         });
       }
-    }, 1000);
+    }, 100);
 
     return () => window.clearInterval(intervalId);
   }, [isPlaying, speed]);
 
   return (
-    <main className="min-h-screen bg-[#090b10] text-zinc-100">
-      <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[360px_1fr]">
-        <aside className="border-b border-white/10 bg-[#11151d] p-5 lg:border-r lg:border-b-0">
-          <div className="space-y-1">
-            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-300">Phase 1</p>
-            <h1 className="text-2xl font-semibold text-white">Orbital Viewer</h1>
-            <p className="text-sm leading-6 text-zinc-400">
-              Load up to {MAX_TLE_OBJECTS} TLE objects or a JSON config, inspect satellites, and view orbit layers.
-            </p>
+    <main className="relative min-h-screen overflow-hidden bg-black text-zinc-100">
+      <div className="absolute inset-0">
+        <CesiumGlobe
+          snapshots={snapshots}
+          orbitSnapshots={orbitSnapshots}
+          rangeMeasurement={rangeMeasurement}
+          selectedSatelliteIds={selectedSatelliteIds}
+          showAllOrbits={showAllOrbits}
+          showLabels={showLabels}
+          focusRequest={focusRequest}
+          onToggleSatellite={toggleSatelliteSelection}
+          resetSignal={resetSignal}
+        />
+      </div>
+
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_center,transparent_42%,rgba(0,0,0,0.45)_100%)]" />
+
+      <header className="pointer-events-auto absolute top-0 right-0 left-0 z-20 border-b border-cyan-300/20 bg-[#071016]/88 px-4 py-3 shadow-2xl backdrop-blur-md">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="font-mono text-[11px] font-semibold uppercase text-cyan-300">Phase 1 // Orbit Visualization Engine</p>
+            <h1 className="text-xl font-semibold text-white">Multi-Satellite Orbital Operations</h1>
           </div>
+          <div className="grid min-w-[520px] grid-cols-4 gap-3 max-lg:min-w-0 max-lg:flex-1 max-sm:grid-cols-2">
+            <HudMetric label="Satellites" value={`${satellites.length}/${MAX_TLE_OBJECTS}`} />
+            <HudMetric label="Visible" value={String(validCount)} />
+            <HudMetric label="Range" value={rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : "--"} />
+            <HudMetric label="Speed" value={`${speed}x`} />
+          </div>
+        </div>
+      </header>
 
-          <section className="mt-6 space-y-3">
-            <label className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">TLE / JSON endpoint</label>
-            <div className="flex gap-2">
-              <input
-                value={tleUrl}
-                onChange={(event) => setTleUrl(event.target.value)}
-                className="min-w-0 flex-1 rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-cyan-300"
-                placeholder="/data/satellites.json"
-              />
-              <button
-                onClick={loadFromUrl}
-                className="rounded-md bg-cyan-300 px-3 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-200"
-              >
-                Load
-              </button>
+      <section className="pointer-events-auto absolute top-24 left-4 z-20 w-[360px] max-w-[calc(100vw-2rem)] space-y-3 max-lg:relative max-lg:top-auto max-lg:left-auto max-lg:mt-24 max-lg:ml-4">
+        <HudPanel>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">
+                {selectedSnapshot?.satellite.name ?? "No Target Lock"}
+              </p>
+              <p className="mt-1 text-xs text-zinc-500">NORAD {selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? "--"}</p>
             </div>
+            <span className="border border-emerald-300/50 px-2 py-1 font-mono text-[10px] font-semibold uppercase text-emerald-300">
+              {selectedSnapshot ? "Tracking" : "Idle"}
+            </span>
+          </div>
+          <div className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4">
+            <Telemetry label="Altitude" value={`${formatNumber(selectedSnapshot?.state?.altitudeKm)} km`} />
+            <Telemetry label="Velocity" value={`${formatNumber((selectedSnapshot?.state?.velocityKmps ?? 0) * 3600)} km/h`} />
+            <Telemetry label="Latitude" value={`${formatNumber(selectedSnapshot?.state?.latitudeDeg)} deg`} />
+            <Telemetry label="Longitude" value={`${formatNumber(selectedSnapshot?.state?.longitudeDeg)} deg`} />
+            <Telemetry label="Mission" value={selectedSnapshot?.satellite.metadata?.mission ?? "--"} />
+            <Telemetry label="Source" value={selectedSnapshot?.satellite.sourceType ?? "--"} />
+          </div>
+        </HudPanel>
 
-            <label className="block rounded-md border border-dashed border-white/15 bg-black/20 px-3 py-3 text-sm text-zinc-300 transition hover:border-cyan-300/60">
-              <input
-                type="file"
-                accept=".tle,.txt,.json"
-                className="sr-only"
-                onChange={async (event) => {
-                  const file = event.target.files?.[0];
-                  if (file) {
-                    loadTleText(await file.text());
-                  }
-                }}
-              />
-              Choose local TLE or JSON file
-            </label>
-          </section>
-
+        <HudPanel>
+          <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Data Source</p>
+          <div className="mt-3 flex gap-2">
+            <input
+              value={tleUrl}
+              onChange={(event) => setTleUrl(event.target.value)}
+              className="min-w-0 flex-1 border border-cyan-300/25 bg-black/45 px-3 py-2 font-mono text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
+              placeholder="/data/satellites.json"
+            />
+            <button
+              onClick={loadFromUrl}
+              className="border border-cyan-300 bg-cyan-300 px-3 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-200"
+            >
+              Load
+            </button>
+          </div>
+          <label className="mt-2 block cursor-pointer border border-dashed border-cyan-300/20 bg-cyan-300/5 px-3 py-2 text-xs text-zinc-300 transition hover:border-cyan-300/60">
+            <input
+              type="file"
+              accept=".tle,.txt,.json"
+              className="sr-only"
+              onChange={async (event) => {
+                const file = event.target.files?.[0];
+                if (file) {
+                  loadTleText(await file.text());
+                }
+              }}
+            />
+            Choose local TLE or JSON file
+          </label>
           {messages.length > 0 && (
-            <section className="mt-4 rounded-md border border-amber-300/20 bg-amber-300/10 px-3 py-3 text-sm text-amber-100">
+            <div className="mt-3 border border-amber-300/30 bg-amber-300/10 px-3 py-2 text-xs text-amber-100">
               {messages.map((message) => (
                 <p key={message}>{message}</p>
               ))}
-            </section>
+            </div>
           )}
+        </HudPanel>
+      </section>
 
-          <section className="mt-6 grid grid-cols-3 gap-2">
-            <Metric label="Loaded" value={String(satellites.length)} />
-            <Metric label="Visible" value={String(validCount)} />
-            <Metric label="Speed" value={`${speed}x`} />
-          </section>
-
-          <section className="mt-6 space-y-3">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Simulation</label>
-              <span className="font-mono text-xs text-zinc-400">{formatUtc(simTime)}</span>
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              <button
-                onClick={() => setIsPlaying((value) => !value)}
-                className="rounded-md bg-white px-3 py-2 text-sm font-semibold text-slate-950 transition hover:bg-zinc-200"
-              >
-                {isPlaying ? "Pause" : "Play"}
-              </button>
-              <button
-                onClick={() => setSimTime(new Date())}
-                className="rounded-md border border-white/10 px-3 py-2 text-sm text-zinc-200 transition hover:border-white/30"
-              >
-                Now
-              </button>
-              <button
-                onClick={() => setResetSignal((value) => value + 1)}
-                className="rounded-md border border-white/10 px-3 py-2 text-sm text-zinc-200 transition hover:border-white/30"
-              >
-                Reset
-              </button>
-            </div>
-            <div className="grid grid-cols-4 gap-2">
-              {[1, 10, 60, 300].map((item) => (
-                <button
-                  key={item}
-                  onClick={() => setSpeed(item)}
-                  className={`rounded-md px-3 py-2 text-sm transition ${
-                    speed === item ? "bg-cyan-300 text-slate-950" : "border border-white/10 text-zinc-300 hover:border-white/30"
-                  }`}
-                >
-                  {item}x
-                </button>
-              ))}
-            </div>
-            <label className="flex items-center justify-between rounded-md border border-white/10 px-3 py-2 text-sm text-zinc-300">
-              Satellite labels
-              <input
-                type="checkbox"
-                checked={showLabels}
-                onChange={(event) => setShowLabels(event.target.checked)}
-                className="h-4 w-4 accent-cyan-300"
-              />
-            </label>
-            <div className="flex items-center justify-between rounded-md border border-white/10 px-3 py-2 text-sm text-zinc-300">
-              Selected orbits
-              <span className="font-mono text-xs text-cyan-200">{selectedSatelliteIds.length}/2</span>
-            </div>
-            <label className="flex items-center justify-between rounded-md border border-white/10 px-3 py-2 text-sm text-zinc-300">
-              Show all orbits
-              <input
-                type="checkbox"
-                checked={showAllOrbits}
-                onChange={(event) => setShowAllOrbits(event.target.checked)}
-                className="h-4 w-4 accent-cyan-300"
-              />
-            </label>
-          </section>
-
-          <section className="mt-6 space-y-3 rounded-md border border-white/10 bg-black/20 p-3">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Range check</label>
-              <span className="rounded bg-cyan-300/10 px-2 py-1 font-mono text-xs text-cyan-200">
-                {rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : "--"}
-              </span>
-            </div>
-
-            {satellites.length < 2 ? (
-              <p className="text-sm leading-5 text-zinc-400">Load at least 2 satellites to calculate distance.</p>
-            ) : (
-              <>
-                <div className="grid gap-2">
-                  <select
-                    value={rangePrimaryId}
-                    onChange={(event) => updateRangePrimary(event.target.value)}
-                    className="rounded-md border border-white/10 bg-[#11151d] px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-cyan-300"
-                  >
-                    {!rangePrimaryId && <option value="">Primary: Select satellite</option>}
-                    {satellites.map((satellite) => (
-                      <option key={satellite.id} value={satellite.id}>
-                        Primary: {satellite.name}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    value={rangeSecondaryId}
-                    onChange={(event) => updateRangeSecondary(event.target.value)}
-                    className="rounded-md border border-white/10 bg-[#11151d] px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-cyan-300"
-                  >
-                    {!rangeSecondaryId && <option value="">Secondary: Select satellite</option>}
-                    {satellites.map((satellite) => (
-                      <option key={satellite.id} value={satellite.id} disabled={satellite.id === rangePrimaryId}>
-                        Secondary: {satellite.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <p className="text-xs leading-5 text-zinc-500">
-                  Click satellites on the globe or list to select up to 2. Distance appears when 2 are selected.
-                </p>
-              </>
-            )}
-          </section>
-
-          <section className="mt-6 space-y-2">
-            <label className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Satellites</label>
-            <div className="max-h-64 space-y-2 overflow-auto pr-1">
-              {snapshots.map((snapshot) => (
-                <div
-                  key={snapshot.satellite.id}
-                  className={`w-full rounded-md border px-3 py-2 text-left transition ${
-                    selectedSatelliteIds.includes(snapshot.satellite.id)
-                      ? "border-cyan-300 bg-cyan-300/10"
-                      : "border-white/10 bg-black/20 hover:border-white/30"
-                  }`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => toggleSatelliteSelection(snapshot.satellite.id)}
-                    className="w-full text-left"
-                  >
-                    <span className="flex items-center justify-between gap-2 text-sm font-medium text-white">
-                      {snapshot.satellite.name}
-                      {selectedSatelliteIds.includes(snapshot.satellite.id) && (
-                        <span className="rounded bg-cyan-300/10 px-2 py-0.5 font-mono text-[11px] text-cyan-200">
-                          SAT {selectedSatelliteIds.indexOf(snapshot.satellite.id) + 1}
-                        </span>
-                      )}
-                    </span>
-                    <span className="mt-1 block font-mono text-xs text-zinc-500">
-                      NORAD {snapshot.satellite.noradId ?? snapshot.satellite.id}
-                    </span>
-                  </button>
-                  <div className="mt-3 grid grid-cols-3 gap-2">
-                    <VisualToggle
-                      label="Orbit"
-                      description="future path"
-                      checked={snapshot.satellite.visual.showOrbit}
-                      onChange={(checked) => updateSatelliteLayer(snapshot.satellite.id, "showOrbit", checked)}
-                    />
-                    <VisualToggle
-                      label="Trail"
-                      description="recent path"
-                      checked={snapshot.satellite.visual.showTrail}
-                      onChange={(checked) => updateSatelliteLayer(snapshot.satellite.id, "showTrail", checked)}
-                    />
-                    <VisualToggle
-                      label="Ground"
-                      description="map trace"
-                      checked={snapshot.satellite.visual.showGroundTrack}
-                      onChange={(checked) => updateSatelliteLayer(snapshot.satellite.id, "showGroundTrack", checked)}
-                    />
-                  </div>
-                  <div className="mt-2 grid grid-cols-3 gap-2">
-                    <VisualToggle
-                      label="Marker"
-                      description="dot"
-                      checked={snapshot.satellite.visual.showMarker}
-                      onChange={(checked) => updateSatelliteVisual(snapshot.satellite.id, "showMarker", checked)}
-                    />
-                    <VisualToggle
-                      label="Label"
-                      description="name"
-                      checked={snapshot.satellite.visual.showLabel}
-                      onChange={(checked) => updateSatelliteVisual(snapshot.satellite.id, "showLabel", checked)}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        keepSatelliteInSelection(snapshot.satellite.id);
-                        setFocusRequest((request) => ({
-                          satelliteId: snapshot.satellite.id,
-                          sequence: (request?.sequence ?? 0) + 1,
-                        }));
-                      }}
-                      className="rounded border border-white/10 px-2 py-1 text-xs text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100"
-                      title="Move camera near this satellite"
-                    >
-                      Focus
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-        </aside>
-
-        <section className="flex min-h-[640px] flex-col p-4 lg:p-5">
-          <div className="relative min-h-[520px] flex-1 overflow-hidden rounded-md border border-white/10 bg-black shadow-2xl">
-            <CesiumGlobe
-              snapshots={snapshots}
-              orbitSnapshots={orbitSnapshots}
-              rangeMeasurement={rangeMeasurement}
-              selectedSatelliteIds={selectedSatelliteIds}
-              showAllOrbits={showAllOrbits}
-              showLabels={showLabels}
-              focusRequest={focusRequest}
-              onToggleSatellite={toggleSatelliteSelection}
-              resetSignal={resetSignal}
-            />
+      <section className="pointer-events-auto absolute top-24 right-4 z-20 w-[340px] max-w-[calc(100vw-2rem)] space-y-3 max-xl:top-auto max-xl:right-4 max-xl:bottom-28 max-sm:hidden">
+        <HudPanel>
+          <div className="flex items-center justify-between gap-3">
+            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Sat Filter</p>
+            <button
+              type="button"
+              onClick={() => setShowAllOrbits((value) => !value)}
+              className={`border px-3 py-1 font-mono text-[11px] uppercase transition ${
+                showAllOrbits ? "border-cyan-300 bg-cyan-300 text-slate-950" : "border-cyan-300/30 text-cyan-200 hover:border-cyan-300"
+              }`}
+            >
+              All Orbits
+            </button>
           </div>
-
-          <div className="mt-4 grid gap-3 md:grid-cols-4">
-            <Detail label="Selected" value={selectedSnapshot?.satellite.name ?? "--"} />
-            <Detail label="NORAD" value={selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? "--"} />
-            <Detail label="Latitude" value={`${formatNumber(selectedSnapshot?.state?.latitudeDeg)} deg`} />
-            <Detail label="Longitude" value={`${formatNumber(selectedSnapshot?.state?.longitudeDeg)} deg`} />
-            <Detail label="Altitude" value={`${formatNumber(selectedSnapshot?.state?.altitudeKm)} km`} />
-            <Detail label="Velocity" value={`${formatNumber(selectedSnapshot?.state?.velocityKmps)} km/s`} />
-            <Detail label="Source" value={selectedSnapshot?.satellite.sourceType ?? "--"} />
-            <Detail label="Mission" value={selectedSnapshot?.satellite.metadata?.mission ?? "--"} />
-            <Detail label="Frame" value={selectedSnapshot?.state?.frame ?? "--"} />
-            <Detail label="Objects cap" value={`${MAX_TLE_OBJECTS} max`} />
-            <Detail label="Source entries" value={`${satellites.length} loaded`} />
+          <div className="mt-3 flex items-center justify-between border border-white/10 bg-black/30 px-3 py-2 text-xs text-zinc-300">
+            <span>Selected track pair</span>
+            <span className="font-mono text-cyan-200">{selectedSatelliteIds.length}/2</span>
           </div>
-        </section>
+          <div className="mt-3 max-h-[42vh] space-y-2 overflow-auto pr-1">
+            {snapshots.map((snapshot) => (
+              <SatelliteControl
+                key={snapshot.satellite.id}
+                snapshot={snapshot}
+                isSelected={selectedSatelliteIds.includes(snapshot.satellite.id)}
+                selectionIndex={selectedSatelliteIds.indexOf(snapshot.satellite.id)}
+                onSelect={() => toggleSatelliteSelection(snapshot.satellite.id)}
+                onFocus={() => {
+                  keepSatelliteInSelection(snapshot.satellite.id);
+                  setFocusRequest((request) => ({
+                    satelliteId: snapshot.satellite.id,
+                    sequence: (request?.sequence ?? 0) + 1,
+                  }));
+                }}
+                onVisualChange={(key, checked) => updateSatelliteLayer(snapshot.satellite.id, key, checked)}
+                onMarkerChange={(checked) => updateSatelliteVisual(snapshot.satellite.id, "showMarker", checked)}
+                onLabelChange={(checked) => updateSatelliteVisual(snapshot.satellite.id, "showLabel", checked)}
+              />
+            ))}
+          </div>
+        </HudPanel>
+
+        <HudPanel>
+          <div className="flex items-center justify-between gap-3">
+            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Range Check</p>
+            <span className="font-mono text-sm text-cyan-100">{rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : "--"}</span>
+          </div>
+          {satellites.length < 2 ? (
+            <p className="mt-3 text-xs text-zinc-500">Load at least 2 satellites.</p>
+          ) : (
+            <div className="mt-3 grid gap-2">
+              <select
+                value={rangePrimaryId}
+                onChange={(event) => updateRangePrimary(event.target.value)}
+                className="border border-white/10 bg-black/45 px-3 py-2 text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
+              >
+                {!rangePrimaryId && <option value="">Primary: Select satellite</option>}
+                {satellites.map((satellite) => (
+                  <option key={satellite.id} value={satellite.id}>Primary: {satellite.name}</option>
+                ))}
+              </select>
+              <select
+                value={rangeSecondaryId}
+                onChange={(event) => updateRangeSecondary(event.target.value)}
+                className="border border-white/10 bg-black/45 px-3 py-2 text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
+              >
+                {!rangeSecondaryId && <option value="">Secondary: Select satellite</option>}
+                {satellites.map((satellite) => (
+                  <option key={satellite.id} value={satellite.id} disabled={satellite.id === rangePrimaryId}>
+                    Secondary: {satellite.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </HudPanel>
+      </section>
+
+      <section className="pointer-events-auto absolute right-1/2 bottom-4 z-20 w-[min(900px,calc(100vw-2rem))] translate-x-1/2 border border-cyan-300/25 bg-[#071016]/88 px-4 py-3 shadow-2xl backdrop-blur-md">
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="min-w-[240px] border-r border-cyan-300/20 pr-4 max-sm:border-r-0">
+            <p className="font-mono text-[10px] uppercase text-zinc-500">Simulation Time</p>
+            <p className="mt-1 font-mono text-sm font-semibold text-zinc-100">{formatUtc(simTime)}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <ControlButton label="-10" onClick={() => shiftSimulationTime(-10)} />
+            <ControlButton label="-1" onClick={() => shiftSimulationTime(-1)} />
+            <button
+              onClick={() => setIsPlaying((value) => !value)}
+              className={`min-w-32 border px-5 py-2 font-mono text-sm font-semibold uppercase tracking-[0.18em] transition ${
+                isPlaying ? "border-emerald-300 bg-emerald-300/10 text-emerald-200" : "border-cyan-300 bg-cyan-300 text-slate-950"
+              }`}
+            >
+              {isPlaying ? "Pause" : "Play"}
+            </button>
+            <ControlButton label="+1" onClick={() => shiftSimulationTime(1)} />
+            <ControlButton label="+10" onClick={() => shiftSimulationTime(10)} />
+          </div>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            {[1, 10, 60, 300].map((item) => (
+              <button
+                key={item}
+                onClick={() => setSpeed(item)}
+                className={`border px-3 py-2 font-mono text-xs transition ${
+                  speed === item ? "border-cyan-300 bg-cyan-300 text-slate-950" : "border-cyan-300/20 text-cyan-200 hover:border-cyan-300"
+                }`}
+              >
+                {item}x
+              </button>
+            ))}
+            <ControlButton label="Now" onClick={() => setSimTime(new Date())} />
+            <ControlButton label="Reset" onClick={() => setResetSignal((value) => value + 1)} />
+          </div>
+        </div>
+      </section>
+
+      <div className="pointer-events-auto absolute bottom-4 left-4 z-20 flex flex-col gap-2 max-sm:hidden">
+        <IconButton label="Home" onClick={() => setResetSignal((value) => value + 1)} />
+        <IconButton label="Labels" active={showLabels} onClick={() => setShowLabels((value) => !value)} />
       </div>
     </main>
   );
 }
 
-function VisualToggle({
+function HudPanel({ children }: { children: ReactNode }) {
+  return (
+    <div className="border border-cyan-300/20 bg-[#071016]/82 p-4 shadow-2xl backdrop-blur-md">
+      {children}
+    </div>
+  );
+}
+
+function HudMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="border border-cyan-300/25 bg-black/30 px-4 py-2 text-center">
+      <p className="text-xs font-semibold text-zinc-400">{label}</p>
+      <p className="font-mono text-lg font-semibold text-white">{value}</p>
+    </div>
+  );
+}
+
+function Telemetry({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-cyan-300/55">{label}</p>
+      <p className="mt-1 truncate font-mono text-sm font-semibold text-zinc-100">{value}</p>
+    </div>
+  );
+}
+
+function ControlButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="border border-cyan-300/20 px-3 py-2 font-mono text-xs text-cyan-200 transition hover:border-cyan-300 hover:bg-cyan-300/10"
+    >
+      {label}
+    </button>
+  );
+}
+
+function IconButton({
   label,
-  description,
+  active,
+  onClick,
+}: {
+  label: string;
+  active?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`h-12 w-12 border font-mono text-[10px] font-semibold uppercase transition ${
+        active
+          ? "border-cyan-300 bg-cyan-300/15 text-cyan-100"
+          : "border-cyan-300/25 bg-[#071016]/82 text-cyan-300 hover:border-cyan-300"
+      }`}
+      title={label}
+    >
+      {label.slice(0, 2)}
+    </button>
+  );
+}
+
+function LayerToggle({
+  label,
+  tone = "cyan",
   checked,
   onChange,
 }: {
   label: string;
-  description: string;
+  tone?: "cyan" | "lime" | "zinc";
   checked: boolean;
   onChange: (checked: boolean) => void;
 }) {
+  const activeClass = tone === "lime"
+    ? "border-lime-300 bg-lime-300/15 text-lime-100"
+    : "border-cyan-300 bg-cyan-300/15 text-cyan-100";
+
   return (
     <button
       type="button"
       aria-pressed={checked}
       onClick={() => onChange(!checked)}
-      className={`rounded border px-2 py-1 text-left transition ${
+      className={`border px-2 py-1 font-mono text-[10px] uppercase transition ${
         checked
-          ? "border-cyan-300/70 bg-cyan-300/10 text-cyan-100"
-          : "border-white/10 text-zinc-400 hover:border-white/30 hover:text-zinc-200"
+          ? activeClass
+          : "border-white/10 text-zinc-500 hover:border-cyan-300/60 hover:text-zinc-200"
       }`}
-      title={`${label}: ${description}`}
     >
-      <span className="block text-[11px] font-medium">{label}</span>
-      <span className="block text-[10px] text-zinc-500">{description}</span>
+      {label}
     </button>
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+function SatelliteControl({
+  snapshot,
+  isSelected,
+  selectionIndex,
+  onSelect,
+  onFocus,
+  onVisualChange,
+  onMarkerChange,
+  onLabelChange,
+}: {
+  snapshot: SatelliteSnapshot;
+  isSelected: boolean;
+  selectionIndex: number;
+  onSelect: () => void;
+  onFocus: () => void;
+  onVisualChange: (key: "showOrbit" | "showTrail" | "showGroundTrack", checked: boolean) => void;
+  onMarkerChange: (checked: boolean) => void;
+  onLabelChange: (checked: boolean) => void;
+}) {
   return (
-    <div className="rounded-md border border-white/10 bg-black/20 px-3 py-2">
-      <p className="text-xs text-zinc-500">{label}</p>
-      <p className="font-mono text-lg text-white">{value}</p>
-    </div>
-  );
-}
-
-function Detail({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md border border-white/10 bg-[#11151d] px-3 py-3">
-      <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">{label}</p>
-      <p className="mt-1 truncate font-mono text-sm text-zinc-100">{value}</p>
+    <div className={`border p-3 transition ${isSelected ? "border-cyan-300 bg-cyan-300/10" : "border-white/10 bg-black/30 hover:border-cyan-300/35"}`}>
+      <button type="button" onClick={onSelect} className="w-full text-left">
+        <span className="flex items-center justify-between gap-2">
+          <span className="truncate text-sm font-semibold text-white">{snapshot.satellite.name}</span>
+          {isSelected && (
+            <span className="border border-cyan-300/40 px-2 py-0.5 font-mono text-[10px] text-cyan-200">
+              SAT {selectionIndex + 1}
+            </span>
+          )}
+        </span>
+        <span className="mt-1 block font-mono text-[11px] text-zinc-500">
+          NORAD {snapshot.satellite.noradId ?? snapshot.satellite.id}
+        </span>
+      </button>
+      <div className="mt-3 grid grid-cols-3 gap-1.5">
+        <LayerToggle label="Orbit" checked={snapshot.satellite.visual.showOrbit} onChange={(checked) => onVisualChange("showOrbit", checked)} />
+        <LayerToggle label="Trail" checked={snapshot.satellite.visual.showTrail} onChange={(checked) => onVisualChange("showTrail", checked)} />
+        <LayerToggle label="Ground" tone="lime" checked={snapshot.satellite.visual.showGroundTrack} onChange={(checked) => onVisualChange("showGroundTrack", checked)} />
+      </div>
+      {(snapshot.satellite.visual.showTrail || snapshot.satellite.visual.showGroundTrack) && (
+        <p className="mt-2 font-mono text-[10px] leading-4 text-zinc-500">
+          Trail = space path, Ground = surface trace
+        </p>
+      )}
+      <div className="mt-1.5 grid grid-cols-3 gap-1.5">
+        <LayerToggle label="Dot" tone="zinc" checked={snapshot.satellite.visual.showMarker} onChange={onMarkerChange} />
+        <LayerToggle label="Name" tone="zinc" checked={snapshot.satellite.visual.showLabel} onChange={onLabelChange} />
+        <button
+          type="button"
+          onClick={onFocus}
+          className="border border-white/10 px-2 py-1 font-mono text-[10px] uppercase text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100"
+        >
+          Focus
+        </button>
+      </div>
     </div>
   );
 }
