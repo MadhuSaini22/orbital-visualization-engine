@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { OrbitState, RangeMeasurement, SatelliteSnapshot } from "@/domain/orbit";
+import type { ConjunctionSnapshot } from "@/domain/conjunction";
+import { getConjunctionTone } from "@/domain/conjunction";
 import type { ManeuverSnapshot } from "@/domain/maneuver";
 import { getManeuverTone } from "@/domain/maneuver";
 import { splitGroundTrackByLongitudeWrap } from "@/geometry/groundTrack";
@@ -20,9 +22,19 @@ type CesiumGlobeProps = {
   showAllOrbits: boolean;
   showLabels: boolean;
   focusRequest: { satelliteId: string; sequence: number } | null;
+  maneuverFocusRequest: {
+    longitudeDeg: number;
+    latitudeDeg: number;
+    altitudeKm: number;
+    sequence: number;
+  } | null;
   maneuverSnapshots: ManeuverSnapshot[];
   selectedManeuverId: string | null;
   showManeuvers: boolean;
+  conjunctionSnapshots: ConjunctionSnapshot[];
+  selectedConjunctionId: string | null;
+  showConjunctions: boolean;
+  onSelectConjunction: (conjunctionId: string) => void;
   onSelectManeuver: (maneuverId: string) => void;
   onToggleSatellite: (satelliteId: string) => void;
   resetSignal: number;
@@ -66,6 +78,24 @@ function stateToGroundCartesian(Cesium: CesiumModule, state: OrbitState): Cartes
   return Cesium.Cartesian3.fromDegrees(state.longitudeDeg, state.latitudeDeg, 0);
 }
 
+function getManeuverVectorEndpoint(Cesium: CesiumModule, snapshot: ManeuverSnapshot) {
+  if (!snapshot.state) {
+    return null;
+  }
+
+  const [radialMps, tangentialMps, normalMps] = snapshot.event.deltaVVectorMps;
+  const vectorMagnitudeMps = Math.sqrt(radialMps ** 2 + tangentialMps ** 2 + normalMps ** 2);
+
+  // Phase 2 uses a scaled visual vector rather than a full post-burn orbital
+  // solve. The vector gives users direction/magnitude context without claiming
+  // flight-dynamics precision.
+  return Cesium.Cartesian3.fromDegrees(
+    snapshot.state.longitudeDeg + tangentialMps * 5,
+    snapshot.state.latitudeDeg + normalMps * 5,
+    Math.max(snapshot.state.altitudeKm + radialMps * 150 + vectorMagnitudeMps * 420, 120) * 1000,
+  );
+}
+
 function getSnapshotColor(Cesium: CesiumModule, snapshot: SatelliteSnapshot, index: number) {
   return Cesium.Color.fromCssColorString(snapshot.satellite.visual.color ?? palette[index % palette.length]);
 }
@@ -78,9 +108,14 @@ export function CesiumGlobe({
   showAllOrbits,
   showLabels,
   focusRequest,
+  maneuverFocusRequest,
   maneuverSnapshots,
   selectedManeuverId,
   showManeuvers,
+  conjunctionSnapshots,
+  selectedConjunctionId,
+  showConjunctions,
+  onSelectConjunction,
   onSelectManeuver,
   onToggleSatellite,
   resetSignal,
@@ -94,6 +129,8 @@ export function CesiumGlobe({
   const rangeLabelEntityRef = useRef<Entity | null>(null);
   const rangeDotEntitiesRef = useRef<Entity[]>([]);
   const maneuverEntitiesRef = useRef<Map<string, Entity>>(new Map());
+  const maneuverGeometryEntitiesRef = useRef<Entity[]>([]);
+  const conjunctionEntitiesRef = useRef<Entity[]>([]);
   const latestSnapshotsRef = useRef<SatelliteSnapshot[]>(snapshots);
   const hoverInfoRef = useRef<HoverInfo>(null);
   const [layerStats, setLayerStats] = useState({
@@ -204,6 +241,12 @@ export function CesiumGlobe({
           return;
         }
 
+        const pickedConjunctionId = picked?.id?.properties?.conjunctionId?.getValue();
+        if (typeof pickedConjunctionId === "string") {
+          onSelectConjunction(pickedConjunctionId);
+          return;
+        }
+
         const pickedId = picked?.id?.properties?.satelliteId?.getValue();
         if (typeof pickedId === "string") {
           onToggleSatellite(pickedId);
@@ -249,11 +292,13 @@ export function CesiumGlobe({
       rangeLabelEntityRef.current = null;
       rangeDotEntitiesRef.current = [];
       maneuverEntityMap.clear();
+      maneuverGeometryEntitiesRef.current = [];
+      conjunctionEntitiesRef.current = [];
       pathPrimitiveRef.current = null;
       hoverInfoRef.current = null;
       entityMap.clear();
     };
-  }, [onSelectManeuver, onToggleSatellite]);
+  }, [onSelectConjunction, onSelectManeuver, onToggleSatellite]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;
@@ -457,6 +502,9 @@ export function CesiumGlobe({
       return;
     }
 
+    maneuverGeometryEntitiesRef.current.forEach((entity) => viewer.entities.remove(entity));
+    maneuverGeometryEntitiesRef.current = [];
+
     const activeManeuverIds = new Set(
       showManeuvers ? maneuverSnapshots.map((snapshot) => snapshot.event.id) : [],
     );
@@ -520,9 +568,96 @@ export function CesiumGlobe({
         entity.point.pixelSize = new Cesium.ConstantProperty(isSelected ? 17 : 12);
         entity.point.color = new Cesium.ConstantProperty(color.withAlpha(isSelected ? 1 : 0.82));
       }
+
+      if (isSelected && maneuverSnapshot.event.visual.showBurnVector) {
+        const vectorEndpoint = getManeuverVectorEndpoint(Cesium, maneuverSnapshot);
+        if (vectorEndpoint) {
+          maneuverGeometryEntitiesRef.current.push(viewer.entities.add({
+            id: `${maneuverSnapshot.event.id}-burn-vector`,
+            name: `${maneuverSnapshot.event.title} burn vector`,
+            polyline: {
+              positions: [position, vectorEndpoint],
+              width: isSelected ? 7 : 4,
+              material: new Cesium.PolylineArrowMaterialProperty(color.withAlpha(isSelected ? 0.95 : 0.58)),
+              arcType: Cesium.ArcType.NONE,
+            },
+            properties: {
+              maneuverId: maneuverSnapshot.event.id,
+            },
+          }));
+        }
+      }
     });
     viewer.scene.requestRender();
   }, [maneuverSnapshots, selectedManeuverId, showManeuvers, viewerReady]);
+
+  useEffect(() => {
+    const Cesium = cesiumRef.current;
+    const viewer = viewerRef.current;
+    if (!viewerReady || !Cesium || !viewer) {
+      return;
+    }
+
+    conjunctionEntitiesRef.current.forEach((entity) => viewer.entities.remove(entity));
+    conjunctionEntitiesRef.current = [];
+
+    if (!showConjunctions) {
+      return;
+    }
+
+    conjunctionSnapshots.forEach((snapshot) => {
+      if (!snapshot.primaryState || !snapshot.secondaryState) {
+        return;
+      }
+
+      const tone = getConjunctionTone(snapshot.status);
+      const color = Cesium.Color.fromCssColorString(tone.color);
+      const primaryPosition = stateToCartesian(Cesium, snapshot.primaryState);
+      const secondaryPosition = stateToCartesian(Cesium, snapshot.secondaryState);
+      const midpoint = Cesium.Cartesian3.midpoint(primaryPosition, secondaryPosition, new Cesium.Cartesian3());
+      const isSelected = selectedConjunctionId === snapshot.event.id;
+
+      conjunctionEntitiesRef.current.push(viewer.entities.add({
+        id: `${snapshot.event.id}-link`,
+        name: `${snapshot.primary.name} / ${snapshot.secondary.name} conjunction`,
+        polyline: {
+          positions: [primaryPosition, secondaryPosition],
+          width: isSelected ? 3.8 : 2,
+          material: new Cesium.PolylineDashMaterialProperty({
+            color: color.withAlpha(isSelected ? 0.96 : 0.58),
+            dashLength: 18,
+          }),
+          arcType: Cesium.ArcType.NONE,
+        },
+        properties: {
+          conjunctionId: snapshot.event.id,
+        },
+      }));
+
+      conjunctionEntitiesRef.current.push(viewer.entities.add({
+        id: `${snapshot.event.id}-label`,
+        name: `${tone.label} conjunction`,
+        position: midpoint,
+        label: {
+          text: `${tone.label} ${snapshot.missDistanceKm.toLocaleString("en", { maximumFractionDigits: 0 })} km`,
+          font: "700 12px monospace",
+          fillColor: color,
+          outlineColor: Cesium.Color.BLACK,
+          outlineWidth: 2,
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          showBackground: true,
+          backgroundColor: Cesium.Color.BLACK.withAlpha(0.76),
+          backgroundPadding: new Cesium.Cartesian2(7, 4),
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+        properties: {
+          conjunctionId: snapshot.event.id,
+        },
+      }));
+    });
+
+    viewer.scene.requestRender();
+  }, [conjunctionSnapshots, selectedConjunctionId, showConjunctions, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;
@@ -625,6 +760,32 @@ export function CesiumGlobe({
       duration: 0.75,
     });
   }, [focusRequest, viewerReady]);
+
+  useEffect(() => {
+    const Cesium = cesiumRef.current;
+    const viewer = viewerRef.current;
+    if (!viewerReady || !Cesium || !viewer || !maneuverFocusRequest) {
+      return;
+    }
+
+    const burnPosition = Cesium.Cartesian3.fromDegrees(
+      maneuverFocusRequest.longitudeDeg,
+      maneuverFocusRequest.latitudeDeg,
+      maneuverFocusRequest.altitudeKm * 1000,
+    );
+
+    // Frame the burn marker as an object in space instead of placing the camera
+    // directly above it. This keeps Earth, the marker, and burn vector visible
+    // together when users jump from the maneuver modal.
+    viewer.camera.flyToBoundingSphere(new Cesium.BoundingSphere(burnPosition, 1000000), {
+      offset: new Cesium.HeadingPitchRange(
+        viewer.camera.heading,
+        Cesium.Math.toRadians(-28),
+        7600000,
+      ),
+      duration: 0.85,
+    });
+  }, [maneuverFocusRequest, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;

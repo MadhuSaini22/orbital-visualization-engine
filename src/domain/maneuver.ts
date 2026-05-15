@@ -12,16 +12,29 @@ export type ManeuverEvent = {
   type: ManeuverType;
   status: ManeuverStatus;
   deltaVMps: number;
+  deltaVVectorMps: [number, number, number];
+  frame: "RTN" | "ECI" | "BODY" | "LVLH";
   durationSec: number;
   description: string;
+  visual: {
+    showBurnVector: boolean;
+    showPrePostOrbit: boolean;
+  };
 };
 
 export type ManeuverSnapshot = {
   event: ManeuverEvent;
   satellite: SatelliteObject;
   state: OrbitState | null;
+  preTrajectory: OrbitState[];
+  postTrajectory: OrbitState[];
   minutesFromSimulationTime: number;
 };
+
+export function getDeltaVMagnitudeMps(event: ManeuverEvent) {
+  const [x, y, z] = event.deltaVVectorMps;
+  return Math.sqrt(x ** 2 + y ** 2 + z ** 2);
+}
 
 export function getManeuverTone(status: ManeuverStatus) {
   if (status === "executed") {

@@ -9,8 +9,14 @@ export const sampleManeuvers: ManeuverEvent[] = [
     type: "orbit_raise",
     status: "planned",
     deltaVMps: 0.9,
+    deltaVVectorMps: [0.12, 0.88, 0.08],
+    frame: "RTN",
     durationSec: 420,
     description: "Small prograde burn marker used to validate maneuver event visualization.",
+    visual: {
+      showBurnVector: true,
+      showPrePostOrbit: true,
+    },
   },
   {
     id: "mnv-noaa-phase-001",
@@ -20,8 +26,14 @@ export const sampleManeuvers: ManeuverEvent[] = [
     type: "phasing",
     status: "candidate",
     deltaVMps: 0.35,
+    deltaVVectorMps: [0.04, 0.33, -0.1],
+    frame: "RTN",
     durationSec: 180,
     description: "Candidate phasing point for timeline and orbit-context review.",
+    visual: {
+      showBurnVector: true,
+      showPrePostOrbit: true,
+    },
   },
   {
     id: "mnv-landsat-keep-001",
@@ -31,7 +43,13 @@ export const sampleManeuvers: ManeuverEvent[] = [
     type: "station_keep",
     status: "executed",
     deltaVMps: 0.55,
+    deltaVVectorMps: [-0.08, 0.48, 0.24],
+    frame: "RTN",
     durationSec: 260,
     description: "Executed maintenance burn marker for comparing planned and historical events.",
+    visual: {
+      showBurnVector: true,
+      showPrePostOrbit: true,
+    },
   },
 ];

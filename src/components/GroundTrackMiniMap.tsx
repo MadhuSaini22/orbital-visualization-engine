@@ -107,7 +107,7 @@ export function GroundTrackMiniMap({
                 </p>
                 <h2 className="mt-1 text-xl font-semibold text-white">Surface Path History</h2>
                 <p className="mt-1 text-sm text-zinc-500">
-                  Larger 2D view for inspecting wave-shaped ground traces across Earth rotation.
+                  Larger 2D view for inspecting wave-shaped ground traces across Earth rotation. Longer ranges show more repeated passes.
                 </p>
               </div>
               <button

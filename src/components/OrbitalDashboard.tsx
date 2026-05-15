@@ -3,13 +3,17 @@
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { createPortal } from "react-dom";
 import type { SatelliteObject, SatelliteSnapshot, SatelliteVisualSettings } from "@/domain/orbit";
 import { GroundTrackMiniMap } from "@/components/GroundTrackMiniMap";
 import type { GroundTrackRangeId, GroundTrackRangeOption } from "@/components/GroundTrackMiniMap";
 import { sampleTle } from "@/data/sampleTle";
 import { sampleManeuvers } from "@/data/sampleManeuvers";
+import { sampleConjunctions } from "@/data/sampleConjunctions";
+import type { ConjunctionEvent, ConjunctionSnapshot } from "@/domain/conjunction";
+import { getConjunctionStatus, getConjunctionTone } from "@/domain/conjunction";
 import type { ManeuverEvent, ManeuverSnapshot } from "@/domain/maneuver";
-import { getManeuverTone } from "@/domain/maneuver";
+import { getDeltaVMagnitudeMps, getManeuverTone } from "@/domain/maneuver";
 import { parseSatelliteSource } from "@/domain/satelliteConfig";
 import { MAX_TLE_OBJECTS } from "@/domain/tle";
 import { distanceBetweenOrbitStatesKm } from "@/geometry/distance";
@@ -25,6 +29,13 @@ const CesiumGlobe = dynamic(
   },
 );
 
+type ManeuverFocusRequest = {
+  longitudeDeg: number;
+  latitudeDeg: number;
+  altitudeKm: number;
+  sequence: number;
+};
+
 const sampleUrl = "/data/sample.tle";
 const initialSimulationTime = new Date("2026-05-08T00:00:00.000Z");
 const trajectoryOptions = {
@@ -33,11 +44,13 @@ const trajectoryOptions = {
   stepSec: 60,
 };
 const trajectoryBucketMs = 5 * 60 * 1000;
+const maneuverWindowMinutes = 45;
+const conjunctionStepSec = 120;
 const groundTrackRangeOptions = [
   {
     id: "live",
-    label: "Live 3h",
-    pastMinutes: 180,
+    label: "Live 6h",
+    pastMinutes: 360,
     stepSec: 60,
     bucketMs: 60 * 1000,
   },
@@ -99,6 +112,62 @@ function getRangePair(selectedSatelliteIds: string[]) {
   };
 }
 
+function addMinutes(date: Date, minutes: number) {
+  return new Date(date.getTime() + minutes * 60 * 1000);
+}
+
+function normalizeManeuverEvents(raw: unknown): ManeuverEvent[] {
+  const maybeEvents = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === "object" && "maneuvers" in raw && Array.isArray((raw as { maneuvers?: unknown }).maneuvers)
+      ? (raw as { maneuvers: unknown[] }).maneuvers
+      : [];
+
+  return maybeEvents.flatMap((event): ManeuverEvent[] => {
+    if (!event || typeof event !== "object") {
+      return [];
+    }
+
+    const candidate = event as Partial<ManeuverEvent>;
+    if (!candidate.id || !candidate.satelliteId || !candidate.title || !candidate.timeUtc) {
+      return [];
+    }
+
+    return [{
+      id: candidate.id,
+      satelliteId: candidate.satelliteId,
+      title: candidate.title,
+      timeUtc: candidate.timeUtc,
+      type: candidate.type ?? "station_keep",
+      status: candidate.status ?? "candidate",
+      deltaVMps: candidate.deltaVMps ?? getDeltaVMagnitudeMps({
+        ...candidate,
+        deltaVVectorMps: candidate.deltaVVectorMps ?? [0, 0, 0],
+      } as ManeuverEvent),
+      deltaVVectorMps: candidate.deltaVVectorMps ?? [0, candidate.deltaVMps ?? 0, 0],
+      frame: candidate.frame ?? "RTN",
+      durationSec: candidate.durationSec ?? 0,
+      description: candidate.description ?? "Maneuver event loaded from JSON.",
+      visual: {
+        showBurnVector: candidate.visual?.showBurnVector ?? true,
+        showPrePostOrbit: candidate.visual?.showPrePostOrbit ?? true,
+      },
+    }];
+  });
+}
+
+function relativeVelocityKmps(a: SatelliteSnapshot["state"], b: SatelliteSnapshot["state"]) {
+  if (!a?.velocityEciKmps || !b?.velocityEciKmps) {
+    return null;
+  }
+
+  return Math.sqrt(
+    (a.velocityEciKmps[0] - b.velocityEciKmps[0]) ** 2 +
+    (a.velocityEciKmps[1] - b.velocityEciKmps[1]) ** 2 +
+    (a.velocityEciKmps[2] - b.velocityEciKmps[2]) ** 2,
+  );
+}
+
 export function OrbitalDashboard() {
   const [tleUrl, setTleUrl] = useState(sampleUrl);
   const initialParsed = useMemo(() => parseSatelliteSource(sampleTle), []);
@@ -111,12 +180,18 @@ export function OrbitalDashboard() {
   const [speed, setSpeed] = useState(60);
   const [showLabels, setShowLabels] = useState(true);
   const [showAllOrbits, setShowAllOrbits] = useState(false);
+  const [showRangeCheck, setShowRangeCheck] = useState(false);
   const [groundTrackRangeId, setGroundTrackRangeId] = useState<GroundTrackRangeId>("live");
   const [showManeuvers, setShowManeuvers] = useState(false);
-  const [maneuverEvents] = useState<ManeuverEvent[]>(sampleManeuvers);
+  const [maneuverEvents, setManeuverEvents] = useState<ManeuverEvent[]>(sampleManeuvers);
   const [selectedManeuverId, setSelectedManeuverId] = useState<string | null>(sampleManeuvers[0]?.id ?? null);
+  const [isManeuverModalOpen, setIsManeuverModalOpen] = useState(false);
+  const [showConjunctions, setShowConjunctions] = useState(false);
+  const [conjunctionEvents] = useState<ConjunctionEvent[]>(sampleConjunctions);
+  const [selectedConjunctionId, setSelectedConjunctionId] = useState<string | null>(sampleConjunctions[0]?.id ?? null);
   const [resetSignal, setResetSignal] = useState(0);
   const [focusRequest, setFocusRequest] = useState<{ satelliteId: string; sequence: number } | null>(null);
+  const [maneuverFocusRequest, setManeuverFocusRequest] = useState<ManeuverFocusRequest | null>(null);
   const lastTickRef = useRef<number | null>(null);
 
   const propagator = useMemo(() => new SatelliteJsPropagator(satellites), [satellites]);
@@ -142,16 +217,71 @@ export function OrbitalDashboard() {
       if (!satellite) {
         return [];
       }
+      const eventTime = new Date(event.timeUtc);
 
       return [{
         event,
         satellite,
         state: propagator.getState(satellite.id, event.timeUtc),
+        preTrajectory: propagator.getTrajectory(
+          satellite.id,
+          addMinutes(eventTime, -maneuverWindowMinutes).toISOString(),
+          event.timeUtc,
+          90,
+        ),
+        postTrajectory: propagator.getTrajectory(
+          satellite.id,
+          event.timeUtc,
+          addMinutes(eventTime, maneuverWindowMinutes).toISOString(),
+          90,
+        ),
         minutesFromSimulationTime: (new Date(event.timeUtc).getTime() - simTime.getTime()) / 60000,
       }];
     });
   }, [maneuverEvents, propagator, satellites, simTime]);
   const selectedManeuver = maneuverSnapshots.find((snapshot) => snapshot.event.id === selectedManeuverId) ?? maneuverSnapshots[0] ?? null;
+  const conjunctionSnapshots: ConjunctionSnapshot[] = useMemo(() => {
+    return conjunctionEvents.flatMap((event): ConjunctionSnapshot[] => {
+      const primary = satellites.find((item) => item.id === event.primarySatelliteId || item.noradId === event.primarySatelliteId);
+      const secondary = satellites.find((item) => item.id === event.secondarySatelliteId || item.noradId === event.secondarySatelliteId);
+
+      if (!primary || !secondary) {
+        return [];
+      }
+
+      let best: ConjunctionSnapshot | null = null;
+      const startMs = new Date(event.startTimeUtc).getTime();
+      const endMs = new Date(event.endTimeUtc).getTime();
+
+      for (let timeMs = startMs; timeMs <= endMs; timeMs += conjunctionStepSec * 1000) {
+        const timeUtc = new Date(timeMs).toISOString();
+        const primaryState = propagator.getState(primary.id, timeUtc);
+        const secondaryState = propagator.getState(secondary.id, timeUtc);
+        const missDistanceKm = distanceBetweenOrbitStatesKm(primaryState, secondaryState);
+
+        if (missDistanceKm === null) {
+          continue;
+        }
+
+        if (!best || missDistanceKm < best.missDistanceKm) {
+          best = {
+            event,
+            primary,
+            secondary,
+            tcaUtc: timeUtc,
+            missDistanceKm,
+            relativeVelocityKmps: relativeVelocityKmps(primaryState, secondaryState),
+            status: getConjunctionStatus(missDistanceKm, event.warningDistanceKm, event.criticalDistanceKm),
+            primaryState,
+            secondaryState,
+          };
+        }
+      }
+
+      return best ? [best] : [];
+    });
+  }, [conjunctionEvents, propagator, satellites]);
+  const selectedConjunction = conjunctionSnapshots.find((snapshot) => snapshot.event.id === selectedConjunctionId) ?? conjunctionSnapshots[0] ?? null;
   const latestSelectedId = selectedSatelliteIds.at(-1) ?? null;
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
   const validCount = snapshots.filter((item) => item.state).length;
@@ -163,7 +293,7 @@ export function OrbitalDashboard() {
     secondaryRangeSnapshot?.state ?? null,
   );
   const rangeMeasurement =
-    primaryRangeSnapshot && secondaryRangeSnapshot && rangeDistanceKm !== null
+    showRangeCheck && primaryRangeSnapshot && secondaryRangeSnapshot && rangeDistanceKm !== null
       ? {
           primary: primaryRangeSnapshot,
           secondary: secondaryRangeSnapshot,
@@ -205,13 +335,17 @@ export function OrbitalDashboard() {
         return current;
       }
 
+      if (!showRangeCheck) {
+        return [satelliteId];
+      }
+
       if (current.length >= 2) {
         return [current[1], satelliteId];
       }
 
       return [...current, satelliteId];
     });
-  }, []);
+  }, [showRangeCheck]);
 
   const updateSatelliteLayer = useCallback((
     satelliteId: string,
@@ -227,6 +361,10 @@ export function OrbitalDashboard() {
 
   const toggleSatelliteSelection = useCallback((satelliteId: string) => {
     setSelectedSatelliteIds((current) => {
+      if (!showRangeCheck) {
+        return [satelliteId];
+      }
+
       if (current.includes(satelliteId)) {
         return current.filter((id) => id !== satelliteId);
       }
@@ -237,7 +375,7 @@ export function OrbitalDashboard() {
 
       return [...current, satelliteId];
     });
-  }, []);
+  }, [showRangeCheck]);
 
   const updateRangePrimary = useCallback((satelliteId: string) => {
     setSelectedSatelliteIds((current) => {
@@ -258,6 +396,13 @@ export function OrbitalDashboard() {
       return currentPrimaryId ? [currentPrimaryId, satelliteId] : [satelliteId];
     });
   }, [satellites]);
+
+  const toggleRangeCheck = useCallback(() => {
+    if (showRangeCheck) {
+      setSelectedSatelliteIds((selectedIds) => selectedIds.slice(-1));
+    }
+    setShowRangeCheck((current) => !current);
+  }, [showRangeCheck]);
 
   const loadFromUrl = useCallback(async () => {
     const source = tleUrl.trim();
@@ -294,6 +439,33 @@ export function OrbitalDashboard() {
   }, []);
 
   useEffect(() => {
+    let ignore = false;
+
+    async function loadManeuvers() {
+      try {
+        const response = await fetch("/data/maneuvers.json", { cache: "no-store" });
+        if (!response.ok) {
+          return;
+        }
+
+        const parsed = normalizeManeuverEvents(await response.json());
+        if (!ignore && parsed.length > 0) {
+          setManeuverEvents(parsed);
+          setSelectedManeuverId(parsed[0].id);
+        }
+      } catch {
+        // The built-in TypeScript sample remains the fallback if JSON loading fails.
+      }
+    }
+
+    loadManeuvers();
+
+    return () => {
+      ignore = true;
+    };
+  }, []);
+
+  useEffect(() => {
     lastTickRef.current = Date.now();
 
     const intervalId = window.setInterval(() => {
@@ -323,9 +495,14 @@ export function OrbitalDashboard() {
           showAllOrbits={showAllOrbits}
           showLabels={showLabels}
           focusRequest={focusRequest}
+          maneuverFocusRequest={maneuverFocusRequest}
           maneuverSnapshots={maneuverSnapshots}
           selectedManeuverId={selectedManeuver?.event.id ?? null}
           showManeuvers={showManeuvers}
+          conjunctionSnapshots={conjunctionSnapshots}
+          selectedConjunctionId={selectedConjunction?.event.id ?? null}
+          showConjunctions={showConjunctions}
+          onSelectConjunction={setSelectedConjunctionId}
           onSelectManeuver={setSelectedManeuverId}
           onToggleSatellite={toggleSatelliteSelection}
           resetSignal={resetSignal}
@@ -337,13 +514,13 @@ export function OrbitalDashboard() {
       <header className="pointer-events-auto absolute top-0 right-0 left-0 z-20 border-b border-cyan-300/20 bg-[#071016]/88 px-4 py-3 shadow-2xl backdrop-blur-md">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="font-mono text-[11px] font-semibold uppercase text-cyan-300">Phase 1 // Orbit Visualization Engine</p>
+            <p className="font-mono text-[11px] font-semibold uppercase text-cyan-300">Phase 3 // Orbit Visualization Engine</p>
             <h1 className="text-xl font-semibold text-white">Multi-Satellite Orbital Operations</h1>
           </div>
           <div className="grid min-w-[520px] grid-cols-4 gap-3 max-lg:min-w-0 max-lg:flex-1 max-sm:grid-cols-2">
             <HudMetric label="Satellites" value={`${satellites.length}/${MAX_TLE_OBJECTS}`} />
             <HudMetric label="Visible" value={String(validCount)} />
-            <HudMetric label="Range" value={rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : "--"} />
+            <HudMetric label="Range" value={showRangeCheck && rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : "--"} />
             <HudMetric label="Speed" value={`${speed}x`} />
           </div>
         </div>
@@ -437,8 +614,8 @@ export function OrbitalDashboard() {
             </button>
           </div>
           <div className="mt-3 flex items-center justify-between border border-white/10 bg-black/30 px-3 py-2 text-xs text-zinc-300">
-            <span>Selected track pair</span>
-            <span className="font-mono text-cyan-200">{selectedSatelliteIds.length}/2</span>
+            <span>{showRangeCheck ? "Selected range pair" : "Selected satellite"}</span>
+            <span className="font-mono text-cyan-200">{selectedSatelliteIds.length}/{showRangeCheck ? 2 : 1}</span>
           </div>
           <div className="mt-3 max-h-[34vh] space-y-2 overflow-auto pr-1">
             {snapshots.map((snapshot) => (
@@ -466,9 +643,26 @@ export function OrbitalDashboard() {
         <HudPanel>
           <div className="flex items-center justify-between gap-3">
             <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Range Check</p>
-            <span className="font-mono text-sm text-cyan-100">{rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : "--"}</span>
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-sm text-cyan-100">{showRangeCheck && rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : "--"}</span>
+              <button
+                type="button"
+                aria-pressed={showRangeCheck}
+                onClick={toggleRangeCheck}
+                className={`flex min-w-16 items-center gap-2 border px-2 py-1 font-mono text-[10px] uppercase transition ${
+                  showRangeCheck ? "border-cyan-300 bg-cyan-300/15 text-cyan-100" : "border-white/10 text-zinc-500 hover:border-cyan-300"
+                }`}
+              >
+                <span className={`h-2.5 w-2.5 rounded-full ${showRangeCheck ? "bg-cyan-300" : "bg-zinc-600"}`} />
+                {showRangeCheck ? "On" : "Off"}
+              </button>
+            </div>
           </div>
-          {satellites.length < 2 ? (
+          {!showRangeCheck ? (
+            <p className="mt-3 text-xs leading-5 text-zinc-500">
+              Range is off. Globe clicks select one active satellite only.
+            </p>
+          ) : satellites.length < 2 ? (
             <p className="mt-3 text-xs text-zinc-500">Load at least 2 satellites.</p>
           ) : (
             <div className="mt-3 grid gap-2">
@@ -504,6 +698,15 @@ export function OrbitalDashboard() {
           showManeuvers={showManeuvers}
           onSelectManeuver={setSelectedManeuverId}
           onToggleManeuvers={() => setShowManeuvers((value) => !value)}
+          onOpenManeuverModal={() => setIsManeuverModalOpen(true)}
+        />
+
+        <ConjunctionPanel
+          conjunctionSnapshots={conjunctionSnapshots}
+          selectedConjunctionId={selectedConjunction?.event.id ?? null}
+          showConjunctions={showConjunctions}
+          onSelectConjunction={setSelectedConjunctionId}
+          onToggleConjunctions={() => setShowConjunctions((value) => !value)}
         />
       </section>
 
@@ -528,7 +731,7 @@ export function OrbitalDashboard() {
             <ControlButton label="+10" onClick={() => shiftSimulationTime(10)} />
           </div>
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            {[1, 10, 60, 300].map((item) => (
+            {[60, 300, 600].map((item) => (
               <button
                 key={item}
                 onClick={() => setSpeed(item)}
@@ -549,6 +752,31 @@ export function OrbitalDashboard() {
         <IconButton label="Home" onClick={() => setResetSignal((value) => value + 1)} />
         <IconButton label="Labels" active={showLabels} onClick={() => setShowLabels((value) => !value)} />
       </div>
+
+      {isManeuverModalOpen && (
+        <ManeuverModal
+          maneuverSnapshots={maneuverSnapshots}
+          selectedManeuverId={selectedManeuver?.event.id ?? null}
+          onSelectManeuver={setSelectedManeuverId}
+          onJumpToManeuver={(snapshot) => {
+            setShowManeuvers(true);
+            setSelectedManeuverId(snapshot.event.id);
+            setSimTime(new Date(snapshot.event.timeUtc));
+            setIsManeuverModalOpen(false);
+            keepSatelliteInSelection(snapshot.satellite.id);
+            const maneuverState = snapshot.state;
+            if (maneuverState) {
+              setManeuverFocusRequest((request) => ({
+                longitudeDeg: maneuverState.longitudeDeg,
+                latitudeDeg: maneuverState.latitudeDeg,
+                altitudeKm: maneuverState.altitudeKm,
+                sequence: (request?.sequence ?? 0) + 1,
+              }));
+            }
+          }}
+          onClose={() => setIsManeuverModalOpen(false)}
+        />
+      )}
     </main>
   );
 }
@@ -669,18 +897,44 @@ function formatRelativeMinutes(minutes: number) {
   return minutes >= 0 ? `T+${value}` : `T-${value}`;
 }
 
+function getManeuverStatusDescription(status: ManeuverEvent["status"]) {
+  if (status === "planned") {
+    return "Planned means the burn is scheduled or approved, but has not happened yet.";
+  }
+
+  if (status === "candidate") {
+    return "Candidate means this is a possible burn option being reviewed, not final.";
+  }
+
+  return "Executed means the burn already happened and is shown as historical context.";
+}
+
+function getConjunctionStatusDescription(status: ConjunctionSnapshot["status"]) {
+  if (status === "critical") {
+    return "Critical means the closest approach is inside the configured critical miss-distance threshold.";
+  }
+
+  if (status === "warning") {
+    return "Warning means the satellites pass inside the warning threshold, but not inside the critical threshold.";
+  }
+
+  return "Safe means the closest approach stays outside the warning threshold in this sample window.";
+}
+
 function ManeuverPanel({
   maneuverSnapshots,
   selectedManeuverId,
   showManeuvers,
   onSelectManeuver,
   onToggleManeuvers,
+  onOpenManeuverModal,
 }: {
   maneuverSnapshots: ManeuverSnapshot[];
   selectedManeuverId: string | null;
   showManeuvers: boolean;
   onSelectManeuver: (maneuverId: string) => void;
   onToggleManeuvers: () => void;
+  onOpenManeuverModal: () => void;
 }) {
   const selectedManeuver = maneuverSnapshots.find((snapshot) => snapshot.event.id === selectedManeuverId);
   const handleToggleManeuvers = () => {
@@ -695,68 +949,293 @@ function ManeuverPanel({
     <HudPanel>
       <div className="flex items-center justify-between gap-3">
         <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Maneuvers</p>
-        <button
-          type="button"
-          aria-pressed={showManeuvers}
-          onClick={handleToggleManeuvers}
-          className={`flex min-w-16 items-center gap-2 border px-2 py-1 font-mono text-[10px] uppercase transition ${
-            showManeuvers ? "border-fuchsia-300 bg-fuchsia-300/15 text-fuchsia-100" : "border-white/10 text-zinc-500 hover:border-fuchsia-300"
-          }`}
-        >
-          <span className={`h-2.5 w-2.5 rounded-full ${showManeuvers ? "bg-fuchsia-300" : "bg-zinc-600"}`} />
-          {showManeuvers ? "On" : "Off"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            aria-pressed={showManeuvers}
+            onClick={handleToggleManeuvers}
+            className={`flex min-w-16 items-center gap-2 border px-2 py-1 font-mono text-[10px] uppercase transition ${
+              showManeuvers ? "border-fuchsia-300 bg-fuchsia-300/15 text-fuchsia-100" : "border-white/10 text-zinc-500 hover:border-fuchsia-300"
+            }`}
+          >
+            <span className={`h-2.5 w-2.5 rounded-full ${showManeuvers ? "bg-fuchsia-300" : "bg-zinc-600"}`} />
+            {showManeuvers ? "On" : "Off"}
+          </button>
+          <button
+            type="button"
+            onClick={onOpenManeuverModal}
+            className="grid h-8 w-8 place-items-center border border-fuchsia-300/35 text-fuchsia-100 transition hover:border-fuchsia-300 hover:bg-fuchsia-300/10"
+            aria-label="Open maneuver details"
+            title="Open maneuver details"
+          >
+            <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
+              <path d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
+            </svg>
+          </button>
+        </div>
       </div>
       <p className="mt-1 text-[11px] text-zinc-500">
         {showManeuvers ? `${maneuverSnapshots.length} event markers visible` : "Enable to show maneuver markers and event details."}
       </p>
+      {showManeuvers && selectedManeuver && (
+        <button
+          type="button"
+          onClick={onOpenManeuverModal}
+          className="mt-3 w-full border border-fuchsia-300/25 bg-fuchsia-300/5 px-3 py-2 text-left transition hover:border-fuchsia-300/60"
+        >
+          <span className="block text-xs font-semibold text-white">{selectedManeuver.event.title}</span>
+          <span className="mt-1 flex items-center justify-between font-mono text-[11px] text-zinc-400">
+            <span>{selectedManeuver.satellite.name}</span>
+            <span>{formatNumber(selectedManeuver.event.deltaVMps, 2)} m/s</span>
+          </span>
+        </button>
+      )}
+    </HudPanel>
+  );
+}
 
-      {showManeuvers && (
-        <>
-          <div className="mt-3 max-h-52 space-y-2 overflow-auto pr-1">
-            {maneuverSnapshots.map((snapshot) => {
-              const tone = getManeuverTone(snapshot.event.status);
-              const isSelected = selectedManeuverId === snapshot.event.id;
+function ManeuverModal({
+  maneuverSnapshots,
+  selectedManeuverId,
+  onSelectManeuver,
+  onJumpToManeuver,
+  onClose,
+}: {
+  maneuverSnapshots: ManeuverSnapshot[];
+  selectedManeuverId: string | null;
+  onSelectManeuver: (maneuverId: string) => void;
+  onJumpToManeuver: (snapshot: ManeuverSnapshot) => void;
+  onClose: () => void;
+}) {
+  const selectedManeuver = maneuverSnapshots.find((snapshot) => snapshot.event.id === selectedManeuverId) ?? maneuverSnapshots[0] ?? null;
 
-              return (
-                <button
-                  key={snapshot.event.id}
-                  type="button"
-                  onClick={() => onSelectManeuver(snapshot.event.id)}
-                  className={`w-full border p-3 text-left transition ${
-                    isSelected ? "border-fuchsia-300 bg-fuchsia-300/10" : "border-white/10 bg-black/30 hover:border-fuchsia-300/45"
-                  }`}
-                >
-                  <span className="flex items-start justify-between gap-3">
-                    <span>
-                      <span className="block text-sm font-semibold text-white">{snapshot.event.title}</span>
-                      <span className="mt-1 block font-mono text-[10px] uppercase text-zinc-500">{snapshot.satellite.name}</span>
-                    </span>
-                    <span className="border px-2 py-0.5 font-mono text-[10px]" style={{ borderColor: tone.color, color: tone.color }}>
-                      {tone.label}
-                    </span>
-                  </span>
-                  <span className="mt-2 flex items-center justify-between font-mono text-[11px] text-zinc-400">
-                    <span>{formatRelativeMinutes(snapshot.minutesFromSimulationTime)}</span>
-                    <span>{formatNumber(snapshot.event.deltaVMps, 2)} m/s</span>
-                  </span>
-                </button>
-              );
-            })}
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
+      <div className="relative flex h-[75vh] w-[min(1180px,75vw)] flex-col border border-fuchsia-300/35 bg-[#071016]/95 shadow-2xl max-lg:w-[94vw]">
+        <div className="flex items-center justify-between border-b border-fuchsia-300/20 px-5 py-4">
+          <div>
+            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-fuchsia-200">Phase 2 Maneuver Visualization</p>
+            <h2 className="text-xl font-semibold text-white">Maneuver Events</h2>
           </div>
-          {selectedManeuver && (
-            <div className="mt-3 border border-white/10 bg-black/35 p-3">
-              <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-fuchsia-200">Selected Maneuver</p>
-              <p className="mt-2 text-xs leading-5 text-zinc-300">{selectedManeuver.event.description}</p>
+          <button
+            type="button"
+            onClick={onClose}
+            className="grid h-9 w-9 place-items-center border border-white/15 text-zinc-200 transition hover:border-fuchsia-300 hover:text-white"
+            aria-label="Close maneuver modal"
+            title="Close"
+          >
+            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="grid min-h-0 flex-1 grid-cols-[340px_1fr] gap-4 overflow-hidden p-5 max-lg:grid-cols-1">
+          <div className="min-h-0 overflow-auto border border-white/10 bg-black/25 p-3">
+            <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-zinc-500">Event Timeline</p>
+            <div className="mt-3 space-y-2">
+              {maneuverSnapshots.map((snapshot) => {
+                const tone = getManeuverTone(snapshot.event.status);
+                const isSelected = selectedManeuver?.event.id === snapshot.event.id;
+
+                return (
+                  <button
+                    key={snapshot.event.id}
+                    type="button"
+                    onClick={() => onSelectManeuver(snapshot.event.id)}
+                    className={`w-full border p-3 text-left transition ${
+                      isSelected ? "border-fuchsia-300 bg-fuchsia-300/10" : "border-white/10 bg-black/30 hover:border-fuchsia-300/45"
+                    }`}
+                  >
+                    <span className="flex items-start justify-between gap-3">
+                      <span>
+                        <span className="block text-sm font-semibold text-white">{snapshot.event.title}</span>
+                        <span className="mt-1 block font-mono text-[10px] uppercase text-zinc-500">{snapshot.satellite.name}</span>
+                      </span>
+                      <span
+                        className="border px-2 py-0.5 font-mono text-[10px]"
+                        style={{ borderColor: tone.color, color: tone.color }}
+                        title={getManeuverStatusDescription(snapshot.event.status)}
+                      >
+                        {tone.label}
+                      </span>
+                    </span>
+                    <span className="mt-2 flex items-center justify-between font-mono text-[11px] text-zinc-400">
+                      <span>{formatRelativeMinutes(snapshot.minutesFromSimulationTime)}</span>
+                      <span>{formatNumber(snapshot.event.deltaVMps, 2)} m/s</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {selectedManeuver ? (
+            <div className="min-h-0 overflow-auto border border-white/10 bg-black/25 p-5">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <p className="font-mono text-xs uppercase tracking-[0.18em] text-fuchsia-200">Selected Maneuver</p>
+                  <h3 className="mt-2 text-2xl font-semibold text-white">{selectedManeuver.event.title}</h3>
+                  <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-300">{selectedManeuver.event.description}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onJumpToManeuver(selectedManeuver)}
+                  className="border border-fuchsia-300 bg-fuchsia-300/10 px-4 py-2 font-mono text-xs uppercase tracking-[0.14em] text-fuchsia-100 transition hover:bg-fuchsia-300 hover:text-slate-950"
+                >
+                  Jump To Burn
+                </button>
+              </div>
+
+              <div className="mt-6 grid grid-cols-4 gap-3 max-xl:grid-cols-2">
+                <ManeuverMetric label="Satellite" value={selectedManeuver.satellite.name} />
+                <ManeuverMetric
+                  label="Status"
+                  value={getManeuverTone(selectedManeuver.event.status).label}
+                  title={getManeuverStatusDescription(selectedManeuver.event.status)}
+                />
+                <ManeuverMetric label="Type" value={selectedManeuver.event.type.replaceAll("_", " ")} />
+                <ManeuverMetric label="Burn Duration" value={`${selectedManeuver.event.durationSec}s`} />
+                <ManeuverMetric label="Event Time" value={formatUtc(new Date(selectedManeuver.event.timeUtc))} />
+                <ManeuverMetric label="Relative Time" value={formatRelativeMinutes(selectedManeuver.minutesFromSimulationTime)} />
+                <ManeuverMetric label="Altitude" value={`${formatNumber(selectedManeuver.state?.altitudeKm)} km`} />
+                <ManeuverMetric label="Delta-V" value={`${formatNumber(selectedManeuver.event.deltaVMps, 2)} m/s`} />
+              </div>
+
+              <div className="mt-5 grid grid-cols-2 gap-4 max-lg:grid-cols-1">
+                <div className="border border-white/10 bg-black/30 p-4">
+                  <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Delta-V Vector</p>
+                  <p className="mt-2 text-xs leading-5 text-zinc-400">
+                    RTN means Radial, Along-track, Cross-track. These values show the planned burn direction components.
+                  </p>
+                  <div className="mt-4 grid grid-cols-3 gap-2">
+                    {["R", "T", "N"].map((axis, index) => (
+                      <div key={axis} className="border border-white/10 bg-black/35 p-3">
+                        <p className="font-mono text-[10px] text-zinc-500">{axis}</p>
+                        <p className="mt-1 font-mono text-sm font-semibold text-white">{formatNumber(selectedManeuver.event.deltaVVectorMps[index], 2)} m/s</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="border border-white/10 bg-black/30 p-4">
+                  <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Visual Layers</p>
+                  <div className="mt-3 space-y-3 text-sm text-zinc-300">
+                    <p>Burn marker: magenta event point on the globe.</p>
+                    <p>Vector: arrow from burn point showing the planned direction.</p>
+                    <p>Only the selected maneuver shows a burn vector. Other events stay as markers to keep the globe readable.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="grid place-items-center border border-white/10 bg-black/25 text-sm text-zinc-500">No maneuver events loaded.</div>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function ManeuverMetric({ label, value, title }: { label: string; value: string; title?: string }) {
+  return (
+    <div className="border border-white/10 bg-black/30 p-3" title={title}>
+      <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-cyan-300/60">{label}</p>
+      <p className="mt-2 break-words font-mono text-sm font-semibold text-white">{value}</p>
+    </div>
+  );
+}
+
+function ConjunctionPanel({
+  conjunctionSnapshots,
+  selectedConjunctionId,
+  showConjunctions,
+  onSelectConjunction,
+  onToggleConjunctions,
+}: {
+  conjunctionSnapshots: ConjunctionSnapshot[];
+  selectedConjunctionId: string | null;
+  showConjunctions: boolean;
+  onSelectConjunction: (conjunctionId: string) => void;
+  onToggleConjunctions: () => void;
+}) {
+  const selectedConjunction = conjunctionSnapshots.find((snapshot) => snapshot.event.id === selectedConjunctionId) ?? conjunctionSnapshots[0] ?? null;
+
+  return (
+    <HudPanel>
+      <div className="flex items-center justify-between gap-3">
+        <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Conjunctions</p>
+        <button
+          type="button"
+          aria-pressed={showConjunctions}
+          onClick={onToggleConjunctions}
+          className={`flex min-w-16 items-center gap-2 border px-2 py-1 font-mono text-[10px] uppercase transition ${
+            showConjunctions ? "border-amber-300 bg-amber-300/15 text-amber-100" : "border-white/10 text-zinc-500 hover:border-amber-300"
+          }`}
+        >
+          <span className={`h-2.5 w-2.5 rounded-full ${showConjunctions ? "bg-amber-300" : "bg-zinc-600"}`} />
+          {showConjunctions ? "On" : "Off"}
+        </button>
+      </div>
+      <p className="mt-1 text-[11px] text-zinc-500">
+        {showConjunctions ? `${conjunctionSnapshots.length} close-approach pair visible` : "Enable to show close-approach links and risk labels."}
+      </p>
+      {showConjunctions && (
+        <p className="mt-2 text-[11px] leading-5 text-zinc-500">
+          Conjunction = a close-approach check between two satellites. TCA is the time when that pair is closest in the sample window.
+        </p>
+      )}
+
+      {showConjunctions && (
+        <div className="mt-3 space-y-2">
+          {conjunctionSnapshots.map((snapshot) => {
+            const tone = getConjunctionTone(snapshot.status);
+            const isSelected = selectedConjunction?.event.id === snapshot.event.id;
+
+            return (
+              <button
+                key={snapshot.event.id}
+                type="button"
+                onClick={() => onSelectConjunction(snapshot.event.id)}
+                className={`w-full border p-3 text-left transition ${
+                  isSelected ? "border-amber-300 bg-amber-300/10" : "border-white/10 bg-black/30 hover:border-amber-300/45"
+                }`}
+              >
+                <span className="flex items-start justify-between gap-3">
+                  <span className="text-sm font-semibold text-white">{snapshot.primary.name} / {snapshot.secondary.name}</span>
+                  <span
+                    className="border px-2 py-0.5 font-mono text-[10px]"
+                    style={{ borderColor: tone.color, color: tone.color }}
+                    title={getConjunctionStatusDescription(snapshot.status)}
+                  >
+                    {tone.label}
+                  </span>
+                </span>
+                <span className="mt-2 flex items-center justify-between font-mono text-[11px] text-zinc-400">
+                  <span>{formatNumber(snapshot.missDistanceKm, 1)} km</span>
+                  <span>{snapshot.relativeVelocityKmps === null ? "--" : formatNumber(snapshot.relativeVelocityKmps, 2)} km/s</span>
+                </span>
+              </button>
+            );
+          })}
+          {selectedConjunction && (
+            <div className="border border-white/10 bg-black/35 p-3">
+              <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-amber-200">TCA Summary</p>
+              <p className="mt-2 text-[11px] leading-5 text-zinc-500">
+                Time of Closest Approach for the selected satellite pair.
+              </p>
               <div className="mt-3 grid grid-cols-2 gap-3">
-                <DetailMetric label="Type" value={selectedManeuver.event.type.replaceAll("_", " ")} />
-                <DetailMetric label="Burn" value={`${selectedManeuver.event.durationSec}s`} />
-                <DetailMetric label="Time" value={formatUtc(new Date(selectedManeuver.event.timeUtc))} />
-                <DetailMetric label="Altitude" value={`${formatNumber(selectedManeuver.state?.altitudeKm)} km`} />
+                <DetailMetric label="Closest Time" value={formatUtc(new Date(selectedConjunction.tcaUtc))} />
+                <DetailMetric label="Miss Distance" value={`${formatNumber(selectedConjunction.missDistanceKm, 1)} km`} />
+                <DetailMetric
+                  label="Rel Velocity"
+                  value={`${selectedConjunction.relativeVelocityKmps === null ? "--" : formatNumber(selectedConjunction.relativeVelocityKmps, 2)} km/s`}
+                />
+                <DetailMetric label="Risk" value={getConjunctionTone(selectedConjunction.status).label} />
               </div>
             </div>
           )}
-        </>
+        </div>
       )}
     </HudPanel>
   );

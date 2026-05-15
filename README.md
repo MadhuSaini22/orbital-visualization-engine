@@ -1,6 +1,6 @@
 # orbit-visualization-engine
 
-A Phase 2 orbital visualization MVP built with Next.js, TypeScript, CesiumJS, and SatelliteJS.
+A Phase 3 orbital visualization MVP built with Next.js, TypeScript, CesiumJS, and SatelliteJS.
 
 The app loads TLE data, propagates satellite positions, and renders satellites on a 3D Earth globe. It is intended as the visual foundation for a larger MOSAIC-like space-domain operations interface.
 
@@ -23,7 +23,8 @@ The app loads TLE data, propagates satellite positions, and renders satellites o
 - Provides a focus control to fly the camera to a selected satellite.
 - Shows a 2D ground-track map with an expanded modal and selectable time ranges.
 - Calculates current simulation-time distance between two selected satellites.
-- Shows sample maneuver events on the globe and in an operations panel.
+- Shows maneuver events with burn markers, burn vectors, pre/post orbit context, and a modal-first event timeline.
+- Shows sample conjunction windows with closest-approach distance, relative velocity, and risk state.
 - Keeps propagation logic separate from Cesium rendering logic.
 
 ## Tech Stack
@@ -291,7 +292,7 @@ The TLE parser checks:
 
 If more than 15 valid TLEs are provided, only the first 15 are loaded and a message is shown.
 
-## Current Phase 2 Scope
+## Current Phase 3 Scope
 
 Included:
 
@@ -315,18 +316,27 @@ Included:
 - Maneuver event model
 - Sample planned, candidate, and executed maneuver events
 - Maneuver markers on the globe
-- Maneuver operations panel with status, delta-v, timing, and selected-event details
+- Maneuver modal with event timeline, status, delta-v, RTN vector components, burn duration, event time, and selected-event details
+- Maneuver burn-vector visualization
+- Maneuver pre-burn and post-burn orbit context arcs
+- JSON maneuver event loading from `/data/maneuvers.json`
+- Conjunction event model
+- Closest approach estimation over a sample time window
+- Conjunction risk states: safe, warning, critical
+- Conjunction range line and TCA label on the globe
+- Conjunction panel with miss distance and relative velocity
 - Play/pause/time speed controls
 - Selected satellite info panel
 - Camera reset
 
 Not included yet:
 
-- Conjunction analysis
-- Mission event timeline
+- Mission planning timeline editor
 - Ground stations
 - Access windows
 - Sensor cones
+- True post-maneuver orbit propagation from burn physics
+- Probability of collision calculation
 - Authentication
 - Database persistence
 - Real command/control features
