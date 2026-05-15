@@ -23,7 +23,7 @@ The app loads TLE data, propagates satellite positions, and renders satellites o
 - Provides a focus control to fly the camera to a selected satellite.
 - Shows a 2D ground-track map with an expanded modal and selectable time ranges.
 - Calculates current simulation-time distance between two selected satellites.
-- Shows maneuver events with burn markers, burn vectors, pre/post orbit context, and a modal-first event timeline.
+- Shows maneuver events with burn markers, burn vectors, camera focus, and a modal-first event timeline.
 - Shows sample conjunction windows with closest-approach distance, relative velocity, and risk state.
 - Keeps propagation logic separate from Cesium rendering logic.
 
@@ -337,9 +337,156 @@ Not included yet:
 - Sensor cones
 - True post-maneuver orbit propagation from burn physics
 - Probability of collision calculation
+- CDM ingestion with covariance-based risk assessment
+- Operator ephemeris ingestion, such as CCSDS OEM/SP3
+- High-fidelity backend propagator with force models
+- Orbit-determination workflow from tracking measurements
 - Authentication
 - Database persistence
 - Real command/control features
+
+## Accuracy Notes
+
+This project is currently a visualization MVP, not an authoritative flight-dynamics system.
+
+Current behavior:
+
+- TLEs are propagated with SatelliteJS/SGP4.
+- Orbit paths, trails, and ground tracks are sampled from propagated states.
+- Maneuvers are sample event markers with visual burn vectors.
+- Conjunctions are sample close-approach windows computed from available propagated states.
+
+This is useful for:
+
+- Learning orbital visualization concepts
+- Building operator-style UI workflows
+- Inspecting TLE-driven satellite motion
+- Prototyping mission-analysis screens
+
+This is not enough for:
+
+- Operational collision avoidance
+- Certified maneuver planning
+- Probability-of-collision decisions
+- High-precision orbit determination
+- Command/control of real spacecraft
+
+## Production-Grade Orbital Analysis Roadmap
+
+To make this scientifically stronger, move the authoritative astrodynamics work out of the browser and into a backend analysis service. The browser should remain a visualization client.
+
+Recommended architecture:
+
+```text
+Authoritative data sources
+  -> Backend ingestion jobs
+  -> Orbit / event database
+  -> High-fidelity propagation service
+  -> Conjunction and maneuver analysis service
+  -> API snapshots / ephemeris tiles
+  -> Cesium visualization client
+```
+
+### 1. Use Better Data Products
+
+For public catalog objects, continue supporting TLE/GP data, but prefer modern OMM/GP formats where possible.
+
+Useful sources:
+
+- CelesTrak GP/OMM data for public satellite catalogs:
+
+```text
+https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=tle
+https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=json
+https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=csv
+```
+
+- Space-Track GP and CDM data. Space-Track requires an account and has API rate limits:
+
+```text
+https://www.space-track.org/basicspacedata/query/class/gp/decay_date/null-val/epoch/>now-10/orderby/norad_cat_id/format/tle
+https://www.space-track.org/basicspacedata/query/class/cdm_public/format/json
+```
+
+- CCSDS CDM, the standard message format for conjunction reports.
+- CCSDS OEM, a better format than TLE when an operator can provide time-tagged ephemeris.
+- NASA/JPL SPICE or Horizons for planetary/deep-space ephemerides, not normal Earth satellite catalog tracking.
+- NASA CDDIS/IGS SP3 precise orbit products for GNSS-style precise orbit files.
+
+### 2. Add Backend Propagation
+
+Keep SatelliteJS for browser demos, but add a backend propagator for analysis.
+
+Good options:
+
+- Orekit for high-fidelity propagation, frames, time systems, measurements, and orbit determination.
+- NASA GMAT for mission analysis, maneuver planning, and validation workflows.
+- SPICE/Horizons for planetary and deep-space mission geometry.
+
+Backend propagation should support:
+
+- UTC/TAI/TT time handling
+- Earth orientation parameters
+- TEME, GCRF/ECI, ITRF/ECEF, and geodetic conversions
+- Higher-order gravity
+- Atmospheric drag
+- Solar radiation pressure
+- Third-body perturbations from Sun/Moon
+- Maneuver impulse or finite-burn models
+
+### 3. Upgrade Conjunction Analysis
+
+Current conjunctions are visual sample events. Production-grade conjunction analysis should ingest or compute:
+
+- Time of closest approach, also called TCA
+- Miss distance
+- Relative velocity
+- Radial/in-track/cross-track separation
+- Covariance matrices
+- Probability of collision
+- Screening thresholds
+- Risk status history over time
+
+Use CDM records when possible. A CDM already carries close-approach metadata and covariance information from an authoritative source.
+
+### 4. Upgrade Maneuver Modeling
+
+Current maneuver markers are sample events. Production-grade maneuver support should include:
+
+- Planned, candidate, cancelled, and executed maneuver statuses
+- Delta-v vector in a clear frame, such as RTN
+- Impulsive and finite-burn modeling
+- Pre-maneuver and post-maneuver propagated trajectories
+- Maneuver uncertainty
+- Collision-screening before and after the maneuver
+- Audit log of planning assumptions
+
+### 5. Add Validation
+
+Do not trust visuals alone. Add validation against trusted tools and data:
+
+- Compare propagated states against Orekit/GMAT/STK-style reference runs.
+- Compare TLE-derived states against known CelesTrak/Space-Track outputs.
+- Validate ground tracks against known passes.
+- Validate CDM parsing with official CCSDS examples.
+- Record max position error, velocity error, and frame-conversion error.
+
+### 6. Store Time-Series Data
+
+For larger scenarios, precompute and cache ephemeris data instead of recalculating everything in the browser.
+
+Recommended stored objects:
+
+- Satellite catalog metadata
+- Raw TLE/OMM history
+- OEM/SP3 ephemeris files
+- Propagated state vectors
+- Ground-track samples
+- Maneuver events
+- Conjunction events/CDMs
+- User scenario timelines
+
+The frontend can then request time-windowed state slices instead of doing all analysis locally.
 
 ## Notes
 
