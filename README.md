@@ -4,6 +4,14 @@ A Phase 3 orbital visualization MVP built with Next.js, TypeScript, CesiumJS, an
 
 The app loads TLE data, propagates satellite positions, and renders satellites on a 3D Earth globe. It is intended as the visual foundation for a larger MOSAIC-like space-domain operations interface.
 
+## Deep Architecture Guide
+
+If you want to understand how this project works internally from beginner level to code-owner level, read:
+
+[ARCHITECTURE_GUIDE.md](./ARCHITECTURE_GUIDE.md)
+
+That guide explains the complete product purpose, codebase flow, folder structure, CesiumJS rendering, SatelliteJS propagation, ground tracks, maneuvers, conjunctions, UI state flow, performance choices, and interview-style defense answers.
+
 ## What This Project Does
 
 - Loads one or many satellites from TLE text or structured JSON config.
