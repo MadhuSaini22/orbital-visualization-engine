@@ -409,9 +409,14 @@ export function CesiumGlobe({
         selectionIndicator: false,
         timeline: false,
         navigationHelpButton: false,
-        shouldAnimate: true,
+        shouldAnimate: false,
       });
 
+      // React owns simulation time in this app. Cesium still needs its clock
+      // value for inertial transforms, but it must not advance independently or
+      // the globe orientation can drift away from SatelliteJS propagation time.
+      viewer.clock.shouldAnimate = false;
+      viewer.clock.multiplier = 0;
       viewer.scene.backgroundColor = Cesium.Color.BLACK;
       viewer.scene.globe.enableLighting = true;
       viewer.scene.globe.showGroundAtmosphere = true;
