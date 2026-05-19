@@ -13,6 +13,7 @@ type Viewer = import("cesium").Viewer;
 type Entity = import("cesium").Entity;
 type Cartesian3 = import("cesium").Cartesian3;
 type PrimitiveCollection = import("cesium").PrimitiveCollection;
+type FrameMode = "earth-fixed" | "inertial";
 
 type CesiumGlobeProps = {
   snapshots: SatelliteSnapshot[];
@@ -21,6 +22,8 @@ type CesiumGlobeProps = {
   selectedSatelliteIds: string[];
   showAllOrbits: boolean;
   showLabels: boolean;
+  frameMode: FrameMode;
+  simTimeIso: string;
   currentGmstRad?: number;
   focusRequest: { satelliteId: string; sequence: number } | null;
   maneuverFocusRequest: {
@@ -250,6 +253,8 @@ export function CesiumGlobe({
   selectedSatelliteIds,
   showAllOrbits,
   showLabels,
+  frameMode,
+  simTimeIso,
   currentGmstRad,
   focusRequest,
   maneuverFocusRequest,
@@ -288,6 +293,55 @@ export function CesiumGlobe({
   useEffect(() => {
     latestSnapshotsRef.current = snapshots;
   }, [snapshots]);
+
+  useEffect(() => {
+    const Cesium = cesiumRef.current;
+    const viewer = viewerRef.current;
+    if (!viewerReady || !Cesium || !viewer) {
+      return;
+    }
+
+    viewer.clock.currentTime = Cesium.JulianDate.fromIso8601(simTimeIso);
+    viewer.scene.requestRender();
+  }, [simTimeIso, viewerReady]);
+
+  useEffect(() => {
+    const Cesium = cesiumRef.current;
+    const viewer = viewerRef.current;
+    if (!viewerReady || !Cesium || !viewer) {
+      return;
+    }
+
+    if (frameMode === "earth-fixed") {
+      viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+      viewer.scene.requestRender();
+      return;
+    }
+
+    // In inertial mode Cesium keeps the camera in a space-like reference frame.
+    // The globe rotates underneath, which makes orbit planes feel stable instead
+    // of visually glued to Earth's texture.
+    const removePostUpdate = viewer.scene.postUpdate.addEventListener((scene, time) => {
+      const icrfToFixed = Cesium.Transforms.computeIcrfToFixedMatrix(time);
+      if (!icrfToFixed) {
+        return;
+      }
+
+      const camera = scene.camera;
+      const offset = Cesium.Cartesian3.clone(camera.position);
+      const transform = Cesium.Matrix4.fromRotationTranslation(icrfToFixed);
+      camera.lookAtTransform(transform, offset);
+    });
+
+    viewer.scene.requestRender();
+
+    return () => {
+      removePostUpdate();
+      if (!viewer.isDestroyed()) {
+        viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+      }
+    };
+  }, [frameMode, viewerReady]);
 
   function zoomCamera(direction: "in" | "out") {
     const viewer = viewerRef.current;

@@ -35,6 +35,7 @@ type ManeuverFocusRequest = {
   altitudeKm: number;
   sequence: number;
 };
+type FrameMode = "earth-fixed" | "inertial";
 
 const sampleUrl = "/data/sample.tle";
 const initialSimulationTime = new Date("2026-05-08T00:00:00.000Z");
@@ -178,6 +179,7 @@ export function OrbitalDashboard() {
   const [trajectoryAnchorTime, setTrajectoryAnchorTime] = useState(() => initialSimulationTime);
   const [isPlaying, setIsPlaying] = useState(true);
   const [speed, setSpeed] = useState(60);
+  const [frameMode, setFrameMode] = useState<FrameMode>("earth-fixed");
   const [showLabels, setShowLabels] = useState(true);
   const [showAllOrbits, setShowAllOrbits] = useState(false);
   const [showRangeCheck, setShowRangeCheck] = useState(false);
@@ -510,6 +512,8 @@ export function OrbitalDashboard() {
           selectedSatelliteIds={selectedSatelliteIds}
           showAllOrbits={showAllOrbits}
           showLabels={showLabels}
+          frameMode={frameMode}
+          simTimeIso={simTime.toISOString()}
           currentGmstRad={currentDisplayGmstRad}
           focusRequest={focusRequest}
           maneuverFocusRequest={maneuverFocusRequest}
@@ -732,6 +736,27 @@ export function OrbitalDashboard() {
           <div className="min-w-[240px] border-r border-cyan-300/20 pr-4 max-sm:border-r-0">
             <p className="font-mono text-[10px] uppercase text-zinc-500">Simulation Time</p>
             <p className="mt-1 font-mono text-sm font-semibold text-zinc-100">{formatUtc(simTime)}</p>
+          </div>
+          <div className="border-r border-cyan-300/20 pr-4 max-sm:border-r-0">
+            <p className="font-mono text-[10px] uppercase text-zinc-500">Frame</p>
+            <div className="mt-1 grid grid-cols-2 border border-cyan-300/20">
+              {[
+                { id: "earth-fixed" as const, label: "Fixed" },
+                { id: "inertial" as const, label: "Inertial" },
+              ].map((item) => (
+                <button
+                  key={item.id}
+                  onClick={() => setFrameMode(item.id)}
+                  className={`px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.12em] transition ${
+                    frameMode === item.id
+                      ? "bg-cyan-300 text-slate-950"
+                      : "text-cyan-200 hover:bg-cyan-300/10"
+                  }`}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <ControlButton label="-10" onClick={() => shiftSimulationTime(-10)} />
