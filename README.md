@@ -27,7 +27,7 @@ That guide explains the complete product purpose, codebase flow, folder structur
 - Shows satellite labels, selected satellite details, and basic playback controls.
 - Toggles individual satellite orbit visibility by clicking satellites on the globe or in the side panel.
 - Supports per-satellite marker, label, orbit, trail, and ground-track toggles.
-- Renders future orbit paths, recent past trails, and projected ground tracks.
+- Renders orbit arcs from propagated Cartesian state, recent past trails, and projected ground tracks.
 - Provides a focus control to fly the camera to a selected satellite.
 - Shows a 2D ground-track map with an expanded modal and selectable time ranges.
 - Calculates current simulation-time distance between two selected satellites.
@@ -314,7 +314,7 @@ Included:
 - Click-to-toggle orbit selection for up to 2 satellites
 - JSON satellite config loading
 - Per-satellite marker, label, orbit, trail, and ground-track toggles
-- Future orbit path and past trail visualization
+- Cartesian orbit-arc and past-trail visualization
 - Ground-track visualization with longitude-wrap handling
 - 2D ground-track mini map
 - Expanded ground-track modal with selectable history ranges
@@ -360,7 +360,7 @@ This project is currently a visualization MVP, not an authoritative flight-dynam
 Current behavior:
 
 - TLEs are propagated with SatelliteJS/SGP4.
-- Orbit paths, trails, and ground tracks are sampled from propagated states.
+- Orbit arcs and trails are sampled from propagated Cartesian states; ground tracks are sampled from latitude/longitude surface projection.
 - Maneuvers are sample event markers with visual burn vectors.
 - Conjunctions are sample close-approach windows computed from available propagated states.
 

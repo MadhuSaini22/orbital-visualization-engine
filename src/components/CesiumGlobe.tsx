@@ -21,6 +21,7 @@ type CesiumGlobeProps = {
   selectedSatelliteIds: string[];
   showAllOrbits: boolean;
   showLabels: boolean;
+  currentGmstRad?: number;
   focusRequest: { satelliteId: string; sequence: number } | null;
   maneuverFocusRequest: {
     longitudeDeg: number;
@@ -66,7 +67,12 @@ type HoverInfo = {
   y: number;
 } | null;
 
-function stateToCartesian(Cesium: CesiumModule, state: OrbitState): Cartesian3 {
+function stateToSpaceCartesian(Cesium: CesiumModule, state: OrbitState): Cartesian3 {
+  if (state.positionEcefKm) {
+    const [xKm, yKm, zKm] = state.positionEcefKm;
+    return new Cesium.Cartesian3(xKm * 1000, yKm * 1000, zKm * 1000);
+  }
+
   return Cesium.Cartesian3.fromDegrees(
     state.longitudeDeg,
     state.latitudeDeg,
@@ -74,26 +80,163 @@ function stateToCartesian(Cesium: CesiumModule, state: OrbitState): Cartesian3 {
   );
 }
 
+function eciKmToFixedCartesianAtGmst(
+  Cesium: CesiumModule,
+  positionEciKm: [number, number, number],
+  gmstRad: number,
+): Cartesian3 {
+  const [xKm, yKm, zKm] = positionEciKm;
+  const cosGmst = Math.cos(gmstRad);
+  const sinGmst = Math.sin(gmstRad);
+
+  return new Cesium.Cartesian3(
+    (xKm * cosGmst + yKm * sinGmst) * 1000,
+    (-xKm * sinGmst + yKm * cosGmst) * 1000,
+    zKm * 1000,
+  );
+}
+
+function stateToOrbitArcCartesian(
+  Cesium: CesiumModule,
+  state: OrbitState,
+  displayGmstRad?: number,
+): Cartesian3 {
+  if (state.positionEciKm && typeof displayGmstRad === "number") {
+    return eciKmToFixedCartesianAtGmst(Cesium, state.positionEciKm, displayGmstRad);
+  }
+
+  return stateToSpaceCartesian(Cesium, state);
+}
+
+function dot(a: [number, number, number], b: [number, number, number]) {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+function cross(a: [number, number, number], b: [number, number, number]): [number, number, number] {
+  return [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+}
+
+function magnitude(vector: [number, number, number]) {
+  return Math.sqrt(dot(vector, vector));
+}
+
+function normalize(vector: [number, number, number]): [number, number, number] | null {
+  const length = magnitude(vector);
+  if (length === 0) {
+    return null;
+  }
+
+  return [vector[0] / length, vector[1] / length, vector[2] / length];
+}
+
+function subtract(a: [number, number, number], b: [number, number, number]): [number, number, number] {
+  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+}
+
+function scale(vector: [number, number, number], factor: number): [number, number, number] {
+  return [vector[0] * factor, vector[1] * factor, vector[2] * factor];
+}
+
+function add(a: [number, number, number], b: [number, number, number]): [number, number, number] {
+  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+}
+
+function buildOsculatingOrbitArc(
+  Cesium: CesiumModule,
+  state: OrbitState,
+  displayGmstRad?: number,
+): Cartesian3[] {
+  if (!state.positionEciKm || !state.velocityEciKmps || typeof displayGmstRad !== "number") {
+    return [];
+  }
+
+  const muEarthKm3S2 = 398600.4418;
+  const r = state.positionEciKm;
+  const v = state.velocityEciKmps;
+  const rMag = magnitude(r);
+  const h = cross(r, v);
+  const hMag = magnitude(h);
+  if (rMag === 0 || hMag === 0) {
+    return [];
+  }
+
+  const eccentricityVector = subtract(scale(cross(v, h), 1 / muEarthKm3S2), scale(r, 1 / rMag));
+  const eccentricity = magnitude(eccentricityVector);
+  const semiLatusRectumKm = (hMag * hMag) / muEarthKm3S2;
+
+  // Low-Earth TLE examples are nearly circular. For those, using the current
+  // radius direction as the first basis vector makes the live marker sit on
+  // the drawn arc instead of drifting beside an arbitrary perigee direction.
+  const perigeeBasis = eccentricity > 0.01
+    ? normalize(eccentricityVector)
+    : normalize(r);
+  if (!perigeeBasis) {
+    return [];
+  }
+
+  const normalBasis = normalize(h);
+  if (!normalBasis) {
+    return [];
+  }
+
+  const transverseBasis = normalize(cross(normalBasis, perigeeBasis));
+  if (!transverseBasis) {
+    return [];
+  }
+
+  const points: Cartesian3[] = [];
+  for (let index = 0; index <= 360; index += 2) {
+    const trueAnomaly = Cesium.Math.toRadians(index);
+    const denominator = 1 + eccentricity * Math.cos(trueAnomaly);
+    if (denominator <= 0) {
+      continue;
+    }
+
+    const radiusKm = semiLatusRectumKm / denominator;
+    const eciPoint = add(
+      scale(perigeeBasis, radiusKm * Math.cos(trueAnomaly)),
+      scale(transverseBasis, radiusKm * Math.sin(trueAnomaly)),
+    );
+
+    points.push(eciKmToFixedCartesianAtGmst(Cesium, eciPoint, displayGmstRad));
+  }
+
+  return points;
+}
+
 function stateToGroundCartesian(Cesium: CesiumModule, state: OrbitState): Cartesian3 {
   return Cesium.Cartesian3.fromDegrees(state.longitudeDeg, state.latitudeDeg, 0);
 }
 
-function getManeuverVectorEndpoint(Cesium: CesiumModule, snapshot: ManeuverSnapshot) {
+function getManeuverVectorPositions(Cesium: CesiumModule, snapshot: ManeuverSnapshot) {
   if (!snapshot.state) {
     return null;
   }
 
   const [radialMps, tangentialMps, normalMps] = snapshot.event.deltaVVectorMps;
   const vectorMagnitudeMps = Math.sqrt(radialMps ** 2 + tangentialMps ** 2 + normalMps ** 2);
+  if (vectorMagnitudeMps === 0) {
+    return null;
+  }
 
   // Phase 2 uses a scaled visual vector rather than a full post-burn orbital
   // solve. The vector gives users direction/magnitude context without claiming
   // flight-dynamics precision.
-  return Cesium.Cartesian3.fromDegrees(
-    snapshot.state.longitudeDeg + tangentialMps * 5,
-    snapshot.state.latitudeDeg + normalMps * 5,
-    Math.max(snapshot.state.altitudeKm + radialMps * 150 + vectorMagnitudeMps * 420, 120) * 1000,
+  const start = stateToSpaceCartesian(Cesium, snapshot.state);
+  const visualLengthMeters = Math.max(1400000, vectorMagnitudeMps * 2600000);
+  const localOffset = new Cesium.Cartesian3(
+    (tangentialMps / vectorMagnitudeMps) * visualLengthMeters,
+    (normalMps / vectorMagnitudeMps) * visualLengthMeters,
+    (radialMps / vectorMagnitudeMps) * visualLengthMeters,
   );
+  const localFrame = Cesium.Transforms.eastNorthUpToFixedFrame(start);
+  const end = Cesium.Matrix4.multiplyByPoint(localFrame, localOffset, new Cesium.Cartesian3());
+
+  return { start, end };
 }
 
 function getSnapshotColor(Cesium: CesiumModule, snapshot: SatelliteSnapshot, index: number) {
@@ -107,6 +250,7 @@ export function CesiumGlobe({
   selectedSatelliteIds,
   showAllOrbits,
   showLabels,
+  currentGmstRad,
   focusRequest,
   maneuverFocusRequest,
   maneuverSnapshots,
@@ -322,7 +466,7 @@ export function CesiumGlobe({
 
       const isSelected = selectedSatelliteIds.includes(snapshot.satellite.id);
       const color = getSnapshotColor(Cesium, snapshot, index);
-      const position = stateToCartesian(Cesium, snapshot.state);
+      const position = stateToSpaceCartesian(Cesium, snapshot.state);
 
       let entity = entitiesRef.current.get(snapshot.satellite.id);
 
@@ -393,31 +537,37 @@ export function CesiumGlobe({
     // polylines than constantly-updated Cesium Entity polyline graphics.
     pathPrimitives.removeAll();
 
-    const visibleOrbitSnapshots = orbitSnapshots.filter((item) => {
+    const currentSnapshots = latestSnapshotsRef.current;
+    const visiblePathSnapshots = currentSnapshots.filter((item) => {
       if (!item.satellite.visual.showOrbit) {
         return false;
       }
       return showAllOrbits || selectedSatelliteIds.includes(item.satellite.id);
     });
 
-    visibleOrbitSnapshots.forEach((snapshot, index) => {
+    visiblePathSnapshots.forEach((snapshot, index) => {
+      if (!snapshot.state) {
+        return;
+      }
+
       const isSelected = selectedSatelliteIds.includes(snapshot.satellite.id);
       const color = getSnapshotColor(Cesium, snapshot, index);
-      const orbitColor = isSelected ? color : color.withAlpha(0.55);
-      const orbitPositions: Cartesian3[] =
-        snapshot.futureTrajectory?.map((state) => stateToCartesian(Cesium, state))
-        ?? snapshot.trajectory?.map((state) => stateToCartesian(Cesium, state))
-        ?? [];
+      const pathColor = isSelected ? color : color.withAlpha(0.55);
+      const displayGmstRad = currentGmstRad ?? snapshot.state.gmstRad;
+      // Orbit arcs are generated from current Cartesian position/velocity as an
+      // osculating two-body ring. Trails and ground tracks remain time-windowed
+      // paths, so users can visually separate "orbit geometry" from "history".
+      const pathPositions = buildOsculatingOrbitArc(Cesium, snapshot.state, displayGmstRad);
 
-      if (orbitPositions.length < 2) {
+      if (pathPositions.length < 2) {
         return;
       }
 
       pathPrimitives.add(new Cesium.PolylineCollection()).add({
-        positions: orbitPositions,
+        positions: pathPositions,
         width: isSelected ? 3.2 : 1.5,
         material: Cesium.Material.fromType("Color", {
-          color: orbitColor.withAlpha(isSelected ? 0.9 : 0.42),
+          color: pathColor.withAlpha(isSelected ? 0.9 : 0.42),
         }),
       });
     });
@@ -432,7 +582,7 @@ export function CesiumGlobe({
     visibleTrailSnapshots.forEach((snapshot, index) => {
       const color = getSnapshotColor(Cesium, snapshot, index);
       const trailColor = color.brighten(0.18, new Cesium.Color());
-      const trailPositions = snapshot.pastTrail?.map((state) => stateToCartesian(Cesium, state)) ?? [];
+      const trailPositions = snapshot.pastTrail?.map((state) => stateToSpaceCartesian(Cesium, state)) ?? [];
 
       if (trailPositions.length < 2) {
         return;
@@ -477,7 +627,7 @@ export function CesiumGlobe({
 
     setLayerStats((current) => {
       const next = {
-        orbits: visibleOrbitSnapshots.length,
+        orbits: visiblePathSnapshots.length,
         trails: visibleTrailSnapshots.length,
         groundTracks: visibleGroundTrackSnapshots.length,
       };
@@ -493,7 +643,7 @@ export function CesiumGlobe({
       return next;
     });
     viewer.scene.requestRender();
-  }, [orbitSnapshots, selectedSatelliteIds, showAllOrbits, viewerReady]);
+  }, [currentGmstRad, orbitSnapshots, selectedSatelliteIds, showAllOrbits, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;
@@ -528,7 +678,7 @@ export function CesiumGlobe({
       const tone = getManeuverTone(maneuverSnapshot.event.status);
       const color = Cesium.Color.fromCssColorString(tone.color);
       const isSelected = selectedManeuverId === maneuverSnapshot.event.id;
-      const position = stateToCartesian(Cesium, maneuverSnapshot.state);
+      const position = stateToSpaceCartesian(Cesium, maneuverSnapshot.state);
       let entity = maneuverEntitiesRef.current.get(maneuverSnapshot.event.id);
 
       if (!entity) {
@@ -570,15 +720,70 @@ export function CesiumGlobe({
       }
 
       if (isSelected && maneuverSnapshot.event.visual.showBurnVector) {
-        const vectorEndpoint = getManeuverVectorEndpoint(Cesium, maneuverSnapshot);
-        if (vectorEndpoint) {
+        const vectorPositions = getManeuverVectorPositions(Cesium, maneuverSnapshot);
+        if (vectorPositions) {
           maneuverGeometryEntitiesRef.current.push(viewer.entities.add({
             id: `${maneuverSnapshot.event.id}-burn-vector`,
             name: `${maneuverSnapshot.event.title} burn vector`,
             polyline: {
-              positions: [position, vectorEndpoint],
-              width: isSelected ? 7 : 4,
+              positions: [vectorPositions.start, vectorPositions.end],
+              width: isSelected ? 9 : 5,
               material: new Cesium.PolylineArrowMaterialProperty(color.withAlpha(isSelected ? 0.95 : 0.58)),
+              depthFailMaterial: new Cesium.PolylineArrowMaterialProperty(color.withAlpha(0.5)),
+              arcType: Cesium.ArcType.NONE,
+            },
+            properties: {
+              maneuverId: maneuverSnapshot.event.id,
+            },
+          }));
+        }
+      }
+
+      if (isSelected && maneuverSnapshot.event.visual.showPrePostOrbit) {
+        const maneuverDisplayGmstRad = maneuverSnapshot.state?.gmstRad
+          ?? maneuverSnapshot.preTrajectory.at(-1)?.gmstRad
+          ?? maneuverSnapshot.postTrajectory[0]?.gmstRad;
+        const prePositions = maneuverSnapshot.preTrajectory.map((state) => stateToOrbitArcCartesian(Cesium, state, maneuverDisplayGmstRad));
+        const postPositions = maneuverSnapshot.postTrajectory.map((state) => stateToOrbitArcCartesian(Cesium, state, maneuverDisplayGmstRad));
+
+        if (prePositions.length > 1) {
+          maneuverGeometryEntitiesRef.current.push(viewer.entities.add({
+            id: `${maneuverSnapshot.event.id}-pre-path`,
+            name: `${maneuverSnapshot.event.title} pre-burn context`,
+            polyline: {
+              positions: prePositions,
+              width: 2,
+              material: new Cesium.PolylineDashMaterialProperty({
+                color: color.withAlpha(0.45),
+                dashLength: 18,
+              }),
+              depthFailMaterial: new Cesium.PolylineDashMaterialProperty({
+                color: color.withAlpha(0.25),
+                dashLength: 18,
+              }),
+              arcType: Cesium.ArcType.NONE,
+            },
+            properties: {
+              maneuverId: maneuverSnapshot.event.id,
+            },
+          }));
+        }
+
+        if (postPositions.length > 1) {
+          maneuverGeometryEntitiesRef.current.push(viewer.entities.add({
+            id: `${maneuverSnapshot.event.id}-post-path`,
+            name: `${maneuverSnapshot.event.title} post-burn context`,
+            polyline: {
+              positions: postPositions,
+              width: 2.8,
+              material: new Cesium.PolylineDashMaterialProperty({
+                color: color.withAlpha(0.72),
+                dashLength: 28,
+              }),
+              depthFailMaterial: new Cesium.PolylineDashMaterialProperty({
+                color: color.withAlpha(0.34),
+                dashLength: 28,
+              }),
               arcType: Cesium.ArcType.NONE,
             },
             properties: {
@@ -612,8 +817,8 @@ export function CesiumGlobe({
 
       const tone = getConjunctionTone(snapshot.status);
       const color = Cesium.Color.fromCssColorString(tone.color);
-      const primaryPosition = stateToCartesian(Cesium, snapshot.primaryState);
-      const secondaryPosition = stateToCartesian(Cesium, snapshot.secondaryState);
+      const primaryPosition = stateToSpaceCartesian(Cesium, snapshot.primaryState);
+      const secondaryPosition = stateToSpaceCartesian(Cesium, snapshot.secondaryState);
       const midpoint = Cesium.Cartesian3.midpoint(primaryPosition, secondaryPosition, new Cesium.Cartesian3());
       const isSelected = selectedConjunctionId === snapshot.event.id;
 
@@ -680,8 +885,8 @@ export function CesiumGlobe({
       return;
     }
 
-    const primaryPosition = stateToCartesian(Cesium, rangeMeasurement.primary.state);
-    const secondaryPosition = stateToCartesian(Cesium, rangeMeasurement.secondary.state);
+    const primaryPosition = stateToSpaceCartesian(Cesium, rangeMeasurement.primary.state);
+    const secondaryPosition = stateToSpaceCartesian(Cesium, rangeMeasurement.secondary.state);
     const midpoint = Cesium.Cartesian3.midpoint(primaryPosition, secondaryPosition, new Cesium.Cartesian3());
     const labelText = `${rangeMeasurement.distanceKm.toLocaleString("en", {
       maximumFractionDigits: 1,
@@ -694,9 +899,13 @@ export function CesiumGlobe({
         name: "Satellite range measurement",
         polyline: {
           positions: [primaryPosition, secondaryPosition],
-          width: 4,
+          width: 5,
           material: new Cesium.PolylineDashMaterialProperty({
             color: Cesium.Color.fromCssColorString("#ff4dff").withAlpha(0.96),
+            dashLength: 26,
+          }),
+          depthFailMaterial: new Cesium.PolylineDashMaterialProperty({
+            color: Cesium.Color.fromCssColorString("#ff4dff").withAlpha(0.78),
             dashLength: 26,
           }),
           arcType: Cesium.ArcType.NONE,
@@ -727,9 +936,13 @@ export function CesiumGlobe({
 
     if (rangeEntityRef.current.polyline) {
       rangeEntityRef.current.polyline.positions = new Cesium.ConstantProperty([primaryPosition, secondaryPosition]);
-      rangeEntityRef.current.polyline.width = new Cesium.ConstantProperty(4);
+      rangeEntityRef.current.polyline.width = new Cesium.ConstantProperty(5);
       rangeEntityRef.current.polyline.material = new Cesium.PolylineDashMaterialProperty({
         color: Cesium.Color.fromCssColorString("#ff4dff").withAlpha(0.96),
+        dashLength: 26,
+      });
+      rangeEntityRef.current.polyline.depthFailMaterial = new Cesium.PolylineDashMaterialProperty({
+        color: Cesium.Color.fromCssColorString("#ff4dff").withAlpha(0.78),
         dashLength: 26,
       });
     }

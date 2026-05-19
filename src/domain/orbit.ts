@@ -31,6 +31,7 @@ export type OrbitState = {
   positionEciKm?: [number, number, number];
   velocityEciKmps?: [number, number, number];
   positionEcefKm?: [number, number, number];
+  gmstRad?: number;
   latitudeDeg: number;
   longitudeDeg: number;
   altitudeKm: number;

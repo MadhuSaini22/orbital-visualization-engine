@@ -41,9 +41,8 @@ const initialSimulationTime = new Date("2026-05-08T00:00:00.000Z");
 const trajectoryOptions = {
   futureMinutes: 110,
   pastMinutes: 35,
-  stepSec: 60,
+  stepSec: 30,
 };
-const trajectoryBucketMs = 5 * 60 * 1000;
 const maneuverWindowMinutes = 45;
 const conjunctionStepSec = 120;
 const groundTrackRangeOptions = [
@@ -176,6 +175,7 @@ export function OrbitalDashboard() {
   const [messages, setMessages] = useState<string[]>(initialParsed.errors);
   const [selectedSatelliteIds, setSelectedSatelliteIds] = useState<string[]>(initialSelectedSatelliteIds);
   const [simTime, setSimTime] = useState(() => initialSimulationTime);
+  const [trajectoryAnchorTime, setTrajectoryAnchorTime] = useState(() => initialSimulationTime);
   const [isPlaying, setIsPlaying] = useState(true);
   const [speed, setSpeed] = useState(60);
   const [showLabels, setShowLabels] = useState(true);
@@ -197,14 +197,13 @@ export function OrbitalDashboard() {
   const propagator = useMemo(() => new SatelliteJsPropagator(satellites), [satellites]);
   const stateCache = useMemo(() => new StateCacheService(propagator, satellites), [propagator, satellites]);
   const groundTrackRange = groundTrackRangeOptions.find((option) => option.id === groundTrackRangeId) ?? groundTrackRangeOptions[0];
-  const trajectoryAnchorMs = Math.floor(simTime.getTime() / trajectoryBucketMs) * trajectoryBucketMs;
   const groundTrackAnchorMs = Math.floor(simTime.getTime() / groundTrackRange.bucketMs) * groundTrackRange.bucketMs;
   const snapshots: SatelliteSnapshot[] = useMemo(() => {
     return stateCache.getCurrentSnapshots(simTime.toISOString());
   }, [stateCache, simTime]);
   const orbitSnapshots: SatelliteSnapshot[] = useMemo(() => {
-    return stateCache.getWindowedSnapshots(new Date(trajectoryAnchorMs).toISOString(), trajectoryOptions);
-  }, [stateCache, trajectoryAnchorMs]);
+    return stateCache.getWindowedSnapshots(trajectoryAnchorTime.toISOString(), trajectoryOptions);
+  }, [stateCache, trajectoryAnchorTime]);
   const groundTrackSnapshots: SatelliteSnapshot[] = useMemo(() => {
     return stateCache.getGroundTrackSnapshots(new Date(groundTrackAnchorMs).toISOString(), {
       pastMinutes: groundTrackRange.pastMinutes,
@@ -284,6 +283,13 @@ export function OrbitalDashboard() {
   const selectedConjunction = conjunctionSnapshots.find((snapshot) => snapshot.event.id === selectedConjunctionId) ?? conjunctionSnapshots[0] ?? null;
   const latestSelectedId = selectedSatelliteIds.at(-1) ?? null;
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
+  const currentDisplayGmstRadRaw = selectedSnapshot?.state?.gmstRad ?? snapshots.find((item) => item.state?.gmstRad)?.state?.gmstRad;
+  // Orbit arcs are rendered in a space-like frame and rotated into Cesium's
+  // Earth-fixed scene. Quantizing avoids rebuilding long polylines every
+  // animation frame while keeping the marker visually seated on its orbit.
+  const currentDisplayGmstRad = typeof currentDisplayGmstRadRaw === "number"
+    ? Math.round(currentDisplayGmstRadRaw / 0.004) * 0.004
+    : undefined;
   const validCount = snapshots.filter((item) => item.state).length;
   const { primaryId: rangePrimaryId, secondaryId: rangeSecondaryId } = getRangePair(selectedSatelliteIds);
   const primaryRangeSnapshot = snapshots.find((item) => item.satellite.id === rangePrimaryId);
@@ -307,7 +313,8 @@ export function OrbitalDashboard() {
     setMessages(result.errors);
     setSatellites(result.satellites);
     setSelectedSatelliteIds(defaultSelectedIds);
-  }, []);
+    setTrajectoryAnchorTime(simTime);
+  }, [simTime]);
 
   const updateSatelliteVisual = useCallback((
     satelliteId: string,
@@ -435,7 +442,11 @@ export function OrbitalDashboard() {
   }, [loadTleText, tleUrl]);
 
   const shiftSimulationTime = useCallback((minutes: number) => {
-    setSimTime((current) => new Date(current.getTime() + minutes * 60 * 1000));
+    setSimTime((current) => {
+      const next = new Date(current.getTime() + minutes * 60 * 1000);
+      setTrajectoryAnchorTime(next);
+      return next;
+    });
   }, []);
 
   useEffect(() => {
@@ -467,8 +478,9 @@ export function OrbitalDashboard() {
 
   useEffect(() => {
     lastTickRef.current = Date.now();
+    let frameId = 0;
 
-    const intervalId = window.setInterval(() => {
+    function tick() {
       const now = Date.now();
       const elapsedMs = lastTickRef.current === null ? 0 : Math.min(now - lastTickRef.current, 250);
       lastTickRef.current = now;
@@ -479,9 +491,13 @@ export function OrbitalDashboard() {
           return nextTime === current.getTime() ? current : new Date(nextTime);
         });
       }
-    }, 100);
 
-    return () => window.clearInterval(intervalId);
+      frameId = window.requestAnimationFrame(tick);
+    }
+
+    frameId = window.requestAnimationFrame(tick);
+
+    return () => window.cancelAnimationFrame(frameId);
   }, [isPlaying, speed]);
 
   return (
@@ -494,6 +510,7 @@ export function OrbitalDashboard() {
           selectedSatelliteIds={selectedSatelliteIds}
           showAllOrbits={showAllOrbits}
           showLabels={showLabels}
+          currentGmstRad={currentDisplayGmstRad}
           focusRequest={focusRequest}
           maneuverFocusRequest={maneuverFocusRequest}
           maneuverSnapshots={maneuverSnapshots}
@@ -742,7 +759,14 @@ export function OrbitalDashboard() {
                 {item}x
               </button>
             ))}
-            <ControlButton label="Now" onClick={() => setSimTime(new Date())} />
+            <ControlButton
+              label="Now"
+              onClick={() => {
+                const now = new Date();
+                setSimTime(now);
+                setTrajectoryAnchorTime(now);
+              }}
+            />
             <ControlButton label="Reset" onClick={() => setResetSignal((value) => value + 1)} />
           </div>
         </div>
@@ -761,7 +785,9 @@ export function OrbitalDashboard() {
           onJumpToManeuver={(snapshot) => {
             setShowManeuvers(true);
             setSelectedManeuverId(snapshot.event.id);
-            setSimTime(new Date(snapshot.event.timeUtc));
+            const eventTime = new Date(snapshot.event.timeUtc);
+            setSimTime(eventTime);
+            setTrajectoryAnchorTime(eventTime);
             setIsManeuverModalOpen(false);
             keepSatelliteInSelection(snapshot.satellite.id);
             const maneuverState = snapshot.state;
@@ -855,11 +881,13 @@ function IconButton({
 
 function LayerToggle({
   label,
+  title,
   tone = "cyan",
   checked,
   onChange,
 }: {
   label: string;
+  title?: string;
   tone?: "cyan" | "lime" | "zinc";
   checked: boolean;
   onChange: (checked: boolean) => void;
@@ -873,6 +901,7 @@ function LayerToggle({
       type="button"
       aria-pressed={checked}
       onClick={() => onChange(!checked)}
+      title={title ?? label}
       className={`border px-2 py-1 font-mono text-[10px] uppercase transition ${
         checked
           ? activeClass
@@ -1276,13 +1305,18 @@ function SatelliteControl({
         </span>
       </button>
       <div className="mt-3 grid grid-cols-3 gap-1.5">
-        <LayerToggle label="Orbit" checked={snapshot.satellite.visual.showOrbit} onChange={(checked) => onVisualChange("showOrbit", checked)} />
+        <LayerToggle
+          label="Orbit"
+          title="Stable orbit arc built from propagated Cartesian state, not lat/lon ground samples."
+          checked={snapshot.satellite.visual.showOrbit}
+          onChange={(checked) => onVisualChange("showOrbit", checked)}
+        />
         <LayerToggle label="Trail" checked={snapshot.satellite.visual.showTrail} onChange={(checked) => onVisualChange("showTrail", checked)} />
         <LayerToggle label="Ground" tone="lime" checked={snapshot.satellite.visual.showGroundTrack} onChange={(checked) => onVisualChange("showGroundTrack", checked)} />
       </div>
       {(snapshot.satellite.visual.showTrail || snapshot.satellite.visual.showGroundTrack) && (
         <p className="mt-2 font-mono text-[10px] leading-4 text-zinc-500">
-          Trail = space path, Ground = surface trace
+          Orbit = stable space arc, Trail = recent space history, Ground = surface trace
         </p>
       )}
       <div className="mt-1.5 grid grid-cols-3 gap-1.5">

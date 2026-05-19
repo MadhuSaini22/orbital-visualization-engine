@@ -50,6 +50,7 @@ export class SatelliteJsPropagator implements Propagator {
       positionEciKm: [propagated.position.x, propagated.position.y, propagated.position.z],
       velocityEciKmps: [propagated.velocity.x, propagated.velocity.y, propagated.velocity.z],
       positionEcefKm: [positionEcef.x, positionEcef.y, positionEcef.z],
+      gmstRad: gmst,
       latitudeDeg: satellite.degreesLat(geodetic.latitude),
       longitudeDeg: satellite.degreesLong(geodetic.longitude),
       altitudeKm: geodetic.height,
