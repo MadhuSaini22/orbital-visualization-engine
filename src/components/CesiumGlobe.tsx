@@ -539,7 +539,6 @@ export function CesiumGlobe({
             pixelSize: isSelected ? 15 : 11,
             outlineColor: isSelected ? Cesium.Color.WHITE : Cesium.Color.BLACK,
             outlineWidth: isSelected ? 3 : 1,
-            disableDepthTestDistance: Number.POSITIVE_INFINITY,
           },
           label: {
             text: snapshot.satellite.name,
@@ -554,7 +553,6 @@ export function CesiumGlobe({
             backgroundColor: Cesium.Color.BLACK.withAlpha(0.62),
             backgroundPadding: new Cesium.Cartesian2(8, 5),
             scale: isSelected ? 1.08 : 1,
-            disableDepthTestDistance: Number.POSITIVE_INFINITY,
             distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 55000000),
           },
           properties: {
