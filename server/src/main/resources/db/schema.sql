@@ -19,6 +19,16 @@ create table if not exists orbit_elements (
 create index if not exists orbit_elements_norad_epoch_idx
   on orbit_elements(norad_id, epoch desc);
 
+create table if not exists catalog_memberships (
+  group_id text not null,
+  norad_id integer not null references satellites(norad_id) on delete cascade,
+  refreshed_at timestamptz not null default now(),
+  primary key (group_id, norad_id)
+);
+
+create index if not exists catalog_memberships_group_idx
+  on catalog_memberships(group_id, refreshed_at desc);
+
 create table if not exists ephemeris_states (
   id text primary key,
   norad_id integer not null references satellites(norad_id) on delete cascade,

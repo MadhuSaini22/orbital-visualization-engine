@@ -6,8 +6,10 @@ import com.orbitvisualizationengine.server.config.AppProperties;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientResponseException;
 
 @Component
 public class CelesTrakClient {
@@ -22,20 +24,34 @@ public class CelesTrakClient {
   public JsonNode fetchGroupJson(String group) {
     return restClient.get()
         .uri("/NORAD/elements/gp.php?GROUP={group}&FORMAT=JSON", celesTrakGroup(group))
+        .accept(MediaType.APPLICATION_JSON)
+        .header("User-Agent", "orbit-visualization-engine/0.1")
         .retrieve()
         .body(JsonNode.class);
   }
 
   public String fetchGroupTle(String group) {
-    return restClient.get()
-        .uri("/NORAD/elements/gp.php?GROUP={group}&FORMAT=TLE", celesTrakGroup(group))
-        .retrieve()
-        .body(String.class);
+    String celesTrakGroup = celesTrakGroup(group);
+    try {
+      return restClient.get()
+          .uri("/NORAD/elements/gp.php?GROUP={group}&FORMAT=TLE", celesTrakGroup)
+          .accept(MediaType.TEXT_PLAIN)
+          .header("User-Agent", "orbit-visualization-engine/0.1")
+          .retrieve()
+          .body(String.class);
+    } catch (RestClientResponseException exception) {
+      if (exception.getStatusCode().value() != 403) {
+        throw exception;
+      }
+      return fetchLegacyGroupTle(celesTrakGroup);
+    }
   }
 
   public TleText fetchTleByNoradId(int noradId) {
     String text = restClient.get()
         .uri("/NORAD/elements/gp.php?CATNR={noradId}&FORMAT=TLE", noradId)
+        .accept(MediaType.TEXT_PLAIN)
+        .header("User-Agent", "orbit-visualization-engine/0.1")
         .retrieve()
         .body(String.class);
 
@@ -64,5 +80,14 @@ public class CelesTrakClient {
     }
 
     return group.trim().toLowerCase(Locale.ROOT);
+  }
+
+  private String fetchLegacyGroupTle(String group) {
+    return restClient.get()
+        .uri("/NORAD/elements/{group}.txt", group)
+        .accept(MediaType.TEXT_PLAIN)
+        .header("User-Agent", "orbit-visualization-engine/0.1")
+        .retrieve()
+        .body(String.class);
   }
 }

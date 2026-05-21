@@ -55,6 +55,18 @@ public class SatelliteRepository {
         Timestamp.from(element.ingestedAt()));
   }
 
+  public void upsertCatalogMembership(String groupId, int noradId, Instant refreshedAt) {
+    jdbc.update("""
+        insert into catalog_memberships(group_id, norad_id, refreshed_at)
+        values (?, ?, ?)
+        on conflict (group_id, norad_id) do update set
+          refreshed_at = excluded.refreshed_at
+        """,
+        groupId,
+        noradId,
+        Timestamp.from(refreshedAt));
+  }
+
   public List<SatelliteRecord> findAll(int limit) {
     return jdbc.query("""
         select norad_id, name, object_type, owner, source, updated_at
@@ -62,6 +74,17 @@ public class SatelliteRepository {
         order by name
         limit ?
         """, this::mapSatellite, limit);
+  }
+
+  public List<SatelliteRecord> findByGroup(String groupId, int limit) {
+    return jdbc.query("""
+        select s.norad_id, s.name, s.object_type, s.owner, s.source, s.updated_at
+        from catalog_memberships cm
+        join satellites s on s.norad_id = cm.norad_id
+        where cm.group_id = ?
+        order by s.name
+        limit ?
+        """, this::mapSatellite, groupId, limit);
   }
 
   public Optional<SatelliteRecord> findByNoradId(int noradId) {
@@ -84,6 +107,28 @@ public class SatelliteRepository {
     return rows.stream().findFirst();
   }
 
+  public List<CatalogTleRecord> findLatestTlesByGroup(String groupId, int limit) {
+    return jdbc.query("""
+        select s.norad_id, s.name, e.raw_payload::text
+        from catalog_memberships cm
+        join satellites s on s.norad_id = cm.norad_id
+        join lateral (
+          select raw_payload
+          from orbit_elements
+          where norad_id = s.norad_id
+            and format = 'TLE'
+          order by epoch desc nulls last, ingested_at desc
+          limit 1
+        ) e on true
+        where cm.group_id = ?
+        order by s.name
+        limit ?
+        """, (rs, rowNum) -> new CatalogTleRecord(
+            rs.getInt("norad_id"),
+            rs.getString("name"),
+            rs.getString("raw_payload")), groupId, limit);
+  }
+
   private SatelliteRecord mapSatellite(ResultSet rs, int rowNum) throws SQLException {
     return new SatelliteRecord(
         rs.getInt("norad_id"),
@@ -103,5 +148,8 @@ public class SatelliteRepository {
         epoch == null ? null : epoch.toInstant(),
         rs.getString("raw_payload"),
         rs.getTimestamp("ingested_at").toInstant());
+  }
+
+  public record CatalogTleRecord(int noradId, String name, String rawPayload) {
   }
 }

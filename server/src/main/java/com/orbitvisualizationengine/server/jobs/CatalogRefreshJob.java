@@ -13,8 +13,8 @@ public class CatalogRefreshJob {
   }
 
   public void refreshDefaultGroups() {
-    for (String group : List.of("STATIONS", "ACTIVE")) {
-      catalogService.loadGroup(group);
+    for (String group : List.of("STATIONS", "ACTIVE", "WEATHER", "GEO", "SCIENCE")) {
+      catalogService.loadGroupTle(group, 15);
     }
   }
 }
