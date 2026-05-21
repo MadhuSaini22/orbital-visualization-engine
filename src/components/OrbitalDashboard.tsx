@@ -19,6 +19,7 @@ import { MAX_TLE_OBJECTS } from "@/domain/tle";
 import { distanceBetweenOrbitStatesKm } from "@/geometry/distance";
 import { formatNumber, formatUtc } from "@/geometry/format";
 import { SatelliteJsPropagator } from "@/propagation/SatelliteJsPropagator";
+import { fetchCatalogGroupTle, getOrbitServerDisplayUrl } from "@/services/orbitServerApi";
 import { StateCacheService } from "@/services/StateCacheService";
 
 const CesiumGlobe = dynamic(
@@ -38,6 +39,14 @@ type ManeuverFocusRequest = {
 type FrameMode = "earth-fixed" | "inertial";
 
 const sampleUrl = "/data/sample.tle";
+const catalogGroupOptions = [
+  { id: "STATIONS", label: "Stations" },
+  { id: "ACTIVE", label: "Active" },
+  { id: "WEATHER", label: "Weather" },
+  { id: "GEO", label: "GEO" },
+  { id: "SCIENCE", label: "Science" },
+] as const;
+type CatalogGroupId = (typeof catalogGroupOptions)[number]["id"];
 const initialSimulationTime = new Date("2026-05-08T00:00:00.000Z");
 const trajectoryOptions = {
   futureMinutes: 110,
@@ -170,6 +179,7 @@ function relativeVelocityKmps(a: SatelliteSnapshot["state"], b: SatelliteSnapsho
 
 export function OrbitalDashboard() {
   const [tleUrl, setTleUrl] = useState(sampleUrl);
+  const [backendCatalogGroup, setBackendCatalogGroup] = useState<CatalogGroupId>("STATIONS");
   const initialParsed = useMemo(() => parseSatelliteSource(sampleTle), []);
   const initialSelectedSatelliteIds = useMemo(() => getInitialSelectedIds(initialParsed.satellites), [initialParsed.satellites]);
   const [satellites, setSatellites] = useState<SatelliteObject[]>(initialParsed.satellites);
@@ -316,6 +326,7 @@ export function OrbitalDashboard() {
     setSatellites(result.satellites);
     setSelectedSatelliteIds(defaultSelectedIds);
     setTrajectoryAnchorTime(simTime);
+    return result;
   }, [simTime]);
 
   const updateSatelliteVisual = useCallback((
@@ -442,6 +453,27 @@ export function OrbitalDashboard() {
       setSelectedSatelliteIds([]);
     }
   }, [loadTleText, tleUrl]);
+
+  const loadFromBackendCatalog = useCallback(async () => {
+    setMessages([`Loading ${backendCatalogGroup} satellites from backend server...`]);
+
+    try {
+      const rawTle = await fetchCatalogGroupTle(backendCatalogGroup, MAX_TLE_OBJECTS);
+      const result = loadTleText(rawTle);
+      setTleUrl(`server:${backendCatalogGroup.toLowerCase()}`);
+      setMessages(
+        result.errors.length > 0
+          ? result.errors
+          : [`Loaded ${result.satellites.length} satellites from backend group ${backendCatalogGroup}.`],
+      );
+    } catch (error) {
+      setMessages([
+        error instanceof Error
+          ? error.message
+          : "Unable to load satellites from the backend server.",
+      ]);
+    }
+  }, [backendCatalogGroup, loadTleText]);
 
   const shiftSimulationTime = useCallback((minutes: number) => {
     setSimTime((current) => {
@@ -600,6 +632,37 @@ export function OrbitalDashboard() {
             />
             Choose local TLE or JSON file
           </label>
+          <div className="mt-3 border-t border-cyan-300/15 pt-3">
+            <div className="flex items-center justify-between gap-3">
+              <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-200/80">
+                Backend API
+              </p>
+              <span className="font-mono text-[10px] text-zinc-500">{getOrbitServerDisplayUrl()}</span>
+            </div>
+            <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
+              <select
+                value={backendCatalogGroup}
+                onChange={(event) => setBackendCatalogGroup(event.target.value as CatalogGroupId)}
+                className="min-w-0 border border-cyan-300/25 bg-black/45 px-3 py-2 font-mono text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
+              >
+                {catalogGroupOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={loadFromBackendCatalog}
+                className="border border-cyan-300/70 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-cyan-100 transition hover:bg-cyan-300 hover:text-slate-950"
+              >
+                Load Server
+              </button>
+            </div>
+            <p className="mt-2 text-[10px] text-zinc-500">
+              Calls Spring /api/catalog/tle and renders returned TLEs.
+            </p>
+          </div>
           {messages.length > 0 && (
             <div className="mt-3 border border-amber-300/30 bg-amber-300/10 px-3 py-2 text-xs text-amber-100">
               {messages.map((message) => (

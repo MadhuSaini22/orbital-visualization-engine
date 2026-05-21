@@ -1,0 +1,25 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: orbit-analysis-server
+  config:
+    import: optional:file:.env[.properties]
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:}
+    username: ${SPRING_DATASOURCE_USERNAME:}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/schema.sql
+
+orbit:
+  celestrak-base-url: ${CELESTRAK_BASE_URL:https://celestrak.org}
+  space-track-base-url: ${SPACE_TRACK_BASE_URL:https://www.space-track.org}
+  space-track-username: ${SPACE_TRACK_USERNAME:}
+  space-track-password: ${SPACE_TRACK_PASSWORD:}
+  orekit-data-path: ${OREKIT_DATA_PATH:}
+  ingestion-enabled: ${INGESTION_ENABLED:false}
+  cors-origin-pattern: ${CORS_ORIGIN_PATTERN:http://localhost:*}

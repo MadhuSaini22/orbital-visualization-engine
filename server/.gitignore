@@ -1,0 +1,5 @@
+.env
+target/
+orekit-data/
+.idea/
+*.iml
