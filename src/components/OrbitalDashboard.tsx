@@ -8,18 +8,23 @@ import type { SatelliteObject, SatelliteSnapshot, SatelliteVisualSettings } from
 import { GroundTrackMiniMap } from "@/components/GroundTrackMiniMap";
 import type { GroundTrackRangeId, GroundTrackRangeOption } from "@/components/GroundTrackMiniMap";
 import { sampleTle } from "@/data/sampleTle";
-import { sampleManeuvers } from "@/data/sampleManeuvers";
-import { sampleConjunctions } from "@/data/sampleConjunctions";
 import type { ConjunctionEvent, ConjunctionSnapshot } from "@/domain/conjunction";
 import { getConjunctionStatus, getConjunctionTone } from "@/domain/conjunction";
 import type { ManeuverEvent, ManeuverSnapshot } from "@/domain/maneuver";
-import { getDeltaVMagnitudeMps, getManeuverTone } from "@/domain/maneuver";
+import { getManeuverTone } from "@/domain/maneuver";
 import { parseSatelliteSource } from "@/domain/satelliteConfig";
 import { MAX_TLE_OBJECTS } from "@/domain/tle";
 import { distanceBetweenOrbitStatesKm } from "@/geometry/distance";
 import { formatNumber, formatUtc } from "@/geometry/format";
 import { SatelliteJsPropagator } from "@/propagation/SatelliteJsPropagator";
-import { fetchCatalogGroupTle, getOrbitServerDisplayUrl } from "@/services/orbitServerApi";
+import {
+  fetchCatalogGroupTle,
+  fetchConjunctions,
+  fetchManeuvers,
+  getOrbitServerDisplayUrl,
+  refreshConjunctions,
+} from "@/services/orbitServerApi";
+import type { BackendConjunctionRecord, BackendManeuverEvent } from "@/services/orbitServerApi";
 import { StateCacheService } from "@/services/StateCacheService";
 
 const CesiumGlobe = dynamic(
@@ -125,44 +130,77 @@ function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * 60 * 1000);
 }
 
-function normalizeManeuverEvents(raw: unknown): ManeuverEvent[] {
-  const maybeEvents = Array.isArray(raw)
-    ? raw
-    : raw && typeof raw === "object" && "maneuvers" in raw && Array.isArray((raw as { maneuvers?: unknown }).maneuvers)
-      ? (raw as { maneuvers: unknown[] }).maneuvers
-      : [];
+function normalizeBackendManeuvers(raw: BackendManeuverEvent[]): ManeuverEvent[] {
+  return raw.map((event): ManeuverEvent => {
+    const vector = event.vector ?? {};
+    const metadata = event.metadata ?? {};
+    const type = typeof metadata.type === "string" ? metadata.type : "station_keep";
+    const description = typeof metadata.description === "string"
+      ? metadata.description
+      : "Maneuver event loaded from the backend database.";
 
-  return maybeEvents.flatMap((event): ManeuverEvent[] => {
-    if (!event || typeof event !== "object") {
+    return {
+      id: event.id,
+      satelliteId: String(event.noradId),
+      title: event.name,
+      timeUtc: event.eventTime,
+      type: ["orbit_raise", "phasing", "station_keep", "avoidance"].includes(type) ? type as ManeuverEvent["type"] : "station_keep",
+      status: event.status.toLowerCase() === "cancelled" ? "candidate" : event.status.toLowerCase() as ManeuverEvent["status"],
+      deltaVMps: event.deltaVMps,
+      deltaVVectorMps: [
+        vector.r ?? vector.x ?? 0,
+        vector.t ?? vector.y ?? event.deltaVMps,
+        vector.n ?? vector.z ?? 0,
+      ],
+      frame: ["RTN", "ECI", "BODY", "LVLH"].includes(event.frame) ? event.frame as ManeuverEvent["frame"] : "RTN",
+      durationSec: event.durationSec,
+      description,
+      visual: {
+        showBurnVector: true,
+        showPrePostOrbit: true,
+      },
+    };
+  });
+}
+
+function normalizeBackendConjunctions(raw: BackendConjunctionRecord[]): ConjunctionEvent[] {
+  return raw.flatMap((record): ConjunctionEvent[] => {
+    if (!record.sat1NoradId || !record.sat2NoradId || !record.tca) {
       return [];
     }
 
-    const candidate = event as Partial<ManeuverEvent>;
-    if (!candidate.id || !candidate.satelliteId || !candidate.title || !candidate.timeUtc) {
-      return [];
-    }
+    const tcaMs = new Date(record.tca).getTime();
+    const warningDistanceKm = record.risk === "CRITICAL" ? 25 : record.risk === "WARNING" ? 25 : 50;
+    const criticalDistanceKm = record.risk === "CRITICAL" ? Math.max(record.missDistanceKm ?? 1, 1) : 10;
 
     return [{
-      id: candidate.id,
-      satelliteId: candidate.satelliteId,
-      title: candidate.title,
-      timeUtc: candidate.timeUtc,
-      type: candidate.type ?? "station_keep",
-      status: candidate.status ?? "candidate",
-      deltaVMps: candidate.deltaVMps ?? getDeltaVMagnitudeMps({
-        ...candidate,
-        deltaVVectorMps: candidate.deltaVVectorMps ?? [0, 0, 0],
-      } as ManeuverEvent),
-      deltaVVectorMps: candidate.deltaVVectorMps ?? [0, candidate.deltaVMps ?? 0, 0],
-      frame: candidate.frame ?? "RTN",
-      durationSec: candidate.durationSec ?? 0,
-      description: candidate.description ?? "Maneuver event loaded from JSON.",
-      visual: {
-        showBurnVector: candidate.visual?.showBurnVector ?? true,
-        showPrePostOrbit: candidate.visual?.showPrePostOrbit ?? true,
-      },
+      id: record.id,
+      primarySatelliteId: String(record.sat1NoradId),
+      secondarySatelliteId: String(record.sat2NoradId),
+      primaryName: record.sat1Name ?? undefined,
+      secondaryName: record.sat2Name ?? undefined,
+      startTimeUtc: new Date(tcaMs - 30 * 60 * 1000).toISOString(),
+      endTimeUtc: new Date(tcaMs + 30 * 60 * 1000).toISOString(),
+      tcaUtc: record.tca,
+      missDistanceKm: record.missDistanceKm ?? undefined,
+      relativeVelocityKmps: record.relativeVelocityKmps,
+      probabilityOfCollision: record.probabilityOfCollision,
+      risk: record.risk,
+      source: record.source,
+      warningDistanceKm,
+      criticalDistanceKm,
     }];
   });
+}
+
+function getConjunctionStatusFromRisk(event: ConjunctionEvent, missDistanceKm: number) {
+  if (event.risk === "CRITICAL") {
+    return "critical" as const;
+  }
+  if (event.risk === "WARNING" || event.risk === "WATCH") {
+    return "warning" as const;
+  }
+  return getConjunctionStatus(missDistanceKm, event.warningDistanceKm, event.criticalDistanceKm);
 }
 
 function relativeVelocityKmps(a: SatelliteSnapshot["state"], b: SatelliteSnapshot["state"]) {
@@ -195,12 +233,13 @@ export function OrbitalDashboard() {
   const [showRangeCheck, setShowRangeCheck] = useState(false);
   const [groundTrackRangeId, setGroundTrackRangeId] = useState<GroundTrackRangeId>("live");
   const [showManeuvers, setShowManeuvers] = useState(false);
-  const [maneuverEvents, setManeuverEvents] = useState<ManeuverEvent[]>(sampleManeuvers);
-  const [selectedManeuverId, setSelectedManeuverId] = useState<string | null>(sampleManeuvers[0]?.id ?? null);
+  const [maneuverEvents, setManeuverEvents] = useState<ManeuverEvent[]>([]);
+  const [selectedManeuverId, setSelectedManeuverId] = useState<string | null>(null);
   const [isManeuverModalOpen, setIsManeuverModalOpen] = useState(false);
   const [showConjunctions, setShowConjunctions] = useState(false);
-  const [conjunctionEvents] = useState<ConjunctionEvent[]>(sampleConjunctions);
-  const [selectedConjunctionId, setSelectedConjunctionId] = useState<string | null>(sampleConjunctions[0]?.id ?? null);
+  const [conjunctionEvents, setConjunctionEvents] = useState<ConjunctionEvent[]>([]);
+  const [selectedConjunctionId, setSelectedConjunctionId] = useState<string | null>(null);
+  const [dynamicDataMessage, setDynamicDataMessage] = useState<string | null>(null);
   const [resetSignal, setResetSignal] = useState(0);
   const [focusRequest, setFocusRequest] = useState<{ satelliteId: string; sequence: number } | null>(null);
   const [maneuverFocusRequest, setManeuverFocusRequest] = useState<ManeuverFocusRequest | null>(null);
@@ -258,6 +297,28 @@ export function OrbitalDashboard() {
 
       if (!primary || !secondary) {
         return [];
+      }
+
+      if (event.tcaUtc && event.missDistanceKm !== undefined) {
+        const primaryState = propagator.getState(primary.id, event.tcaUtc);
+        const secondaryState = propagator.getState(secondary.id, event.tcaUtc);
+        return [{
+          event,
+          primary: {
+            ...primary,
+            name: event.primaryName ?? primary.name,
+          },
+          secondary: {
+            ...secondary,
+            name: event.secondaryName ?? secondary.name,
+          },
+          tcaUtc: event.tcaUtc,
+          missDistanceKm: event.missDistanceKm,
+          relativeVelocityKmps: event.relativeVelocityKmps ?? relativeVelocityKmps(primaryState, secondaryState),
+          status: getConjunctionStatusFromRisk(event, event.missDistanceKm),
+          primaryState,
+          secondaryState,
+        }];
       }
 
       let best: ConjunctionSnapshot | null = null;
@@ -318,6 +379,11 @@ export function OrbitalDashboard() {
           distanceKm: rangeDistanceKm,
         }
       : null;
+  const loadedNoradIds = useMemo(() => {
+    return satellites
+      .map((satellite) => satellite.noradId ?? satellite.id)
+      .filter((id): id is string => Boolean(id));
+  }, [satellites]);
 
   const loadTleText = useCallback((raw: string) => {
     const result = parseSatelliteSource(raw);
@@ -475,6 +541,22 @@ export function OrbitalDashboard() {
     }
   }, [backendCatalogGroup, loadTleText]);
 
+  const syncConjunctionsFromSpaceTrack = useCallback(async () => {
+    setDynamicDataMessage("Syncing public CDM conjunctions from Space-Track...");
+
+    try {
+      const response = await refreshConjunctions();
+      const loadedIdSet = new Set(loadedNoradIds);
+      const parsed = normalizeBackendConjunctions(response.conjunctions)
+        .filter((event) => loadedIdSet.has(event.primarySatelliteId) || loadedIdSet.has(event.secondarySatelliteId));
+      setConjunctionEvents(parsed);
+      setSelectedConjunctionId((current) => parsed.some((event) => event.id === current) ? current : parsed[0]?.id ?? null);
+      setDynamicDataMessage(`Synced ${response.conjunctions.length} Space-Track CDM records. ${parsed.length} match loaded satellites.`);
+    } catch (error) {
+      setDynamicDataMessage(error instanceof Error ? error.message : "Unable to sync Space-Track conjunctions.");
+    }
+  }, [loadedNoradIds]);
+
   const shiftSimulationTime = useCallback((minutes: number) => {
     setSimTime((current) => {
       const next = new Date(current.getTime() + minutes * 60 * 1000);
@@ -485,21 +567,32 @@ export function OrbitalDashboard() {
 
   useEffect(() => {
     let ignore = false;
+    const loadedIdSet = new Set(loadedNoradIds);
 
     async function loadManeuvers() {
       try {
-        const response = await fetch("/data/maneuvers.json", { cache: "no-store" });
-        if (!response.ok) {
+        if (loadedNoradIds.length === 0) {
+          await Promise.resolve();
+          if (!ignore) {
+            setManeuverEvents([]);
+            setSelectedManeuverId(null);
+          }
           return;
         }
 
-        const parsed = normalizeManeuverEvents(await response.json());
-        if (!ignore && parsed.length > 0) {
+        const parsed = normalizeBackendManeuvers(await fetchManeuvers())
+          .filter((event) => loadedIdSet.has(event.satelliteId));
+        if (!ignore) {
           setManeuverEvents(parsed);
-          setSelectedManeuverId(parsed[0].id);
+          setSelectedManeuverId((current) => parsed.some((event) => event.id === current) ? current : parsed[0]?.id ?? null);
+          setDynamicDataMessage(null);
         }
-      } catch {
-        // The built-in TypeScript sample remains the fallback if JSON loading fails.
+      } catch (error) {
+        if (!ignore) {
+          setManeuverEvents([]);
+          setSelectedManeuverId(null);
+          setDynamicDataMessage(error instanceof Error ? error.message : "Unable to load maneuvers from the backend.");
+        }
       }
     }
 
@@ -508,7 +601,44 @@ export function OrbitalDashboard() {
     return () => {
       ignore = true;
     };
-  }, []);
+  }, [loadedNoradIds]);
+
+  useEffect(() => {
+    let ignore = false;
+
+    async function loadConjunctions() {
+      try {
+        if (loadedNoradIds.length === 0) {
+          await Promise.resolve();
+          if (!ignore) {
+            setConjunctionEvents([]);
+            setSelectedConjunctionId(null);
+          }
+          return;
+        }
+
+        const response = await fetchConjunctions(loadedNoradIds);
+        const parsed = normalizeBackendConjunctions(response.conjunctions);
+        if (!ignore) {
+          setConjunctionEvents(parsed);
+          setSelectedConjunctionId((current) => parsed.some((event) => event.id === current) ? current : parsed[0]?.id ?? null);
+          setDynamicDataMessage(null);
+        }
+      } catch (error) {
+        if (!ignore) {
+          setConjunctionEvents([]);
+          setSelectedConjunctionId(null);
+          setDynamicDataMessage(error instanceof Error ? error.message : "Unable to load conjunctions from the backend.");
+        }
+      }
+    }
+
+    loadConjunctions();
+
+    return () => {
+      ignore = true;
+    };
+  }, [loadedNoradIds]);
 
   useEffect(() => {
     lastTickRef.current = Date.now();
@@ -670,6 +800,11 @@ export function OrbitalDashboard() {
               ))}
             </div>
           )}
+          {dynamicDataMessage && (
+            <div className="mt-3 border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-xs text-cyan-100">
+              {dynamicDataMessage}
+            </div>
+          )}
         </HudPanel>
 
         <GroundTrackMiniMap
@@ -791,6 +926,7 @@ export function OrbitalDashboard() {
           showConjunctions={showConjunctions}
           onSelectConjunction={setSelectedConjunctionId}
           onToggleConjunctions={() => setShowConjunctions((value) => !value)}
+          onRefreshConjunctions={syncConjunctionsFromSpaceTrack}
         />
       </section>
 
@@ -1035,7 +1171,7 @@ function getConjunctionStatusDescription(status: ConjunctionSnapshot["status"]) 
     return "Warning means the satellites pass inside the warning threshold, but not inside the critical threshold.";
   }
 
-  return "Safe means the closest approach stays outside the warning threshold in this sample window.";
+  return "Safe means the closest approach stays outside the configured warning threshold.";
 }
 
 function ManeuverPanel({
@@ -1131,7 +1267,7 @@ function ManeuverModal({
       <div className="relative flex h-[75vh] w-[min(1180px,75vw)] flex-col border border-fuchsia-300/35 bg-[#071016]/95 shadow-2xl max-lg:w-[94vw]">
         <div className="flex items-center justify-between border-b border-fuchsia-300/20 px-5 py-4">
           <div>
-            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-fuchsia-200">Phase 2 Maneuver Visualization</p>
+            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-fuchsia-200">Backend Maneuver Events</p>
             <h2 className="text-xl font-semibold text-white">Maneuver Events</h2>
           </div>
           <button
@@ -1245,7 +1381,7 @@ function ManeuverModal({
               </div>
             </div>
           ) : (
-            <div className="grid place-items-center border border-white/10 bg-black/25 text-sm text-zinc-500">No maneuver events loaded.</div>
+            <div className="grid place-items-center border border-white/10 bg-black/25 text-sm text-zinc-500">No maneuver events found in the backend database for the loaded satellites.</div>
           )}
         </div>
       </div>
@@ -1269,12 +1405,14 @@ function ConjunctionPanel({
   showConjunctions,
   onSelectConjunction,
   onToggleConjunctions,
+  onRefreshConjunctions,
 }: {
   conjunctionSnapshots: ConjunctionSnapshot[];
   selectedConjunctionId: string | null;
   showConjunctions: boolean;
   onSelectConjunction: (conjunctionId: string) => void;
   onToggleConjunctions: () => void;
+  onRefreshConjunctions: () => void;
 }) {
   const selectedConjunction = conjunctionSnapshots.find((snapshot) => snapshot.event.id === selectedConjunctionId) ?? conjunctionSnapshots[0] ?? null;
 
@@ -1282,24 +1420,33 @@ function ConjunctionPanel({
     <HudPanel>
       <div className="flex items-center justify-between gap-3">
         <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Conjunctions</p>
-        <button
-          type="button"
-          aria-pressed={showConjunctions}
-          onClick={onToggleConjunctions}
-          className={`flex min-w-16 items-center gap-2 border px-2 py-1 font-mono text-[10px] uppercase transition ${
-            showConjunctions ? "border-amber-300 bg-amber-300/15 text-amber-100" : "border-white/10 text-zinc-500 hover:border-amber-300"
-          }`}
-        >
-          <span className={`h-2.5 w-2.5 rounded-full ${showConjunctions ? "bg-amber-300" : "bg-zinc-600"}`} />
-          {showConjunctions ? "On" : "Off"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onRefreshConjunctions}
+            className="border border-amber-300/35 px-2 py-1 font-mono text-[10px] uppercase text-amber-100 transition hover:border-amber-300 hover:bg-amber-300/10"
+          >
+            Sync
+          </button>
+          <button
+            type="button"
+            aria-pressed={showConjunctions}
+            onClick={onToggleConjunctions}
+            className={`flex min-w-16 items-center gap-2 border px-2 py-1 font-mono text-[10px] uppercase transition ${
+              showConjunctions ? "border-amber-300 bg-amber-300/15 text-amber-100" : "border-white/10 text-zinc-500 hover:border-amber-300"
+            }`}
+          >
+            <span className={`h-2.5 w-2.5 rounded-full ${showConjunctions ? "bg-amber-300" : "bg-zinc-600"}`} />
+            {showConjunctions ? "On" : "Off"}
+          </button>
+        </div>
       </div>
       <p className="mt-1 text-[11px] text-zinc-500">
         {showConjunctions ? `${conjunctionSnapshots.length} close-approach pair visible` : "Enable to show close-approach links and risk labels."}
       </p>
       {showConjunctions && (
         <p className="mt-2 text-[11px] leading-5 text-zinc-500">
-          Conjunction = a close-approach check between two satellites. TCA is the time when that pair is closest in the sample window.
+          Conjunction = a close-approach check between two tracked objects. TCA is the predicted closest-approach time from the backend CDM record.
         </p>
       )}
 

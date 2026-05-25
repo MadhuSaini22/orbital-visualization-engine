@@ -50,6 +50,10 @@ public class ConjunctionRepository {
   }
 
   public List<ConjunctionRecord> search(Integer noradId, RiskLevel risk, Instant from, Instant to) {
+    return search(noradId, null, risk, from, to);
+  }
+
+  public List<ConjunctionRecord> search(Integer noradId, List<Integer> noradIds, RiskLevel risk, Instant from, Instant to) {
     List<Object> args = new ArrayList<>();
     StringBuilder sql = new StringBuilder("select * from conjunctions where 1=1");
 
@@ -57,6 +61,12 @@ public class ConjunctionRepository {
       sql.append(" and (sat1_norad_id = ? or sat2_norad_id = ?)");
       args.add(noradId);
       args.add(noradId);
+    }
+    if (noradIds != null && !noradIds.isEmpty()) {
+      String placeholders = String.join(", ", java.util.Collections.nCopies(noradIds.size(), "?"));
+      sql.append(" and sat1_norad_id in (").append(placeholders).append(") and sat2_norad_id in (").append(placeholders).append(")");
+      args.addAll(noradIds);
+      args.addAll(noradIds);
     }
     if (risk != null) {
       sql.append(" and risk = ?");

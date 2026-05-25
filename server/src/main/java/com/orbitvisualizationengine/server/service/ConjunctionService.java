@@ -16,7 +16,11 @@ public class ConjunctionService {
   }
 
   public List<ConjunctionRecord> search(Integer noradId, RiskLevel risk, Instant from, Instant to) {
-    return conjunctions.search(noradId, risk, from, to);
+    return search(noradId, null, risk, from, to);
+  }
+
+  public List<ConjunctionRecord> search(Integer noradId, List<Integer> noradIds, RiskLevel risk, Instant from, Instant to) {
+    return conjunctions.search(noradId, noradIds, risk, from, to);
   }
 
   public ConjunctionRecord get(String id) {

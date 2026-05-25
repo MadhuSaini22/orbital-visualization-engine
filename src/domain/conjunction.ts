@@ -6,8 +6,16 @@ export type ConjunctionEvent = {
   id: string;
   primarySatelliteId: string;
   secondarySatelliteId: string;
+  primaryName?: string;
+  secondaryName?: string;
   startTimeUtc: string;
   endTimeUtc: string;
+  tcaUtc?: string;
+  missDistanceKm?: number;
+  relativeVelocityKmps?: number | null;
+  probabilityOfCollision?: number | null;
+  risk?: "SAFE" | "WATCH" | "WARNING" | "CRITICAL";
+  source?: string;
   warningDistanceKm: number;
   criticalDistanceKm: number;
 };
