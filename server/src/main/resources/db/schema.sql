@@ -29,6 +29,40 @@ create table if not exists catalog_memberships (
 create index if not exists catalog_memberships_group_idx
   on catalog_memberships(group_id, refreshed_at desc);
 
+create table if not exists satellite_analysis_configs (
+  norad_id integer primary key references satellites(norad_id) on delete cascade,
+  preset text not null default 'FAST_PREVIEW',
+  propagator_type text not null default 'TLE_SGP4',
+  gravity_enabled boolean not null default false,
+  gravity_degree integer not null default 2,
+  gravity_order integer not null default 0,
+  drag_enabled boolean not null default false,
+  solar_radiation_pressure_enabled boolean not null default false,
+  third_body_sun_enabled boolean not null default false,
+  third_body_moon_enabled boolean not null default false,
+  maneuver_model_enabled boolean not null default false,
+  dry_mass_kg double precision not null default 850.0,
+  fuel_mass_kg double precision not null default 150.0,
+  drag_area_m2 double precision not null default 20.0,
+  drag_coefficient double precision not null default 2.2,
+  srp_area_m2 double precision not null default 15.0,
+  reflectivity_coefficient double precision not null default 1.2,
+  nominal_thrust_n double precision not null default 0.2,
+  nominal_isp_s double precision not null default 220.0,
+  notes text,
+  updated_at timestamptz not null default now()
+);
+
+alter table satellite_analysis_configs
+  add column if not exists dry_mass_kg double precision not null default 850.0,
+  add column if not exists fuel_mass_kg double precision not null default 150.0,
+  add column if not exists drag_area_m2 double precision not null default 20.0,
+  add column if not exists drag_coefficient double precision not null default 2.2,
+  add column if not exists srp_area_m2 double precision not null default 15.0,
+  add column if not exists reflectivity_coefficient double precision not null default 1.2,
+  add column if not exists nominal_thrust_n double precision not null default 0.2,
+  add column if not exists nominal_isp_s double precision not null default 220.0;
+
 create table if not exists ephemeris_states (
   id text primary key,
   norad_id integer not null references satellites(norad_id) on delete cascade,

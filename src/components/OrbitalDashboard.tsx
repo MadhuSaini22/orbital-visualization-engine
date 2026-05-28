@@ -4,7 +4,7 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { SatelliteObject, SatelliteSnapshot, SatelliteVisualSettings } from "@/domain/orbit";
+import type { OrbitState, SatelliteObject, SatelliteSnapshot, SatelliteVisualSettings } from "@/domain/orbit";
 import { GroundTrackMiniMap } from "@/components/GroundTrackMiniMap";
 import type { GroundTrackRangeId, GroundTrackRangeOption } from "@/components/GroundTrackMiniMap";
 import { sampleTle } from "@/data/sampleTle";
@@ -18,13 +18,24 @@ import { distanceBetweenOrbitStatesKm } from "@/geometry/distance";
 import { formatNumber, formatUtc } from "@/geometry/format";
 import { SatelliteJsPropagator } from "@/propagation/SatelliteJsPropagator";
 import {
+  applyAnalysisPreset,
   fetchCatalogGroupTle,
+  fetchAnalysisConfig,
   fetchConjunctions,
+  fetchCurrentOrbitState,
   fetchManeuvers,
+  fetchOrbitTrajectory,
   getOrbitServerDisplayUrl,
   refreshConjunctions,
+  setAnalysisMode,
 } from "@/services/orbitServerApi";
-import type { BackendConjunctionRecord, BackendManeuverEvent } from "@/services/orbitServerApi";
+import type {
+  AnalysisPresetId,
+  BackendAnalysisConfigResponse,
+  BackendConjunctionRecord,
+  BackendEphemerisState,
+  BackendManeuverEvent,
+} from "@/services/orbitServerApi";
 import { StateCacheService } from "@/services/StateCacheService";
 
 const CesiumGlobe = dynamic(
@@ -43,7 +54,6 @@ type ManeuverFocusRequest = {
 };
 type FrameMode = "earth-fixed" | "inertial";
 
-const sampleUrl = "/data/sample.tle";
 const catalogGroupOptions = [
   { id: "STATIONS", label: "Stations" },
   { id: "ACTIVE", label: "Active" },
@@ -56,10 +66,29 @@ const initialSimulationTime = new Date("2026-05-08T00:00:00.000Z");
 const trajectoryOptions = {
   futureMinutes: 110,
   pastMinutes: 35,
-  stepSec: 30,
 };
+const speedPresetOptions = [
+  { speed: 60, label: "1 min/sec" },
+  { speed: 300, label: "5 min/sec" },
+  { speed: 600, label: "10 min/sec" },
+] as const;
 const maneuverWindowMinutes = 45;
 const conjunctionStepSec = 120;
+const analysisPresetOptions = [
+  { id: "FAST_PREVIEW", label: "Fast" },
+  { id: "OPERATIONAL_REVIEW", label: "Ops" },
+  { id: "HIGH_FIDELITY", label: "High" },
+  { id: "MANEUVER_PLANNING", label: "Burn" },
+] satisfies Array<{ id: AnalysisPresetId; label: string }>;
+const analysisModeOptions = [
+  { id: "gravity", label: "Grav", key: "gravityEnabled" },
+  { id: "drag", label: "Drag", key: "dragEnabled" },
+  { id: "srp", label: "SRP", key: "solarRadiationPressureEnabled" },
+  { id: "sun", label: "Sun", key: "thirdBodySunEnabled" },
+  { id: "moon", label: "Moon", key: "thirdBodyMoonEnabled" },
+  { id: "maneuver", label: "Burn", key: "maneuverModelEnabled" },
+] satisfies Array<{ id: string; label: string; key: keyof BackendAnalysisConfigResponse["config"] }>;
+type ActiveDataSource = "sample" | "endpoint" | "backend";
 const groundTrackRangeOptions = [
   {
     id: "live",
@@ -128,6 +157,45 @@ function getRangePair(selectedSatelliteIds: string[]) {
 
 function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * 60 * 1000);
+}
+
+function getAdaptiveSampleSpacingSec(simulationSpeed: number) {
+  return Math.max(10, simulationSpeed / 2);
+}
+
+function normalizeCustomMinutesPerSecond(value: string) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  return Math.min(Math.max(parsed, 1), 180);
+}
+
+function backendStateToOrbitState(satelliteId: string, state: BackendEphemerisState): OrbitState {
+  return {
+    satelliteId,
+    timeUtc: state.time,
+    frame: "ECEF",
+    positionEcefKm: state.positionKm,
+    velocityEcefKmps: state.velocityKmps,
+    latitudeDeg: state.latitudeDeg,
+    longitudeDeg: state.longitudeDeg,
+    altitudeKm: state.altitudeKm,
+    velocityKmps: Math.sqrt(
+      state.velocityKmps[0] ** 2 +
+      state.velocityKmps[1] ** 2 +
+      state.velocityKmps[2] ** 2,
+    ),
+  };
+}
+
+function eventStateKey(satelliteId: string, timeUtc: string) {
+  return `${satelliteId}@${timeUtc}`;
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 function normalizeBackendManeuvers(raw: BackendManeuverEvent[]): ManeuverEvent[] {
@@ -216,7 +284,8 @@ function relativeVelocityKmps(a: SatelliteSnapshot["state"], b: SatelliteSnapsho
 }
 
 export function OrbitalDashboard() {
-  const [tleUrl, setTleUrl] = useState(sampleUrl);
+  const [tleUrl, setTleUrl] = useState("");
+  const [activeDataSource, setActiveDataSource] = useState<ActiveDataSource>("sample");
   const [backendCatalogGroup, setBackendCatalogGroup] = useState<CatalogGroupId>("STATIONS");
   const initialParsed = useMemo(() => parseSatelliteSource(sampleTle), []);
   const initialSelectedSatelliteIds = useMemo(() => getInitialSelectedIds(initialParsed.satellites), [initialParsed.satellites]);
@@ -227,6 +296,7 @@ export function OrbitalDashboard() {
   const [trajectoryAnchorTime, setTrajectoryAnchorTime] = useState(() => initialSimulationTime);
   const [isPlaying, setIsPlaying] = useState(true);
   const [speed, setSpeed] = useState(60);
+  const [customSpeedInput, setCustomSpeedInput] = useState("2");
   const [frameMode, setFrameMode] = useState<FrameMode>("earth-fixed");
   const [showLabels, setShowLabels] = useState(true);
   const [showAllOrbits, setShowAllOrbits] = useState(false);
@@ -240,27 +310,80 @@ export function OrbitalDashboard() {
   const [conjunctionEvents, setConjunctionEvents] = useState<ConjunctionEvent[]>([]);
   const [selectedConjunctionId, setSelectedConjunctionId] = useState<string | null>(null);
   const [dynamicDataMessage, setDynamicDataMessage] = useState<string | null>(null);
+  const [analysisConfig, setAnalysisConfig] = useState<BackendAnalysisConfigResponse | null>(null);
+  const [analysisMessage, setAnalysisMessage] = useState<string | null>(null);
+  const [serverStateBySatelliteId, setServerStateBySatelliteId] = useState<Map<string, OrbitState>>(() => new Map());
+  const [serverOrbitSnapshots, setServerOrbitSnapshots] = useState<SatelliteSnapshot[] | null>(null);
+  const [serverGroundTrackSnapshots, setServerGroundTrackSnapshots] = useState<SatelliteSnapshot[] | null>(null);
+  const [serverEventStateByKey, setServerEventStateByKey] = useState<Map<string, OrbitState>>(() => new Map());
+  const [backendRequestPauseUntil, setBackendRequestPauseUntil] = useState(0);
+  const [backendRequestsPaused, setBackendRequestsPaused] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
   const [focusRequest, setFocusRequest] = useState<{ satelliteId: string; sequence: number } | null>(null);
   const [maneuverFocusRequest, setManeuverFocusRequest] = useState<ManeuverFocusRequest | null>(null);
   const lastTickRef = useRef<number | null>(null);
+  const simTimeRef = useRef(simTime);
 
   const propagator = useMemo(() => new SatelliteJsPropagator(satellites), [satellites]);
   const stateCache = useMemo(() => new StateCacheService(propagator, satellites), [propagator, satellites]);
   const groundTrackRange = groundTrackRangeOptions.find((option) => option.id === groundTrackRangeId) ?? groundTrackRangeOptions[0];
+  const adaptiveSampleSpacingSec = getAdaptiveSampleSpacingSec(speed);
+  const trajectoryWindowOptions = useMemo(() => ({
+    ...trajectoryOptions,
+    stepSec: adaptiveSampleSpacingSec,
+  }), [adaptiveSampleSpacingSec]);
+  const groundTrackStepSec = groundTrackRange.id === "live"
+    ? adaptiveSampleSpacingSec
+    : Math.max(groundTrackRange.stepSec, adaptiveSampleSpacingSec);
   const groundTrackAnchorMs = Math.floor(simTime.getTime() / groundTrackRange.bucketMs) * groundTrackRange.bucketMs;
-  const snapshots: SatelliteSnapshot[] = useMemo(() => {
+  const serverGroundTrackAnchorMs = activeDataSource === "backend"
+    ? trajectoryAnchorTime.getTime()
+    : groundTrackAnchorMs;
+  const localSnapshots: SatelliteSnapshot[] = useMemo(() => {
     return stateCache.getCurrentSnapshots(simTime.toISOString());
   }, [stateCache, simTime]);
+  const snapshots: SatelliteSnapshot[] = useMemo(() => {
+    if (activeDataSource === "backend") {
+      return satellites.map((satellite) => {
+        const serverState = serverStateBySatelliteId.get(satellite.id) ?? null;
+        return {
+          satellite,
+          state: serverState,
+          error: serverState ? undefined : "Waiting for backend ephemeris state.",
+        };
+      });
+    }
+
+    if (serverStateBySatelliteId.size === 0) {
+      return localSnapshots;
+    }
+
+    return localSnapshots.map((snapshot) => {
+      const serverState = serverStateBySatelliteId.get(snapshot.satellite.id);
+      return serverState
+        ? {
+            ...snapshot,
+            state: serverState,
+            error: undefined,
+          }
+        : snapshot;
+    });
+  }, [activeDataSource, localSnapshots, satellites, serverStateBySatelliteId]);
   const orbitSnapshots: SatelliteSnapshot[] = useMemo(() => {
-    return stateCache.getWindowedSnapshots(trajectoryAnchorTime.toISOString(), trajectoryOptions);
-  }, [stateCache, trajectoryAnchorTime]);
+    if (activeDataSource === "backend" && serverOrbitSnapshots) {
+      return serverOrbitSnapshots;
+    }
+    return stateCache.getWindowedSnapshots(trajectoryAnchorTime.toISOString(), trajectoryWindowOptions);
+  }, [activeDataSource, serverOrbitSnapshots, stateCache, trajectoryAnchorTime, trajectoryWindowOptions]);
   const groundTrackSnapshots: SatelliteSnapshot[] = useMemo(() => {
+    if (activeDataSource === "backend" && serverGroundTrackSnapshots) {
+      return serverGroundTrackSnapshots;
+    }
     return stateCache.getGroundTrackSnapshots(new Date(groundTrackAnchorMs).toISOString(), {
       pastMinutes: groundTrackRange.pastMinutes,
-      stepSec: groundTrackRange.stepSec,
+      stepSec: groundTrackStepSec,
     });
-  }, [groundTrackAnchorMs, groundTrackRange.pastMinutes, groundTrackRange.stepSec, stateCache]);
+  }, [activeDataSource, groundTrackAnchorMs, groundTrackRange.pastMinutes, groundTrackStepSec, serverGroundTrackSnapshots, stateCache]);
   const maneuverSnapshots: ManeuverSnapshot[] = useMemo(() => {
     return maneuverEvents.flatMap((event) => {
       const satellite = satellites.find((item) => item.id === event.satelliteId || item.noradId === event.satelliteId);
@@ -268,27 +391,32 @@ export function OrbitalDashboard() {
         return [];
       }
       const eventTime = new Date(event.timeUtc);
+      const serverEventState = serverEventStateByKey.get(eventStateKey(satellite.id, event.timeUtc)) ?? null;
 
       return [{
         event,
         satellite,
-        state: propagator.getState(satellite.id, event.timeUtc),
-        preTrajectory: propagator.getTrajectory(
-          satellite.id,
-          addMinutes(eventTime, -maneuverWindowMinutes).toISOString(),
-          event.timeUtc,
-          90,
-        ),
-        postTrajectory: propagator.getTrajectory(
-          satellite.id,
-          event.timeUtc,
-          addMinutes(eventTime, maneuverWindowMinutes).toISOString(),
-          90,
-        ),
+        state: activeDataSource === "backend" ? serverEventState : propagator.getState(satellite.id, event.timeUtc),
+        preTrajectory: activeDataSource === "backend"
+          ? []
+          : propagator.getTrajectory(
+              satellite.id,
+              addMinutes(eventTime, -maneuverWindowMinutes).toISOString(),
+              event.timeUtc,
+              90,
+            ),
+        postTrajectory: activeDataSource === "backend"
+          ? []
+          : propagator.getTrajectory(
+              satellite.id,
+              event.timeUtc,
+              addMinutes(eventTime, maneuverWindowMinutes).toISOString(),
+              90,
+            ),
         minutesFromSimulationTime: (new Date(event.timeUtc).getTime() - simTime.getTime()) / 60000,
       }];
     });
-  }, [maneuverEvents, propagator, satellites, simTime]);
+  }, [activeDataSource, maneuverEvents, propagator, satellites, serverEventStateByKey, simTime]);
   const selectedManeuver = maneuverSnapshots.find((snapshot) => snapshot.event.id === selectedManeuverId) ?? maneuverSnapshots[0] ?? null;
   const conjunctionSnapshots: ConjunctionSnapshot[] = useMemo(() => {
     return conjunctionEvents.flatMap((event): ConjunctionSnapshot[] => {
@@ -300,8 +428,12 @@ export function OrbitalDashboard() {
       }
 
       if (event.tcaUtc && event.missDistanceKm !== undefined) {
-        const primaryState = propagator.getState(primary.id, event.tcaUtc);
-        const secondaryState = propagator.getState(secondary.id, event.tcaUtc);
+        const primaryState = activeDataSource === "backend"
+          ? serverEventStateByKey.get(eventStateKey(primary.id, event.tcaUtc)) ?? null
+          : propagator.getState(primary.id, event.tcaUtc);
+        const secondaryState = activeDataSource === "backend"
+          ? serverEventStateByKey.get(eventStateKey(secondary.id, event.tcaUtc)) ?? null
+          : propagator.getState(secondary.id, event.tcaUtc);
         return [{
           event,
           primary: {
@@ -326,6 +458,9 @@ export function OrbitalDashboard() {
       const endMs = new Date(event.endTimeUtc).getTime();
 
       for (let timeMs = startMs; timeMs <= endMs; timeMs += conjunctionStepSec * 1000) {
+        if (activeDataSource === "backend") {
+          break;
+        }
         const timeUtc = new Date(timeMs).toISOString();
         const primaryState = propagator.getState(primary.id, timeUtc);
         const secondaryState = propagator.getState(secondary.id, timeUtc);
@@ -352,10 +487,16 @@ export function OrbitalDashboard() {
 
       return best ? [best] : [];
     });
-  }, [conjunctionEvents, propagator, satellites]);
+  }, [activeDataSource, conjunctionEvents, propagator, satellites, serverEventStateByKey]);
   const selectedConjunction = conjunctionSnapshots.find((snapshot) => snapshot.event.id === selectedConjunctionId) ?? conjunctionSnapshots[0] ?? null;
   const latestSelectedId = selectedSatelliteIds.at(-1) ?? null;
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
+  const selectedNoradId = selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? null;
+  const activeDataSourceLabel = activeDataSource === "backend"
+    ? `Backend ${backendCatalogGroup}`
+    : activeDataSource === "endpoint"
+      ? "Endpoint import"
+      : "Bundled sample";
   const currentDisplayGmstRadRaw = selectedSnapshot?.state?.gmstRad ?? snapshots.find((item) => item.state?.gmstRad)?.state?.gmstRad;
   // Orbit arcs are rendered in a space-like frame and rotated into Cesium's
   // Earth-fixed scene. Quantizing avoids rebuilding long polylines every
@@ -384,6 +525,44 @@ export function OrbitalDashboard() {
       .map((satellite) => satellite.noradId ?? satellite.id)
       .filter((id): id is string => Boolean(id));
   }, [satellites]);
+  const isPresetSpeed = speedPresetOptions.some((option) => option.speed === speed);
+  const pauseBackendRequests = useCallback((error: unknown) => {
+    setBackendRequestPauseUntil(Date.now() + 10_000);
+    setBackendRequestsPaused(true);
+    const message = error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "Backend ephemeris requests failed.";
+    setDynamicDataMessage(`${message} Retrying shortly.`);
+  }, []);
+
+  useEffect(() => {
+    simTimeRef.current = simTime;
+  }, [simTime]);
+
+  useEffect(() => {
+    if (backendRequestPauseUntil <= Date.now()) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setBackendRequestPauseUntil(0);
+      setBackendRequestsPaused(false);
+    }, backendRequestPauseUntil - Date.now());
+
+    return () => window.clearTimeout(timeoutId);
+  }, [backendRequestPauseUntil]);
+
+  const applyCustomSpeed = useCallback(() => {
+    const minutesPerSecond = normalizeCustomMinutesPerSecond(customSpeedInput);
+    if (minutesPerSecond === null) {
+      return;
+    }
+
+    setSpeed(minutesPerSecond * 60);
+    setCustomSpeedInput(String(minutesPerSecond));
+  }, [customSpeedInput]);
 
   const loadTleText = useCallback((raw: string) => {
     const result = parseSatelliteSource(raw);
@@ -512,7 +691,13 @@ export function OrbitalDashboard() {
         }
         throw new Error(message);
       }
-      loadTleText(await response.text());
+      const result = loadTleText(await response.text());
+      setActiveDataSource("endpoint");
+      setMessages(
+        result.errors.length > 0
+          ? result.errors
+          : [`Loaded ${result.satellites.length} satellites from endpoint import.`],
+      );
     } catch (error) {
       setMessages([error instanceof Error ? error.message : "Unable to load TLE data from the URL."]);
       setSatellites([]);
@@ -526,7 +711,7 @@ export function OrbitalDashboard() {
     try {
       const rawTle = await fetchCatalogGroupTle(backendCatalogGroup, MAX_TLE_OBJECTS);
       const result = loadTleText(rawTle);
-      setTleUrl(`server:${backendCatalogGroup.toLowerCase()}`);
+      setActiveDataSource("backend");
       setMessages(
         result.errors.length > 0
           ? result.errors
@@ -540,6 +725,38 @@ export function OrbitalDashboard() {
       ]);
     }
   }, [backendCatalogGroup, loadTleText]);
+
+  const updateSelectedAnalysisConfig = useCallback(async (
+    action: (noradId: string) => Promise<BackendAnalysisConfigResponse>,
+    successMessage: string,
+  ) => {
+    if (!selectedNoradId) {
+      setAnalysisMessage("Select a satellite before changing analysis settings.");
+      return;
+    }
+
+    try {
+      const response = await action(selectedNoradId);
+      setAnalysisConfig(response);
+      setAnalysisMessage(successMessage);
+    } catch (error) {
+      setAnalysisMessage(error instanceof Error ? error.message : "Unable to update analysis configuration.");
+    }
+  }, [selectedNoradId]);
+
+  const applySelectedPreset = useCallback((preset: AnalysisPresetId) => {
+    updateSelectedAnalysisConfig(
+      (noradId) => applyAnalysisPreset(noradId, preset),
+      `Applied ${preset.replaceAll("_", " ").toLowerCase()} preset.`,
+    );
+  }, [updateSelectedAnalysisConfig]);
+
+  const toggleSelectedMode = useCallback((mode: string, enabled: boolean) => {
+    updateSelectedAnalysisConfig(
+      (noradId) => setAnalysisMode(noradId, mode, enabled),
+      `${mode.toUpperCase()} ${enabled ? "enabled" : "disabled"}.`,
+    );
+  }, [updateSelectedAnalysisConfig]);
 
   const syncConjunctionsFromSpaceTrack = useCallback(async () => {
     setDynamicDataMessage("Syncing public CDM conjunctions from Space-Track...");
@@ -564,6 +781,290 @@ export function OrbitalDashboard() {
       return next;
     });
   }, []);
+
+  useEffect(() => {
+    let ignore = false;
+    const controller = new AbortController();
+    let inFlight = false;
+
+    async function loadServerStates() {
+      if (inFlight) {
+        return;
+      }
+      if (activeDataSource !== "backend") {
+        setServerStateBySatelliteId(new Map());
+        return;
+      }
+      if (!isPlaying) {
+        return;
+      }
+      if (backendRequestsPaused) {
+        return;
+      }
+
+      inFlight = true;
+      const timeUtc = simTimeRef.current.toISOString();
+      const pairs: Array<[string, OrbitState] | null> = [];
+      try {
+        for (const satellite of satellites) {
+          if (ignore || controller.signal.aborted) {
+            return;
+          }
+          const noradId = satellite.noradId ?? satellite.id;
+          try {
+            const state = await fetchCurrentOrbitState(noradId, timeUtc, { signal: controller.signal });
+            pairs.push([satellite.id, backendStateToOrbitState(satellite.id, state)]);
+          } catch (error) {
+            if (isAbortError(error)) {
+              return;
+            }
+            pairs.push(null);
+            pauseBackendRequests(error);
+            break;
+          }
+        }
+
+        if (!ignore) {
+          if (satellites.length > 0 && pairs.every((pair) => pair === null)) {
+            pauseBackendRequests("Backend current-state requests are unavailable.");
+          }
+          setServerStateBySatelliteId(new Map(pairs.filter((pair): pair is [string, OrbitState] => pair !== null)));
+        }
+      } finally {
+        inFlight = false;
+      }
+    }
+
+    if (isPlaying) {
+      loadServerStates();
+    }
+    const intervalId = window.setInterval(loadServerStates, 3_000);
+
+    return () => {
+      ignore = true;
+      window.clearInterval(intervalId);
+      controller.abort();
+    };
+  }, [activeDataSource, backendRequestsPaused, isPlaying, pauseBackendRequests, satellites]);
+
+  useEffect(() => {
+    let ignore = false;
+    const controller = new AbortController();
+
+    async function loadServerTrajectoryWindows() {
+      if (activeDataSource !== "backend") {
+        setServerOrbitSnapshots(null);
+        return;
+      }
+      if (backendRequestsPaused) {
+        return;
+      }
+
+      const centerTime = trajectoryAnchorTime;
+      const start = addMinutes(centerTime, -trajectoryOptions.pastMinutes);
+      const end = addMinutes(centerTime, trajectoryOptions.futureMinutes);
+      const targetSatellites = satellites.filter((satellite) => {
+        if (!(showAllOrbits || selectedSatelliteIds.includes(satellite.id))) {
+          return false;
+        }
+        return satellite.visual.showOrbit || satellite.visual.showTrail || satellite.visual.showGroundTrack;
+      });
+      const nextSnapshots: SatelliteSnapshot[] = [];
+
+      for (const satellite of targetSatellites) {
+        if (ignore || controller.signal.aborted) {
+          return;
+        }
+        const noradId = satellite.noradId ?? satellite.id;
+        try {
+          const response = await fetchOrbitTrajectory(
+            noradId,
+            start.toISOString(),
+            end.toISOString(),
+            trajectoryWindowOptions.stepSec,
+            { signal: controller.signal },
+          );
+          const states = response.states.map((state) => backendStateToOrbitState(satellite.id, state));
+          nextSnapshots.push({
+            satellite,
+            state: null,
+            trajectory: states.filter((state) => new Date(state.timeUtc) >= centerTime),
+            futureTrajectory: states.filter((state) => new Date(state.timeUtc) >= centerTime),
+            pastTrail: states.filter((state) => new Date(state.timeUtc) <= centerTime),
+            groundTrack: states,
+          });
+        } catch (error) {
+          if (isAbortError(error)) {
+            return;
+          }
+          nextSnapshots.push({
+            satellite,
+            state: null,
+            error: error instanceof Error ? error.message : "Unable to load backend trajectory.",
+          });
+          pauseBackendRequests(error);
+          break;
+        }
+      }
+
+      if (!ignore) {
+        if (targetSatellites.length > 0 && nextSnapshots.every((snapshot) => snapshot.error)) {
+          pauseBackendRequests("Backend trajectory requests are unavailable.");
+        }
+        setServerOrbitSnapshots(nextSnapshots);
+      }
+    }
+
+    loadServerTrajectoryWindows();
+
+    return () => {
+      ignore = true;
+      controller.abort();
+    };
+  }, [activeDataSource, backendRequestsPaused, pauseBackendRequests, satellites, selectedSatelliteIds, showAllOrbits, trajectoryAnchorTime, trajectoryWindowOptions.stepSec]);
+
+  useEffect(() => {
+    let ignore = false;
+    const controller = new AbortController();
+
+    async function loadServerGroundTracks() {
+      if (activeDataSource !== "backend") {
+        setServerGroundTrackSnapshots(null);
+        return;
+      }
+      if (backendRequestsPaused) {
+        return;
+      }
+
+      const end = new Date(serverGroundTrackAnchorMs);
+      const start = addMinutes(end, -groundTrackRange.pastMinutes);
+      const targetSatellites = satellites.filter((satellite) => selectedSatelliteIds.includes(satellite.id));
+      const nextSnapshots: SatelliteSnapshot[] = [];
+
+      for (const satellite of targetSatellites) {
+        if (ignore || controller.signal.aborted) {
+          return;
+        }
+        const noradId = satellite.noradId ?? satellite.id;
+        try {
+          const response = await fetchOrbitTrajectory(
+            noradId,
+            start.toISOString(),
+            end.toISOString(),
+            groundTrackStepSec,
+            { signal: controller.signal },
+          );
+          nextSnapshots.push({
+            satellite,
+            state: null,
+            groundTrack: response.states.map((state) => backendStateToOrbitState(satellite.id, state)),
+          });
+        } catch (error) {
+          if (isAbortError(error)) {
+            return;
+          }
+          nextSnapshots.push({
+            satellite,
+            state: null,
+            error: error instanceof Error ? error.message : "Unable to load backend ground track.",
+          });
+          pauseBackendRequests(error);
+          break;
+        }
+      }
+
+      if (!ignore) {
+        if (targetSatellites.length > 0 && nextSnapshots.every((snapshot) => snapshot.error)) {
+          pauseBackendRequests("Backend ground-track requests are unavailable.");
+        }
+        setServerGroundTrackSnapshots(nextSnapshots);
+      }
+    }
+
+    loadServerGroundTracks();
+
+    return () => {
+      ignore = true;
+      controller.abort();
+    };
+  }, [activeDataSource, backendRequestsPaused, groundTrackRange.pastMinutes, groundTrackStepSec, pauseBackendRequests, satellites, selectedSatelliteIds, serverGroundTrackAnchorMs]);
+
+  useEffect(() => {
+    let ignore = false;
+    const controller = new AbortController();
+
+    async function loadServerEventStates() {
+      if (activeDataSource !== "backend") {
+        setServerEventStateByKey(new Map());
+        return;
+      }
+      if (backendRequestsPaused) {
+        return;
+      }
+
+      const requests: Array<{ satellite: SatelliteObject; timeUtc: string }> = [];
+      for (const event of maneuverEvents) {
+        const satellite = satellites.find((item) => item.id === event.satelliteId || item.noradId === event.satelliteId);
+        if (satellite) {
+          requests.push({ satellite, timeUtc: event.timeUtc });
+        }
+      }
+      for (const event of conjunctionEvents) {
+        if (!event.tcaUtc) {
+          continue;
+        }
+        const primary = satellites.find((item) => item.id === event.primarySatelliteId || item.noradId === event.primarySatelliteId);
+        const secondary = satellites.find((item) => item.id === event.secondarySatelliteId || item.noradId === event.secondarySatelliteId);
+        if (primary) {
+          requests.push({ satellite: primary, timeUtc: event.tcaUtc });
+        }
+        if (secondary) {
+          requests.push({ satellite: secondary, timeUtc: event.tcaUtc });
+        }
+      }
+
+      const uniqueRequests = [...new Map(requests.map((request) => [
+        eventStateKey(request.satellite.id, request.timeUtc),
+        request,
+      ])).values()];
+
+      const pairs: Array<[string, OrbitState] | null> = [];
+      for (const request of uniqueRequests) {
+        if (ignore || controller.signal.aborted) {
+          return;
+        }
+        const noradId = request.satellite.noradId ?? request.satellite.id;
+        try {
+          const state = await fetchCurrentOrbitState(noradId, request.timeUtc, { signal: controller.signal });
+          pairs.push([
+            eventStateKey(request.satellite.id, request.timeUtc),
+            backendStateToOrbitState(request.satellite.id, state),
+          ]);
+        } catch (error) {
+          if (isAbortError(error)) {
+            return;
+          }
+          pairs.push(null);
+          pauseBackendRequests(error);
+          break;
+        }
+      }
+
+      if (!ignore) {
+        if (uniqueRequests.length > 0 && pairs.every((pair) => pair === null)) {
+          pauseBackendRequests("Backend event-state requests are unavailable.");
+        }
+        setServerEventStateByKey(new Map(pairs.filter((pair): pair is [string, OrbitState] => pair !== null)));
+      }
+    }
+
+    loadServerEventStates();
+
+    return () => {
+      ignore = true;
+      controller.abort();
+    };
+  }, [activeDataSource, backendRequestsPaused, conjunctionEvents, maneuverEvents, pauseBackendRequests, satellites]);
 
   useEffect(() => {
     let ignore = false;
@@ -606,6 +1107,40 @@ export function OrbitalDashboard() {
   useEffect(() => {
     let ignore = false;
 
+    async function loadAnalysisConfig() {
+      if (!selectedNoradId) {
+        await Promise.resolve();
+        if (!ignore) {
+          setAnalysisConfig(null);
+          setAnalysisMessage(null);
+        }
+        return;
+      }
+
+      try {
+        const response = await fetchAnalysisConfig(selectedNoradId);
+        if (!ignore) {
+          setAnalysisConfig(response);
+          setAnalysisMessage(null);
+        }
+      } catch (error) {
+        if (!ignore) {
+          setAnalysisConfig(null);
+          setAnalysisMessage(error instanceof Error ? error.message : "Unable to load analysis configuration.");
+        }
+      }
+    }
+
+    loadAnalysisConfig();
+
+    return () => {
+      ignore = true;
+    };
+  }, [selectedNoradId]);
+
+  useEffect(() => {
+    let ignore = false;
+
     async function loadConjunctions() {
       try {
         if (loadedNoradIds.length === 0) {
@@ -641,27 +1176,26 @@ export function OrbitalDashboard() {
   }, [loadedNoradIds]);
 
   useEffect(() => {
-    lastTickRef.current = Date.now();
-    let frameId = 0;
+    if (!isPlaying) {
+      lastTickRef.current = null;
+      return;
+    }
 
-    function tick() {
+    lastTickRef.current = Date.now();
+    const intervalId = window.setInterval(() => {
       const now = Date.now();
       const elapsedMs = lastTickRef.current === null ? 0 : Math.min(now - lastTickRef.current, 250);
       lastTickRef.current = now;
 
-      if (isPlaying && elapsedMs > 0) {
+      if (elapsedMs > 0) {
         setSimTime((current) => {
           const nextTime = current.getTime() + elapsedMs * speed;
           return nextTime === current.getTime() ? current : new Date(nextTime);
         });
       }
+    }, 500);
 
-      frameId = window.requestAnimationFrame(tick);
-    }
-
-    frameId = window.requestAnimationFrame(tick);
-
-    return () => window.cancelAnimationFrame(frameId);
+    return () => window.clearInterval(intervalId);
   }, [isPlaying, speed]);
 
   return (
@@ -697,8 +1231,8 @@ export function OrbitalDashboard() {
       <header className="pointer-events-auto absolute top-0 right-0 left-0 z-20 border-b border-cyan-300/20 bg-[#071016]/88 px-4 py-3 shadow-2xl backdrop-blur-md">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <p className="font-mono text-[11px] font-semibold uppercase text-cyan-300">Phase 3 // Orbit Visualization Engine</p>
             <h1 className="text-xl font-semibold text-white">Multi-Satellite Orbital Operations</h1>
+            <p className="mt-1 font-mono text-[11px] uppercase tracking-[0.14em] text-cyan-300/70">{activeDataSourceLabel}</p>
           </div>
           <div className="grid min-w-[520px] grid-cols-4 gap-3 max-lg:min-w-0 max-lg:flex-1 max-sm:grid-cols-2">
             <HudMetric label="Satellites" value={`${satellites.length}/${MAX_TLE_OBJECTS}`} />
@@ -709,7 +1243,7 @@ export function OrbitalDashboard() {
         </div>
       </header>
 
-      <section className="pointer-events-auto absolute top-24 left-4 z-20 w-[360px] max-w-[calc(100vw-2rem)] space-y-3 max-lg:relative max-lg:top-auto max-lg:left-auto max-lg:mt-24 max-lg:ml-4">
+      <section className="pointer-events-auto absolute top-24 bottom-4 left-4 z-20 w-[360px] max-w-[calc(100vw-2rem)] space-y-3 overflow-y-auto pr-1 max-lg:relative max-lg:top-auto max-lg:bottom-auto max-lg:left-auto max-lg:mt-24 max-lg:ml-4 max-lg:max-h-[calc(100vh-7rem)]">
         <HudPanel>
           <div className="flex items-start justify-between gap-3">
             <div>
@@ -733,13 +1267,16 @@ export function OrbitalDashboard() {
         </HudPanel>
 
         <HudPanel>
-          <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Data Source</p>
+          <div className="flex items-center justify-between gap-3">
+            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Import</p>
+            <span className="font-mono text-[10px] uppercase text-cyan-100/80">{activeDataSourceLabel}</span>
+          </div>
           <div className="mt-3 flex gap-2">
             <input
               value={tleUrl}
               onChange={(event) => setTleUrl(event.target.value)}
               className="min-w-0 flex-1 border border-cyan-300/25 bg-black/45 px-3 py-2 font-mono text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
-              placeholder="/data/satellites.json"
+              placeholder="https://example.com/catalog.tle"
             />
             <button
               onClick={loadFromUrl}
@@ -748,20 +1285,6 @@ export function OrbitalDashboard() {
               Load
             </button>
           </div>
-          <label className="mt-2 block cursor-pointer border border-dashed border-cyan-300/20 bg-cyan-300/5 px-3 py-2 text-xs text-zinc-300 transition hover:border-cyan-300/60">
-            <input
-              type="file"
-              accept=".tle,.txt,.json"
-              className="sr-only"
-              onChange={async (event) => {
-                const file = event.target.files?.[0];
-                if (file) {
-                  loadTleText(await file.text());
-                }
-              }}
-            />
-            Choose local TLE or JSON file
-          </label>
           <div className="mt-3 border-t border-cyan-300/15 pt-3">
             <div className="flex items-center justify-between gap-3">
               <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-200/80">
@@ -773,7 +1296,9 @@ export function OrbitalDashboard() {
               <select
                 value={backendCatalogGroup}
                 onChange={(event) => setBackendCatalogGroup(event.target.value as CatalogGroupId)}
-                className="min-w-0 border border-cyan-300/25 bg-black/45 px-3 py-2 font-mono text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
+                className={`min-w-0 border bg-black/45 px-3 py-2 font-mono text-xs text-zinc-100 outline-none transition focus:border-cyan-300 ${
+                  activeDataSource === "backend" ? "border-cyan-300/60" : "border-cyan-300/25"
+                }`}
               >
                 {catalogGroupOptions.map((option) => (
                   <option key={option.id} value={option.id}>
@@ -790,7 +1315,7 @@ export function OrbitalDashboard() {
               </button>
             </div>
             <p className="mt-2 text-[10px] text-zinc-500">
-              Calls Spring /api/catalog/tle and renders returned TLEs.
+              Endpoint import and backend load are exclusive; the latest successful load becomes active.
             </p>
           </div>
           {messages.length > 0 && (
@@ -803,6 +1328,68 @@ export function OrbitalDashboard() {
           {dynamicDataMessage && (
             <div className="mt-3 border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-xs text-cyan-100">
               {dynamicDataMessage}
+            </div>
+          )}
+        </HudPanel>
+
+        <HudPanel className="p-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Analysis Config</p>
+              <p className="mt-1 font-mono text-[10px] text-zinc-500">NORAD {selectedNoradId ?? "--"}</p>
+            </div>
+            <span className="border border-cyan-300/30 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
+              {analysisConfig?.config.propagatorType.replaceAll("_", " ") ?? "--"}
+            </span>
+          </div>
+          <div className="mt-3 grid grid-cols-4 gap-1.5">
+            {analysisPresetOptions.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => applySelectedPreset(preset.id)}
+                className={`border px-2 py-1.5 font-mono text-[10px] uppercase transition ${
+                  analysisConfig?.config.preset === preset.id
+                    ? "border-cyan-300 bg-cyan-300 text-slate-950"
+                    : "border-cyan-300/25 text-cyan-100 hover:border-cyan-300"
+                }`}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+          <div className="mt-2 grid grid-cols-3 gap-1.5">
+            {analysisModeOptions.map((mode) => {
+              const checked = Boolean(analysisConfig?.config[mode.key]);
+              return (
+                <button
+                  key={mode.id}
+                  type="button"
+                  aria-pressed={checked}
+                  onClick={() => toggleSelectedMode(mode.id, !checked)}
+                  className={`border px-2 py-1.5 font-mono text-[10px] uppercase transition ${
+                    checked
+                      ? "border-lime-300 bg-lime-300/15 text-lime-100"
+                      : "border-white/10 text-zinc-500 hover:border-lime-300/60 hover:text-zinc-200"
+                  }`}
+                >
+                  {mode.label}
+                </button>
+              );
+            })}
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-3">
+            <DetailMetric label="Gravity" value={`${analysisConfig?.config.gravityDegree ?? "--"} x ${analysisConfig?.config.gravityOrder ?? "--"}`} />
+            <DetailMetric label="Preset" value={analysisConfig?.config.preset.replaceAll("_", " ") ?? "--"} />
+          </div>
+          {analysisConfig && analysisConfig.warnings.length > 0 && (
+            <p className="mt-2 line-clamp-3 text-[10px] leading-4 text-amber-100" title={analysisConfig.warnings[0]}>
+              {analysisConfig.warnings[0]}
+            </p>
+          )}
+          {analysisMessage && (
+            <div className="mt-3 border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-xs text-cyan-100">
+              {analysisMessage}
             </div>
           )}
         </HudPanel>
@@ -972,17 +1559,44 @@ export function OrbitalDashboard() {
             <ControlButton label="+10" onClick={() => shiftSimulationTime(10)} />
           </div>
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            {[60, 300, 600].map((item) => (
+            {speedPresetOptions.map((item) => (
               <button
-                key={item}
-                onClick={() => setSpeed(item)}
+                key={item.speed}
+                onClick={() => setSpeed(item.speed)}
                 className={`border px-3 py-2 font-mono text-xs transition ${
-                  speed === item ? "border-cyan-300 bg-cyan-300 text-slate-950" : "border-cyan-300/20 text-cyan-200 hover:border-cyan-300"
+                  speed === item.speed ? "border-cyan-300 bg-cyan-300 text-slate-950" : "border-cyan-300/20 text-cyan-200 hover:border-cyan-300"
                 }`}
+                title={`${item.speed}x`}
               >
-                {item}x
+                {item.label}
               </button>
             ))}
+            <div className={`flex items-center border transition ${isPresetSpeed ? "border-cyan-300/20" : "border-cyan-300 bg-cyan-300/10"}`}>
+              <button
+                type="button"
+                onClick={applyCustomSpeed}
+                className={`px-3 py-2 font-mono text-xs uppercase transition ${
+                  isPresetSpeed ? "text-cyan-200 hover:bg-cyan-300/10" : "text-cyan-100"
+                }`}
+              >
+                Custom
+              </button>
+              <input
+                value={customSpeedInput}
+                onChange={(event) => setCustomSpeedInput(event.target.value)}
+                onBlur={applyCustomSpeed}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    applyCustomSpeed();
+                    event.currentTarget.blur();
+                  }
+                }}
+                inputMode="numeric"
+                aria-label="Custom simulation minutes per real second"
+                className="h-9 w-14 border-l border-cyan-300/20 bg-black/35 px-2 font-mono text-xs text-cyan-50 outline-none focus:bg-cyan-300/10"
+              />
+              <span className="pr-2 font-mono text-xs text-cyan-200">min/sec</span>
+            </div>
             <ControlButton
               label="Now"
               onClick={() => {
@@ -1031,9 +1645,9 @@ export function OrbitalDashboard() {
   );
 }
 
-function HudPanel({ children }: { children: ReactNode }) {
+function HudPanel({ children, className = "p-4" }: { children: ReactNode; className?: string }) {
   return (
-    <div className="border border-cyan-300/20 bg-[#071016]/82 p-4 shadow-2xl backdrop-blur-md">
+    <div className={`border border-cyan-300/20 bg-[#071016]/82 shadow-2xl backdrop-blur-md ${className}`}>
       {children}
     </div>
   );

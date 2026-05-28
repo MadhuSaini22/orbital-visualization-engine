@@ -6,64 +6,147 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.orbitvisualizationengine.server.config.AppProperties;
 import com.orbitvisualizationengine.server.domain.EphemerisState;
 import com.orbitvisualizationengine.server.domain.OrbitElementRecord;
+import com.orbitvisualizationengine.server.domain.PropagatorType;
+import com.orbitvisualizationengine.server.domain.SatelliteAnalysisConfig;
 import com.orbitvisualizationengine.server.domain.SatelliteRecord;
+import com.orbitvisualizationengine.server.dto.diagnostics.ForceDiagnosticsSample;
 import com.orbitvisualizationengine.server.ingestion.CelesTrakClient;
+import com.orbitvisualizationengine.server.propagation.EphemerisCache;
+import com.orbitvisualizationengine.server.propagation.KeplerianPropagator;
+import com.orbitvisualizationengine.server.propagation.NumericalPropagator;
+import com.orbitvisualizationengine.server.propagation.OrbitPropagator;
+import com.orbitvisualizationengine.server.propagation.PropagationContext;
+import com.orbitvisualizationengine.server.propagation.SGP4Propagator;
+import com.orbitvisualizationengine.server.propagation.SpacecraftModel;
+import com.orbitvisualizationengine.server.repository.ManeuverRepository;
 import com.orbitvisualizationengine.server.repository.SatelliteRepository;
 import java.io.File;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import org.hipparchus.geometry.euclidean.threed.Vector3D;
-import org.orekit.bodies.GeodeticPoint;
-import org.orekit.bodies.OneAxisEllipsoid;
 import org.orekit.data.DataContext;
 import org.orekit.data.DirectoryCrawler;
-import org.orekit.frames.Frame;
-import org.orekit.frames.FramesFactory;
-import org.orekit.propagation.Propagator;
 import org.orekit.propagation.analytical.tle.TLE;
-import org.orekit.propagation.analytical.tle.TLEPropagator;
-import org.orekit.time.AbsoluteDate;
+import org.orekit.time.DateComponents;
+import org.orekit.time.OffsetModel;
 import org.orekit.time.TimeScalesFactory;
-import org.orekit.utils.Constants;
-import org.orekit.utils.IERSConventions;
-import org.orekit.utils.PVCoordinates;
 import org.springframework.stereotype.Service;
 
 @Service
 public class OrekitOrbitAnalysisService implements OrbitAnalysisService {
   private final SatelliteRepository satellites;
+  private final ManeuverRepository maneuvers;
   private final CelesTrakClient celesTrak;
   private final ObjectMapper mapper;
+  private final AnalysisConfigService analysisConfigService;
+  private final SGP4Propagator sgp4Propagator;
+  private final KeplerianPropagator keplerianPropagator;
+  private final NumericalPropagator numericalPropagator;
+  private final EphemerisCache ephemerisCache;
 
   public OrekitOrbitAnalysisService(
       SatelliteRepository satellites,
+      ManeuverRepository maneuvers,
       CelesTrakClient celesTrak,
       ObjectMapper mapper,
+      AnalysisConfigService analysisConfigService,
+      SGP4Propagator sgp4Propagator,
+      KeplerianPropagator keplerianPropagator,
+      NumericalPropagator numericalPropagator,
+      EphemerisCache ephemerisCache,
       AppProperties properties) {
     this.satellites = satellites;
+    this.maneuvers = maneuvers;
     this.celesTrak = celesTrak;
     this.mapper = mapper;
+    this.analysisConfigService = analysisConfigService;
+    this.sgp4Propagator = sgp4Propagator;
+    this.keplerianPropagator = keplerianPropagator;
+    this.numericalPropagator = numericalPropagator;
+    this.ephemerisCache = ephemerisCache;
     if (!properties.orekitDataPath().isBlank()) {
       DataContext.getDefault().getDataProvidersManager().addProvider(new DirectoryCrawler(new File(properties.orekitDataPath())));
+    } else {
+      TimeScalesFactory.addUTCTAIOffsetsLoader(this::utcTaiOffsets);
     }
   }
 
   @Override
   public List<EphemerisState> propagate(int noradId, Instant start, Instant end, int stepSeconds) {
-    TLE tle = loadTle(noradId);
-    Propagator propagator = TLEPropagator.selectExtrapolator(tle);
-    List<EphemerisState> states = new ArrayList<>();
-    for (Instant cursor = start; !cursor.isAfter(end); cursor = cursor.plusSeconds(stepSeconds)) {
-      states.add(propagateOne(propagator, cursor));
+    try {
+      PropagationContext context = buildContext(noradId);
+      OrbitPropagator propagator = selectPropagator(context.analysisConfig().propagatorType());
+      return ephemerisCache.get(noradId, propagator.name(), context.analysisConfig(), start, end, stepSeconds)
+          .orElseGet(() -> ephemerisCache.put(
+              noradId,
+              propagator.name(),
+              context.analysisConfig(),
+              start,
+              end,
+              stepSeconds,
+              propagator.trajectory(context, start, end, stepSeconds)));
+    } catch (RuntimeException exception) {
+      throw propagationFailure(noradId, exception);
     }
-    return states;
   }
 
   @Override
   public EphemerisState currentState(int noradId, Instant time) {
-    TLE tle = loadTle(noradId);
-    return propagateOne(TLEPropagator.selectExtrapolator(tle), time);
+    try {
+      PropagationContext context = buildContext(noradId);
+      return selectPropagator(context.analysisConfig().propagatorType()).propagate(context, time);
+    } catch (RuntimeException exception) {
+      throw propagationFailure(noradId, exception);
+    }
+  }
+
+  public List<ForceDiagnosticsSample> forceDiagnostics(int noradId, Instant start, Instant end, int stepSeconds) {
+    try {
+      PropagationContext context = buildContext(noradId);
+      if (context.analysisConfig().propagatorType() != PropagatorType.NUMERICAL) {
+        throw new IllegalArgumentException("Force diagnostics require NUMERICAL propagation for NORAD " + noradId);
+      }
+
+      List<ForceDiagnosticsSample> samples = new ArrayList<>();
+      for (Instant cursor = start; !cursor.isAfter(end); cursor = cursor.plusSeconds(stepSeconds)) {
+        samples.add(numericalPropagator.diagnosticsAt(context, cursor));
+      }
+      return samples;
+    } catch (IllegalArgumentException exception) {
+      throw exception;
+    } catch (RuntimeException exception) {
+      throw propagationFailure(noradId, exception);
+    }
+  }
+
+  public List<PropagationComparison> compare(int noradId, Instant start, Instant end, int stepSeconds) {
+    try {
+      PropagationContext context = buildContext(noradId);
+      return List.of(
+          new PropagationComparison(sgp4Propagator.name(), sgp4Propagator.trajectory(context, start, end, stepSeconds)),
+          new PropagationComparison(keplerianPropagator.name(), keplerianPropagator.trajectory(context, start, end, stepSeconds)),
+          new PropagationComparison(numericalPropagator.name(), numericalPropagator.trajectory(context, start, end, stepSeconds)));
+    } catch (RuntimeException exception) {
+      throw propagationFailure(noradId, exception);
+    }
+  }
+
+  private PropagationContext buildContext(int noradId) {
+    SatelliteAnalysisConfig config = analysisConfigService.getOrCreate(noradId);
+    return new PropagationContext(
+        noradId,
+        loadTle(noradId),
+        config,
+        SpacecraftModel.fromConfig(config),
+        maneuvers.findByNoradId(noradId));
+  }
+
+  private OrbitPropagator selectPropagator(PropagatorType type) {
+    return switch (type) {
+      case KEPLERIAN -> keplerianPropagator;
+      case NUMERICAL -> numericalPropagator;
+      case TLE_SGP4 -> sgp4Propagator;
+    };
   }
 
   private TLE loadTle(int noradId) {
@@ -91,26 +174,57 @@ public class OrekitOrbitAnalysisService implements OrbitAnalysisService {
     }
   }
 
-  private EphemerisState propagateOne(Propagator propagator, Instant instant) {
-    AbsoluteDate date = new AbsoluteDate(java.util.Date.from(instant), TimeScalesFactory.getUTC());
-    Frame itrf = FramesFactory.getITRF(IERSConventions.IERS_2010, true);
-    OneAxisEllipsoid earth = new OneAxisEllipsoid(
-        Constants.WGS84_EARTH_EQUATORIAL_RADIUS,
-        Constants.WGS84_EARTH_FLATTENING,
-        itrf);
+  public record PropagationComparison(String model, List<EphemerisState> states) {
+  }
 
-    PVCoordinates fixedPv = propagator.getPVCoordinates(date, itrf);
-    Vector3D position = fixedPv.getPosition();
-    Vector3D velocity = fixedPv.getVelocity();
-    GeodeticPoint point = earth.transform(position, itrf, date);
+  private IllegalStateException propagationFailure(int noradId, RuntimeException exception) {
+    return new IllegalStateException(
+        "Propagation failed for NORAD " + noradId + ": " + rootMessage(exception),
+        exception);
+  }
 
-    return new EphemerisState(
-        instant,
-        "ITRF",
-        new double[] {position.getX() / 1000.0, position.getY() / 1000.0, position.getZ() / 1000.0},
-        new double[] {velocity.getX() / 1000.0, velocity.getY() / 1000.0, velocity.getZ() / 1000.0},
-        Math.toDegrees(point.getLatitude()),
-        Math.toDegrees(point.getLongitude()),
-        point.getAltitude() / 1000.0);
+  private String rootMessage(Throwable throwable) {
+    Throwable cursor = throwable;
+    while (cursor.getCause() != null) {
+      cursor = cursor.getCause();
+    }
+    String message = cursor.getMessage();
+    return message == null || message.isBlank() ? cursor.getClass().getSimpleName() : message;
+  }
+
+  private List<OffsetModel> utcTaiOffsets() {
+    return List.of(
+        leap(1972, 1, 1, 10),
+        leap(1972, 7, 1, 11),
+        leap(1973, 1, 1, 12),
+        leap(1974, 1, 1, 13),
+        leap(1975, 1, 1, 14),
+        leap(1976, 1, 1, 15),
+        leap(1977, 1, 1, 16),
+        leap(1978, 1, 1, 17),
+        leap(1979, 1, 1, 18),
+        leap(1980, 1, 1, 19),
+        leap(1981, 7, 1, 20),
+        leap(1982, 7, 1, 21),
+        leap(1983, 7, 1, 22),
+        leap(1985, 7, 1, 23),
+        leap(1988, 1, 1, 24),
+        leap(1990, 1, 1, 25),
+        leap(1991, 1, 1, 26),
+        leap(1992, 7, 1, 27),
+        leap(1993, 7, 1, 28),
+        leap(1994, 7, 1, 29),
+        leap(1996, 1, 1, 30),
+        leap(1997, 7, 1, 31),
+        leap(1999, 1, 1, 32),
+        leap(2006, 1, 1, 33),
+        leap(2009, 1, 1, 34),
+        leap(2012, 7, 1, 35),
+        leap(2015, 7, 1, 36),
+        leap(2017, 1, 1, 37));
+  }
+
+  private OffsetModel leap(int year, int month, int day, int taiMinusUtcSeconds) {
+    return new OffsetModel(new DateComponents(year, month, day), taiMinusUtcSeconds);
   }
 }

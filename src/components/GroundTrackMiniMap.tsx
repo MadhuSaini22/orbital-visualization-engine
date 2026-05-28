@@ -96,7 +96,6 @@ export function GroundTrackMiniMap({
           Long history is sampled coarsely and is best treated as an approximate visual from the loaded TLE.
         </p>
       ) : null}
-
       {isExpanded && typeof document !== "undefined" && createPortal(
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/78 p-6 backdrop-blur-sm">
           <div className="flex h-[75vh] w-[75vw] min-w-[720px] flex-col border border-cyan-300/30 bg-[#061015] p-5 shadow-2xl max-lg:h-[82vh] max-lg:w-[92vw] max-lg:min-w-0">
@@ -177,6 +176,16 @@ function GroundTrackSvg({
         </linearGradient>
       </defs>
       <rect width={mapWidth} height={mapHeight} fill="url(#ground-map-bg)" />
+      <image
+        href="/cesium/Assets/Textures/NaturalEarthII/0/0/0.jpg"
+        x={0}
+        y={0}
+        width={mapWidth}
+        height={mapHeight}
+        preserveAspectRatio="none"
+        opacity={0.62}
+      />
+      <rect width={mapWidth} height={mapHeight} fill="#020506" opacity={0.18} />
 
       {[-120, -60, 0, 60, 120].map((longitude) => {
         const x = ((longitude + 180) / 360) * mapWidth;
@@ -201,7 +210,7 @@ function GroundTrackSvg({
             fill="none"
             stroke={color}
             strokeOpacity={isSelected ? 0.95 : 0.55}
-            strokeWidth={isSelected ? 2 : 1.2}
+            strokeWidth={isSelected ? 0.8 : 0.5}
             strokeLinecap="round"
             strokeLinejoin="round"
           />

@@ -95,6 +95,51 @@ export type BackendConjunctionRecord = {
   rawCdm: string;
 };
 
+export type BackendEphemerisState = {
+  time: string;
+  frame: string;
+  positionKm: [number, number, number];
+  velocityKmps: [number, number, number];
+  latitudeDeg: number;
+  longitudeDeg: number;
+  altitudeKm: number;
+};
+
+export type BackendPropagationResponse = {
+  noradId: number;
+  model: string;
+  frame: string;
+  analysisConfig: BackendAnalysisConfig;
+  warnings: string[];
+  states: BackendEphemerisState[];
+};
+
+export type AnalysisPresetId = "FAST_PREVIEW" | "OPERATIONAL_REVIEW" | "HIGH_FIDELITY" | "MANEUVER_PLANNING";
+
+export type PropagatorTypeId = "TLE_SGP4" | "KEPLERIAN" | "NUMERICAL";
+
+export type BackendAnalysisConfig = {
+  noradId: number;
+  preset: AnalysisPresetId;
+  propagatorType: PropagatorTypeId;
+  gravityEnabled: boolean;
+  gravityDegree: number;
+  gravityOrder: number;
+  dragEnabled: boolean;
+  solarRadiationPressureEnabled: boolean;
+  thirdBodySunEnabled: boolean;
+  thirdBodyMoonEnabled: boolean;
+  maneuverModelEnabled: boolean;
+  notes: string | null;
+  updatedAt: string;
+};
+
+export type BackendAnalysisConfigResponse = {
+  config: BackendAnalysisConfig;
+  activeModes: string[];
+  warnings: string[];
+};
+
 export async function fetchManeuvers(noradId?: string | number) {
   return fetchJson<BackendManeuverEvent[]>("/api/maneuvers", {
     noradId,
@@ -111,5 +156,43 @@ export async function fetchConjunctions(noradIds: Array<string | number>) {
 export async function refreshConjunctions() {
   return fetchJson<{ conjunctions: BackendConjunctionRecord[] }>("/api/conjunctions/refresh", {}, {
     method: "POST",
+  });
+}
+
+export async function fetchAnalysisConfig(noradId: string | number) {
+  return fetchJson<BackendAnalysisConfigResponse>(`/api/satellites/${noradId}/analysis-config`);
+}
+
+export async function fetchCurrentOrbitState(noradId: string | number, time: string, init?: RequestInit) {
+  return fetchJson<BackendEphemerisState>(`/api/orbits/${noradId}/current`, { time }, init);
+}
+
+export async function fetchOrbitTrajectory(
+  noradId: string | number,
+  from: string,
+  to: string,
+  stepSeconds: number,
+  init?: RequestInit,
+) {
+  return fetchJson<BackendPropagationResponse>(`/api/orbits/${noradId}/trajectory`, {
+    from,
+    to,
+    stepSeconds,
+  }, init);
+}
+
+export async function applyAnalysisPreset(noradId: string | number, preset: AnalysisPresetId) {
+  return fetchJson<BackendAnalysisConfigResponse>(`/api/satellites/${noradId}/analysis-config/presets/${preset}`, {}, {
+    method: "POST",
+  });
+}
+
+export async function setAnalysisMode(noradId: string | number, mode: string, enabled: boolean) {
+  return fetchJson<BackendAnalysisConfigResponse>(`/api/satellites/${noradId}/analysis-config/modes/${mode}`, {}, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ enabled }),
   });
 }

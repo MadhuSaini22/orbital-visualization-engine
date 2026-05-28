@@ -60,7 +60,7 @@ const palette = [
 const DEFAULT_CAMERA_VIEW = {
   longitudeDeg: 78,
   latitudeDeg: 20,
-  heightMeters: 28000000,
+  heightMeters: 38000000,
 };
 
 type HoverInfo = {
@@ -153,13 +153,44 @@ function buildOsculatingOrbitArc(
   state: OrbitState,
   displayGmstRad?: number,
 ): Cartesian3[] {
-  if (!state.positionEciKm || !state.velocityEciKmps || typeof displayGmstRad !== "number") {
-    return [];
+  if (state.positionEciKm && state.velocityEciKmps && typeof displayGmstRad === "number") {
+    return buildOsculatingOrbitArcFromVectors(
+      Cesium,
+      state.positionEciKm,
+      state.velocityEciKmps,
+      (pointKm) => eciKmToFixedCartesianAtGmst(Cesium, pointKm, displayGmstRad),
+    );
   }
 
+  if (state.positionEcefKm && state.velocityEcefKmps) {
+    const earthRotationRadPerSec = 7.2921159e-5;
+    const [xKm, yKm] = state.positionEcefKm;
+    const inertialVelocityApproxKmps = add(state.velocityEcefKmps, [
+      -earthRotationRadPerSec * yKm,
+      earthRotationRadPerSec * xKm,
+      0,
+    ]);
+
+    return buildOsculatingOrbitArcFromVectors(
+      Cesium,
+      state.positionEcefKm,
+      inertialVelocityApproxKmps,
+      (pointKm) => new Cesium.Cartesian3(pointKm[0] * 1000, pointKm[1] * 1000, pointKm[2] * 1000),
+    );
+  }
+
+    return [];
+}
+
+function buildOsculatingOrbitArcFromVectors(
+  Cesium: CesiumModule,
+  positionKm: [number, number, number],
+  velocityKmps: [number, number, number],
+  toCartesian: (pointKm: [number, number, number]) => Cartesian3,
+): Cartesian3[] {
   const muEarthKm3S2 = 398600.4418;
-  const r = state.positionEciKm;
-  const v = state.velocityEciKmps;
+  const r = positionKm;
+  const v = velocityKmps;
   const rMag = magnitude(r);
   const h = cross(r, v);
   const hMag = magnitude(h);
@@ -205,7 +236,7 @@ function buildOsculatingOrbitArc(
       scale(transverseBasis, radiusKm * Math.sin(trueAnomaly)),
     );
 
-    points.push(eciKmToFixedCartesianAtGmst(Cesium, eciPoint, displayGmstRad));
+    points.push(toCartesian(eciPoint));
   }
 
   return points;
@@ -595,7 +626,9 @@ export function CesiumGlobe({
     pathPrimitives.removeAll();
 
     const currentSnapshots = latestSnapshotsRef.current;
-    const visiblePathSnapshots = currentSnapshots.filter((item) => {
+    const currentSnapshotById = new Map(currentSnapshots.map((snapshot) => [snapshot.satellite.id, snapshot]));
+    const pathSourceSnapshots = orbitSnapshots.length > 0 ? orbitSnapshots : currentSnapshots;
+    const visiblePathSnapshots = pathSourceSnapshots.filter((item) => {
       if (!item.satellite.visual.showOrbit) {
         return false;
       }
@@ -603,18 +636,14 @@ export function CesiumGlobe({
     });
 
     visiblePathSnapshots.forEach((snapshot, index) => {
-      if (!snapshot.state) {
-        return;
-      }
-
       const isSelected = selectedSatelliteIds.includes(snapshot.satellite.id);
       const color = getSnapshotColor(Cesium, snapshot, index);
       const pathColor = isSelected ? color : color.withAlpha(0.55);
-      const displayGmstRad = currentGmstRad ?? snapshot.state.gmstRad;
-      // Orbit arcs are generated from current Cartesian position/velocity as an
-      // osculating two-body ring. Trails and ground tracks remain time-windowed
-      // paths, so users can visually separate "orbit geometry" from "history".
-      const pathPositions = buildOsculatingOrbitArc(Cesium, snapshot.state, displayGmstRad);
+      const currentState = snapshot.state ?? currentSnapshotById.get(snapshot.satellite.id)?.state ?? null;
+      const displayGmstRad = currentGmstRad ?? currentState?.gmstRad;
+      const pathPositions = currentState
+        ? buildOsculatingOrbitArc(Cesium, currentState, displayGmstRad)
+        : [];
 
       if (pathPositions.length < 2) {
         return;
@@ -700,7 +729,7 @@ export function CesiumGlobe({
       return next;
     });
     viewer.scene.requestRender();
-  }, [currentGmstRad, orbitSnapshots, selectedSatelliteIds, showAllOrbits, viewerReady]);
+  }, [currentGmstRad, orbitSnapshots, selectedSatelliteIds, showAllOrbits, snapshots, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;
