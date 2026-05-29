@@ -12,7 +12,7 @@ export type SatelliteObject = {
   name: string;
   noradId?: string;
   sourceType: "TLE" | "EPHEMERIS" | "MANUAL_STATE";
-  tle: {
+  tle?: {
     line1: string;
     line2: string;
   };

@@ -20,6 +20,9 @@ public class SGP4Propagator extends AnalyticalPropagator {
 
   @Override
   public EphemerisState propagate(PropagationContext context, Instant date) {
+    if (!context.seed().isTle()) {
+      throw new IllegalArgumentException("SGP4 propagation requires a TLE orbit definition.");
+    }
     return OrekitStateMapper.propagateToState(
         TLEPropagator.selectExtrapolator(context.tle()),
         date,

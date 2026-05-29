@@ -19,6 +19,22 @@ create table if not exists orbit_elements (
 create index if not exists orbit_elements_norad_epoch_idx
   on orbit_elements(norad_id, epoch desc);
 
+create table if not exists manual_orbits (
+  id text primary key,
+  name text not null,
+  type text not null,
+  epoch timestamptz,
+  frame text not null,
+  central_body text not null default 'EARTH',
+  payload jsonb not null,
+  propagator_type text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists manual_orbits_updated_idx
+  on manual_orbits(updated_at desc);
+
 create table if not exists catalog_memberships (
   group_id text not null,
   norad_id integer not null references satellites(norad_id) on delete cascade,

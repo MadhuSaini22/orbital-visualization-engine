@@ -24,9 +24,7 @@ public class KeplerianPropagator extends AnalyticalPropagator {
 
   @Override
   public EphemerisState propagate(PropagationContext context, Instant date) {
-    TLEPropagator seedPropagator = TLEPropagator.selectExtrapolator(context.tle());
-    PVCoordinates seedPv = seedPropagator.getPVCoordinates(context.tle().getDate(), orekit.eme2000());
-    Orbit initialOrbit = new CartesianOrbit(seedPv, orekit.eme2000(), context.tle().getDate(), Constants.EGM96_EARTH_MU);
+    Orbit initialOrbit = initialOrbit(context);
     org.orekit.propagation.analytical.KeplerianPropagator propagator =
         new org.orekit.propagation.analytical.KeplerianPropagator(initialOrbit);
 
@@ -36,5 +34,14 @@ public class KeplerianPropagator extends AnalyticalPropagator {
         orekit.itrf(),
         orekit.earth(),
         "ITRF");
+  }
+
+  private Orbit initialOrbit(PropagationContext context) {
+    if (context.initialOrbit() != null) {
+      return context.initialOrbit();
+    }
+    TLEPropagator seedPropagator = TLEPropagator.selectExtrapolator(context.tle());
+    PVCoordinates seedPv = seedPropagator.getPVCoordinates(context.tle().getDate(), orekit.eme2000());
+    return new CartesianOrbit(seedPv, orekit.eme2000(), context.tle().getDate(), Constants.EGM96_EARTH_MU);
   }
 }

@@ -19,10 +19,13 @@ import { formatNumber, formatUtc } from "@/geometry/format";
 import { SatelliteJsPropagator } from "@/propagation/SatelliteJsPropagator";
 import {
   applyAnalysisPreset,
+  createManualOrbit,
   fetchCatalogGroupTle,
   fetchAnalysisConfig,
   fetchConjunctions,
   fetchCurrentOrbitState,
+  fetchManualOrbitState,
+  fetchManualOrbitTrajectory,
   fetchManeuvers,
   fetchOrbitTrajectory,
   getOrbitServerDisplayUrl,
@@ -31,10 +34,13 @@ import {
 } from "@/services/orbitServerApi";
 import type {
   AnalysisPresetId,
+  BackendManualOrbitResponse,
   BackendAnalysisConfigResponse,
   BackendConjunctionRecord,
   BackendEphemerisState,
   BackendManeuverEvent,
+  CreateManualOrbitRequest,
+  ManualOrbitType,
 } from "@/services/orbitServerApi";
 import { StateCacheService } from "@/services/StateCacheService";
 
@@ -88,7 +94,7 @@ const analysisModeOptions = [
   { id: "moon", label: "Moon", key: "thirdBodyMoonEnabled" },
   { id: "maneuver", label: "Burn", key: "maneuverModelEnabled" },
 ] satisfies Array<{ id: string; label: string; key: keyof BackendAnalysisConfigResponse["config"] }>;
-type ActiveDataSource = "sample" | "endpoint" | "backend";
+type ActiveDataSource = "sample" | "endpoint" | "backend" | "manual";
 const groundTrackRangeOptions = [
   {
     id: "live",
@@ -190,6 +196,29 @@ function backendStateToOrbitState(satelliteId: string, state: BackendEphemerisSt
   };
 }
 
+function manualOrbitToSatellite(orbit: BackendManualOrbitResponse): SatelliteObject {
+  return {
+    id: orbit.id,
+    name: orbit.name,
+    sourceType: orbit.type === "TLE" ? "TLE" : "MANUAL_STATE",
+    visual: {
+      showMarker: true,
+      showLabel: true,
+      showOrbit: true,
+      showGroundTrack: orbit.type !== "CLASSICAL_ELEMENTS",
+      showTrail: true,
+    },
+    metadata: {
+      mission: orbit.type.replaceAll("_", " ").toLowerCase(),
+      objectType: "payload",
+    },
+  };
+}
+
+function isServerDrivenSource(source: ActiveDataSource) {
+  return source === "backend" || source === "manual";
+}
+
 function eventStateKey(satelliteId: string, timeUtc: string) {
   return `${satelliteId}@${timeUtc}`;
 }
@@ -286,6 +315,7 @@ function relativeVelocityKmps(a: SatelliteSnapshot["state"], b: SatelliteSnapsho
 export function OrbitalDashboard() {
   const [tleUrl, setTleUrl] = useState("");
   const [activeDataSource, setActiveDataSource] = useState<ActiveDataSource>("sample");
+  const [manualOrbitId, setManualOrbitId] = useState<string | null>(null);
   const [backendCatalogGroup, setBackendCatalogGroup] = useState<CatalogGroupId>("STATIONS");
   const initialParsed = useMemo(() => parseSatelliteSource(sampleTle), []);
   const initialSelectedSatelliteIds = useMemo(() => getInitialSelectedIds(initialParsed.satellites), [initialParsed.satellites]);
@@ -336,14 +366,14 @@ export function OrbitalDashboard() {
     ? adaptiveSampleSpacingSec
     : Math.max(groundTrackRange.stepSec, adaptiveSampleSpacingSec);
   const groundTrackAnchorMs = Math.floor(simTime.getTime() / groundTrackRange.bucketMs) * groundTrackRange.bucketMs;
-  const serverGroundTrackAnchorMs = activeDataSource === "backend"
+  const serverGroundTrackAnchorMs = isServerDrivenSource(activeDataSource)
     ? trajectoryAnchorTime.getTime()
     : groundTrackAnchorMs;
   const localSnapshots: SatelliteSnapshot[] = useMemo(() => {
     return stateCache.getCurrentSnapshots(simTime.toISOString());
   }, [stateCache, simTime]);
   const snapshots: SatelliteSnapshot[] = useMemo(() => {
-    if (activeDataSource === "backend") {
+    if (isServerDrivenSource(activeDataSource)) {
       return satellites.map((satellite) => {
         const serverState = serverStateBySatelliteId.get(satellite.id) ?? null;
         return {
@@ -370,13 +400,13 @@ export function OrbitalDashboard() {
     });
   }, [activeDataSource, localSnapshots, satellites, serverStateBySatelliteId]);
   const orbitSnapshots: SatelliteSnapshot[] = useMemo(() => {
-    if (activeDataSource === "backend" && serverOrbitSnapshots) {
+    if (isServerDrivenSource(activeDataSource) && serverOrbitSnapshots) {
       return serverOrbitSnapshots;
     }
     return stateCache.getWindowedSnapshots(trajectoryAnchorTime.toISOString(), trajectoryWindowOptions);
   }, [activeDataSource, serverOrbitSnapshots, stateCache, trajectoryAnchorTime, trajectoryWindowOptions]);
   const groundTrackSnapshots: SatelliteSnapshot[] = useMemo(() => {
-    if (activeDataSource === "backend" && serverGroundTrackSnapshots) {
+    if (isServerDrivenSource(activeDataSource) && serverGroundTrackSnapshots) {
       return serverGroundTrackSnapshots;
     }
     return stateCache.getGroundTrackSnapshots(new Date(groundTrackAnchorMs).toISOString(), {
@@ -396,8 +426,8 @@ export function OrbitalDashboard() {
       return [{
         event,
         satellite,
-        state: activeDataSource === "backend" ? serverEventState : propagator.getState(satellite.id, event.timeUtc),
-        preTrajectory: activeDataSource === "backend"
+        state: isServerDrivenSource(activeDataSource) ? serverEventState : propagator.getState(satellite.id, event.timeUtc),
+        preTrajectory: isServerDrivenSource(activeDataSource)
           ? []
           : propagator.getTrajectory(
               satellite.id,
@@ -405,7 +435,7 @@ export function OrbitalDashboard() {
               event.timeUtc,
               90,
             ),
-        postTrajectory: activeDataSource === "backend"
+        postTrajectory: isServerDrivenSource(activeDataSource)
           ? []
           : propagator.getTrajectory(
               satellite.id,
@@ -428,10 +458,10 @@ export function OrbitalDashboard() {
       }
 
       if (event.tcaUtc && event.missDistanceKm !== undefined) {
-        const primaryState = activeDataSource === "backend"
+        const primaryState = isServerDrivenSource(activeDataSource)
           ? serverEventStateByKey.get(eventStateKey(primary.id, event.tcaUtc)) ?? null
           : propagator.getState(primary.id, event.tcaUtc);
-        const secondaryState = activeDataSource === "backend"
+        const secondaryState = isServerDrivenSource(activeDataSource)
           ? serverEventStateByKey.get(eventStateKey(secondary.id, event.tcaUtc)) ?? null
           : propagator.getState(secondary.id, event.tcaUtc);
         return [{
@@ -458,7 +488,7 @@ export function OrbitalDashboard() {
       const endMs = new Date(event.endTimeUtc).getTime();
 
       for (let timeMs = startMs; timeMs <= endMs; timeMs += conjunctionStepSec * 1000) {
-        if (activeDataSource === "backend") {
+        if (isServerDrivenSource(activeDataSource)) {
           break;
         }
         const timeUtc = new Date(timeMs).toISOString();
@@ -491,9 +521,11 @@ export function OrbitalDashboard() {
   const selectedConjunction = conjunctionSnapshots.find((snapshot) => snapshot.event.id === selectedConjunctionId) ?? conjunctionSnapshots[0] ?? null;
   const latestSelectedId = selectedSatelliteIds.at(-1) ?? null;
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
-  const selectedNoradId = selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? null;
+  const selectedNoradId = activeDataSource === "manual" ? null : selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? null;
   const activeDataSourceLabel = activeDataSource === "backend"
     ? `Backend ${backendCatalogGroup}`
+    : activeDataSource === "manual"
+      ? "Manual orbit"
     : activeDataSource === "endpoint"
       ? "Endpoint import"
       : "Bundled sample";
@@ -521,10 +553,13 @@ export function OrbitalDashboard() {
         }
       : null;
   const loadedNoradIds = useMemo(() => {
+    if (activeDataSource === "manual") {
+      return [];
+    }
     return satellites
       .map((satellite) => satellite.noradId ?? satellite.id)
       .filter((id): id is string => Boolean(id));
-  }, [satellites]);
+  }, [activeDataSource, satellites]);
   const isPresetSpeed = speedPresetOptions.some((option) => option.speed === speed);
   const pauseBackendRequests = useCallback((error: unknown) => {
     setBackendRequestPauseUntil(Date.now() + 10_000);
@@ -693,6 +728,7 @@ export function OrbitalDashboard() {
       }
       const result = loadTleText(await response.text());
       setActiveDataSource("endpoint");
+      setManualOrbitId(null);
       setMessages(
         result.errors.length > 0
           ? result.errors
@@ -712,6 +748,7 @@ export function OrbitalDashboard() {
       const rawTle = await fetchCatalogGroupTle(backendCatalogGroup, MAX_TLE_OBJECTS);
       const result = loadTleText(rawTle);
       setActiveDataSource("backend");
+      setManualOrbitId(null);
       setMessages(
         result.errors.length > 0
           ? result.errors
@@ -725,6 +762,22 @@ export function OrbitalDashboard() {
       ]);
     }
   }, [backendCatalogGroup, loadTleText]);
+
+  const handleCreateManualOrbit = useCallback(async (request: CreateManualOrbitRequest) => {
+    setMessages([`Creating ${request.type.replaceAll("_", " ").toLowerCase()} orbit...`]);
+    const orbit = await createManualOrbit(request);
+    const satellite = manualOrbitToSatellite(orbit);
+    setSatellites([satellite]);
+    setSelectedSatelliteIds([satellite.id]);
+    setActiveDataSource("manual");
+    setManualOrbitId(orbit.id);
+    setTrajectoryAnchorTime(simTime);
+    const currentState = await fetchManualOrbitState(orbit.id, simTime.toISOString());
+    setServerStateBySatelliteId(new Map([[satellite.id, backendStateToOrbitState(satellite.id, currentState)]]));
+    setServerOrbitSnapshots(null);
+    setServerGroundTrackSnapshots(null);
+    setMessages([`Manual orbit "${orbit.name}" created and loaded.`]);
+  }, [simTime]);
 
   const updateSelectedAnalysisConfig = useCallback(async (
     action: (noradId: string) => Promise<BackendAnalysisConfigResponse>,
@@ -791,8 +844,11 @@ export function OrbitalDashboard() {
       if (inFlight) {
         return;
       }
-      if (activeDataSource !== "backend") {
+      if (!isServerDrivenSource(activeDataSource)) {
         setServerStateBySatelliteId(new Map());
+        return;
+      }
+      if (activeDataSource === "manual" && !manualOrbitId) {
         return;
       }
       if (!isPlaying) {
@@ -812,7 +868,9 @@ export function OrbitalDashboard() {
           }
           const noradId = satellite.noradId ?? satellite.id;
           try {
-            const state = await fetchCurrentOrbitState(noradId, timeUtc, { signal: controller.signal });
+            const state = activeDataSource === "manual" && manualOrbitId
+              ? await fetchManualOrbitState(manualOrbitId, timeUtc, { signal: controller.signal })
+              : await fetchCurrentOrbitState(noradId, timeUtc, { signal: controller.signal });
             pairs.push([satellite.id, backendStateToOrbitState(satellite.id, state)]);
           } catch (error) {
             if (isAbortError(error)) {
@@ -845,15 +903,18 @@ export function OrbitalDashboard() {
       window.clearInterval(intervalId);
       controller.abort();
     };
-  }, [activeDataSource, backendRequestsPaused, isPlaying, pauseBackendRequests, satellites]);
+  }, [activeDataSource, backendRequestsPaused, isPlaying, manualOrbitId, pauseBackendRequests, satellites]);
 
   useEffect(() => {
     let ignore = false;
     const controller = new AbortController();
 
     async function loadServerTrajectoryWindows() {
-      if (activeDataSource !== "backend") {
+      if (!isServerDrivenSource(activeDataSource)) {
         setServerOrbitSnapshots(null);
+        return;
+      }
+      if (activeDataSource === "manual" && !manualOrbitId) {
         return;
       }
       if (backendRequestsPaused) {
@@ -877,13 +938,21 @@ export function OrbitalDashboard() {
         }
         const noradId = satellite.noradId ?? satellite.id;
         try {
-          const response = await fetchOrbitTrajectory(
-            noradId,
-            start.toISOString(),
-            end.toISOString(),
-            trajectoryWindowOptions.stepSec,
-            { signal: controller.signal },
-          );
+          const response = activeDataSource === "manual" && manualOrbitId
+            ? await fetchManualOrbitTrajectory(
+                manualOrbitId,
+                start.toISOString(),
+                end.toISOString(),
+                trajectoryWindowOptions.stepSec,
+                { signal: controller.signal },
+              )
+            : await fetchOrbitTrajectory(
+                noradId,
+                start.toISOString(),
+                end.toISOString(),
+                trajectoryWindowOptions.stepSec,
+                { signal: controller.signal },
+              );
           const states = response.states.map((state) => backendStateToOrbitState(satellite.id, state));
           nextSnapshots.push({
             satellite,
@@ -921,15 +990,18 @@ export function OrbitalDashboard() {
       ignore = true;
       controller.abort();
     };
-  }, [activeDataSource, backendRequestsPaused, pauseBackendRequests, satellites, selectedSatelliteIds, showAllOrbits, trajectoryAnchorTime, trajectoryWindowOptions.stepSec]);
+  }, [activeDataSource, backendRequestsPaused, manualOrbitId, pauseBackendRequests, satellites, selectedSatelliteIds, showAllOrbits, trajectoryAnchorTime, trajectoryWindowOptions.stepSec]);
 
   useEffect(() => {
     let ignore = false;
     const controller = new AbortController();
 
     async function loadServerGroundTracks() {
-      if (activeDataSource !== "backend") {
+      if (!isServerDrivenSource(activeDataSource)) {
         setServerGroundTrackSnapshots(null);
+        return;
+      }
+      if (activeDataSource === "manual" && !manualOrbitId) {
         return;
       }
       if (backendRequestsPaused) {
@@ -947,13 +1019,21 @@ export function OrbitalDashboard() {
         }
         const noradId = satellite.noradId ?? satellite.id;
         try {
-          const response = await fetchOrbitTrajectory(
-            noradId,
-            start.toISOString(),
-            end.toISOString(),
-            groundTrackStepSec,
-            { signal: controller.signal },
-          );
+          const response = activeDataSource === "manual" && manualOrbitId
+            ? await fetchManualOrbitTrajectory(
+                manualOrbitId,
+                start.toISOString(),
+                end.toISOString(),
+                groundTrackStepSec,
+                { signal: controller.signal },
+              )
+            : await fetchOrbitTrajectory(
+                noradId,
+                start.toISOString(),
+                end.toISOString(),
+                groundTrackStepSec,
+                { signal: controller.signal },
+              );
           nextSnapshots.push({
             satellite,
             state: null,
@@ -987,15 +1067,18 @@ export function OrbitalDashboard() {
       ignore = true;
       controller.abort();
     };
-  }, [activeDataSource, backendRequestsPaused, groundTrackRange.pastMinutes, groundTrackStepSec, pauseBackendRequests, satellites, selectedSatelliteIds, serverGroundTrackAnchorMs]);
+  }, [activeDataSource, backendRequestsPaused, groundTrackRange.pastMinutes, groundTrackStepSec, manualOrbitId, pauseBackendRequests, satellites, selectedSatelliteIds, serverGroundTrackAnchorMs]);
 
   useEffect(() => {
     let ignore = false;
     const controller = new AbortController();
 
     async function loadServerEventStates() {
-      if (activeDataSource !== "backend") {
+      if (!isServerDrivenSource(activeDataSource)) {
         setServerEventStateByKey(new Map());
+        return;
+      }
+      if (activeDataSource === "manual" && !manualOrbitId) {
         return;
       }
       if (backendRequestsPaused) {
@@ -1035,7 +1118,9 @@ export function OrbitalDashboard() {
         }
         const noradId = request.satellite.noradId ?? request.satellite.id;
         try {
-          const state = await fetchCurrentOrbitState(noradId, request.timeUtc, { signal: controller.signal });
+          const state = activeDataSource === "manual" && manualOrbitId
+            ? await fetchManualOrbitState(manualOrbitId, request.timeUtc, { signal: controller.signal })
+            : await fetchCurrentOrbitState(noradId, request.timeUtc, { signal: controller.signal });
           pairs.push([
             eventStateKey(request.satellite.id, request.timeUtc),
             backendStateToOrbitState(request.satellite.id, state),
@@ -1064,7 +1149,7 @@ export function OrbitalDashboard() {
       ignore = true;
       controller.abort();
     };
-  }, [activeDataSource, backendRequestsPaused, conjunctionEvents, maneuverEvents, pauseBackendRequests, satellites]);
+  }, [activeDataSource, backendRequestsPaused, conjunctionEvents, maneuverEvents, manualOrbitId, pauseBackendRequests, satellites]);
 
   useEffect(() => {
     let ignore = false;
@@ -1331,6 +1416,8 @@ export function OrbitalDashboard() {
             </div>
           )}
         </HudPanel>
+
+        <ManualOrbitCreator onCreate={handleCreateManualOrbit} />
 
         <HudPanel className="p-3">
           <div className="flex items-start justify-between gap-3">
@@ -1660,6 +1747,316 @@ function HudMetric({ label, value }: { label: string; value: string }) {
       <p className="font-mono text-lg font-semibold text-white">{value}</p>
     </div>
   );
+}
+
+type ManualOrbitFormState = {
+  type: ManualOrbitType;
+  name: string;
+  epoch: string;
+  line1: string;
+  line2: string;
+  semiMajorAxisKm: string;
+  eccentricity: string;
+  inclinationDeg: string;
+  raanDeg: string;
+  argumentOfPeriapsisDeg: string;
+  trueAnomalyDeg: string;
+  xKm: string;
+  yKm: string;
+  zKm: string;
+  vxKmps: string;
+  vyKmps: string;
+  vzKmps: string;
+};
+
+const manualOrbitTabs = [
+  { id: "TLE", label: "TLE" },
+  { id: "CLASSICAL_ELEMENTS", label: "Classical" },
+  { id: "CARTESIAN_STATE", label: "Cartesian" },
+] satisfies Array<{ id: ManualOrbitType; label: string }>;
+
+const defaultManualOrbitForm: ManualOrbitFormState = {
+  type: "CLASSICAL_ELEMENTS",
+  name: "Manual LEO Orbit",
+  epoch: new Date().toISOString().slice(0, 16),
+  line1: "",
+  line2: "",
+  semiMajorAxisKm: "7000",
+  eccentricity: "0.001",
+  inclinationDeg: "51.6",
+  raanDeg: "120",
+  argumentOfPeriapsisDeg: "45",
+  trueAnomalyDeg: "0",
+  xKm: "7000",
+  yKm: "0",
+  zKm: "0",
+  vxKmps: "0",
+  vyKmps: "7.5",
+  vzKmps: "1",
+};
+
+function ManualOrbitCreator({ onCreate }: { onCreate: (request: CreateManualOrbitRequest) => Promise<void> }) {
+  const [form, setForm] = useState<ManualOrbitFormState>(defaultManualOrbitForm);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [status, setStatus] = useState<{ tone: "success" | "error"; message: string } | null>(null);
+  const validation = validateManualOrbitForm(form);
+  const isValid = Object.keys(validation).length === 0;
+
+  const update = (key: keyof ManualOrbitFormState, value: string) => {
+    setForm((current) => ({ ...current, [key]: value }));
+    setStatus(null);
+  };
+
+  const submit = async () => {
+    if (!isValid || isSubmitting) {
+      setStatus({ tone: "error", message: "Resolve highlighted fields before creating the orbit." });
+      return;
+    }
+    setIsSubmitting(true);
+    setStatus(null);
+    try {
+      await onCreate(buildManualOrbitRequest(form));
+      setStatus({ tone: "success", message: "Orbit created. Loading trajectory on the globe." });
+    } catch (error) {
+      setStatus({ tone: "error", message: error instanceof Error ? error.message : "Unable to create manual orbit." });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <HudPanel className="overflow-hidden p-0">
+      <div className="border-b border-cyan-300/15 bg-cyan-300/[0.03] px-4 py-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Create Orbit</p>
+            <p className="mt-1 text-[11px] leading-5 text-zinc-500">Define one seed state and let Orekit build the trajectory.</p>
+          </div>
+          <span className="border border-lime-300/35 bg-lime-300/10 px-2 py-1 font-mono text-[10px] uppercase text-lime-100">Phase 1</span>
+        </div>
+        <div className="mt-3 grid grid-cols-3 gap-1 border border-white/10 bg-black/35 p-1">
+          {manualOrbitTabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => update("type", tab.id)}
+              className={`px-2 py-2 font-mono text-[10px] uppercase transition ${
+                form.type === tab.id ? "bg-cyan-300 text-slate-950 shadow-[0_0_18px_rgba(103,232,249,0.22)]" : "text-zinc-500 hover:bg-white/5 hover:text-cyan-100"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="space-y-3 p-4">
+        <ManualField label="Name" value={form.name} onChange={(value) => update("name", value)} error={validation.name} help="Displayed on the globe and in the satellite list." />
+
+        {form.type === "TLE" && (
+          <div className="space-y-3">
+            <ManualField label="Line 1" value={form.line1} onChange={(value) => update("line1", value)} error={validation.line1} help="The first 69-character TLE record." multiline />
+            <ManualField label="Line 2" value={form.line2} onChange={(value) => update("line2", value)} error={validation.line2} help="The second TLE record with matching catalog number." multiline />
+          </div>
+        )}
+
+        {form.type === "CLASSICAL_ELEMENTS" && (
+          <div className="space-y-3">
+            <ManualField label="Epoch" value={form.epoch} onChange={(value) => update("epoch", value)} error={validation.epoch} type="datetime-local" help="UTC epoch used for the element set." />
+            <div className="grid grid-cols-2 gap-2">
+              <ManualField label="SMA" unit="km" value={form.semiMajorAxisKm} onChange={(value) => update("semiMajorAxisKm", value)} error={validation.semiMajorAxisKm} help="Semi-major axis." />
+              <ManualField label="Ecc" value={form.eccentricity} onChange={(value) => update("eccentricity", value)} error={validation.eccentricity} help="0 <= e < 1." />
+              <ManualField label="Inc" unit="deg" value={form.inclinationDeg} onChange={(value) => update("inclinationDeg", value)} error={validation.inclinationDeg} help="Inclination." />
+              <ManualField label="RAAN" unit="deg" value={form.raanDeg} onChange={(value) => update("raanDeg", value)} error={validation.raanDeg} help="Right ascension of ascending node." />
+              <ManualField label="AoP" unit="deg" value={form.argumentOfPeriapsisDeg} onChange={(value) => update("argumentOfPeriapsisDeg", value)} error={validation.argumentOfPeriapsisDeg} help="Argument of periapsis." />
+              <ManualField label="TA" unit="deg" value={form.trueAnomalyDeg} onChange={(value) => update("trueAnomalyDeg", value)} error={validation.trueAnomalyDeg} help="True anomaly." />
+            </div>
+          </div>
+        )}
+
+        {form.type === "CARTESIAN_STATE" && (
+          <div className="space-y-3">
+            <ManualField label="Epoch" value={form.epoch} onChange={(value) => update("epoch", value)} error={validation.epoch} type="datetime-local" help="UTC epoch used for the state vector." />
+            <div>
+              <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300/70">Position EME2000</p>
+              <div className="grid grid-cols-3 gap-2">
+                <ManualField label="X" unit="km" value={form.xKm} onChange={(value) => update("xKm", value)} error={validation.xKm} />
+                <ManualField label="Y" unit="km" value={form.yKm} onChange={(value) => update("yKm", value)} error={validation.yKm} />
+                <ManualField label="Z" unit="km" value={form.zKm} onChange={(value) => update("zKm", value)} error={validation.zKm} />
+              </div>
+            </div>
+            <div>
+              <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300/70">Velocity EME2000</p>
+              <div className="grid grid-cols-3 gap-2">
+                <ManualField label="VX" unit="km/s" value={form.vxKmps} onChange={(value) => update("vxKmps", value)} error={validation.vxKmps} />
+                <ManualField label="VY" unit="km/s" value={form.vyKmps} onChange={(value) => update("vyKmps", value)} error={validation.vyKmps} />
+                <ManualField label="VZ" unit="km/s" value={form.vzKmps} onChange={(value) => update("vzKmps", value)} error={validation.vzKmps} />
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center justify-between gap-3 border-t border-cyan-300/15 pt-3">
+          <div>
+            <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-zinc-500">Frame</p>
+            <p className="mt-1 font-mono text-xs text-cyan-100">{form.type === "TLE" ? "TEME / SGP4" : "EME2000 / Earth"}</p>
+          </div>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={isSubmitting}
+            className="border border-cyan-300 bg-cyan-300 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-950 transition hover:bg-cyan-200 disabled:cursor-wait disabled:border-cyan-300/35 disabled:bg-cyan-300/35 disabled:text-slate-900"
+          >
+            {isSubmitting ? "Creating" : "Create"}
+          </button>
+        </div>
+
+        {status && (
+          <div className={`border px-3 py-2 text-xs ${status.tone === "success" ? "border-lime-300/35 bg-lime-300/10 text-lime-100" : "border-rose-300/35 bg-rose-300/10 text-rose-100"}`}>
+            {status.message}
+          </div>
+        )}
+      </div>
+    </HudPanel>
+  );
+}
+
+function ManualField({
+  label,
+  value,
+  onChange,
+  error,
+  unit,
+  help,
+  type = "text",
+  multiline = false,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  error?: string;
+  unit?: string;
+  help?: string;
+  type?: string;
+  multiline?: boolean;
+}) {
+  const baseClass = `w-full border bg-black/45 px-3 py-2 font-mono text-xs text-zinc-100 outline-none transition placeholder:text-zinc-700 ${
+    error ? "border-rose-300/70 focus:border-rose-200" : "border-cyan-300/25 focus:border-cyan-300"
+  }`;
+
+  return (
+    <label className="block" title={help}>
+      <span className="mb-1 flex items-center justify-between gap-2">
+        <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-cyan-300/70">{label}</span>
+        {unit && <span className="font-mono text-[10px] text-zinc-500">{unit}</span>}
+      </span>
+      {multiline ? (
+        <textarea value={value} onChange={(event) => onChange(event.target.value)} rows={2} className={`${baseClass} resize-none leading-5`} />
+      ) : (
+        <input value={value} onChange={(event) => onChange(event.target.value)} type={type} step="any" className={baseClass} />
+      )}
+      {error ? (
+        <span className="mt-1 block text-[10px] leading-4 text-rose-200">{error}</span>
+      ) : help ? (
+        <span className="mt-1 block text-[10px] leading-4 text-zinc-600">{help}</span>
+      ) : null}
+    </label>
+  );
+}
+
+function validateManualOrbitForm(form: ManualOrbitFormState) {
+  const errors: Partial<Record<keyof ManualOrbitFormState, string>> = {};
+  if (!form.name.trim()) {
+    errors.name = "Required";
+  }
+  if (form.type === "TLE") {
+    if (!form.line1.trim().startsWith("1 ")) {
+      errors.line1 = "Line 1 must start with 1";
+    }
+    if (!form.line2.trim().startsWith("2 ")) {
+      errors.line2 = "Line 2 must start with 2";
+    }
+    return errors;
+  }
+  if (!form.epoch) {
+    errors.epoch = "Required";
+  }
+  if (form.type === "CLASSICAL_ELEMENTS") {
+    validateNumber(form.semiMajorAxisKm, "semiMajorAxisKm", errors, 6378.137);
+    validateNumber(form.eccentricity, "eccentricity", errors, 0, 0.999999);
+    validateNumber(form.inclinationDeg, "inclinationDeg", errors, 0, 180);
+    validateNumber(form.raanDeg, "raanDeg", errors, 0, 360);
+    validateNumber(form.argumentOfPeriapsisDeg, "argumentOfPeriapsisDeg", errors, 0, 360);
+    validateNumber(form.trueAnomalyDeg, "trueAnomalyDeg", errors, 0, 360);
+  }
+  if (form.type === "CARTESIAN_STATE") {
+    (["xKm", "yKm", "zKm", "vxKmps", "vyKmps", "vzKmps"] as const).forEach((key) => {
+      validateNumber(form[key], key, errors);
+    });
+  }
+  return errors;
+}
+
+function validateNumber(
+  value: string,
+  key: keyof ManualOrbitFormState,
+  errors: Partial<Record<keyof ManualOrbitFormState, string>>,
+  min = Number.NEGATIVE_INFINITY,
+  max = Number.POSITIVE_INFINITY,
+) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    errors[key] = "Enter a number";
+    return;
+  }
+  if (parsed < min || parsed > max) {
+    errors[key] = `Range ${formatNumber(min)} to ${Number.isFinite(max) ? formatNumber(max) : "inf"}`;
+  }
+}
+
+function buildManualOrbitRequest(form: ManualOrbitFormState): CreateManualOrbitRequest {
+  if (form.type === "TLE") {
+    return {
+      name: form.name.trim(),
+      type: "TLE",
+      tle: {
+        line1: form.line1.trim(),
+        line2: form.line2.trim(),
+      },
+      propagatorType: "TLE_SGP4",
+    };
+  }
+  const epoch = new Date(form.epoch).toISOString();
+  if (form.type === "CLASSICAL_ELEMENTS") {
+    return {
+      name: form.name.trim(),
+      type: "CLASSICAL_ELEMENTS",
+      epoch,
+      frame: "EME2000",
+      centralBody: "EARTH",
+      propagatorType: "KEPLERIAN",
+      classicalElements: {
+        semiMajorAxisKm: Number(form.semiMajorAxisKm),
+        eccentricity: Number(form.eccentricity),
+        inclinationDeg: Number(form.inclinationDeg),
+        raanDeg: Number(form.raanDeg),
+        argumentOfPeriapsisDeg: Number(form.argumentOfPeriapsisDeg),
+        trueAnomalyDeg: Number(form.trueAnomalyDeg),
+      },
+    };
+  }
+  return {
+    name: form.name.trim(),
+    type: "CARTESIAN_STATE",
+    epoch,
+    frame: "EME2000",
+    centralBody: "EARTH",
+    propagatorType: "KEPLERIAN",
+    cartesianState: {
+      positionKm: [Number(form.xKm), Number(form.yKm), Number(form.zKm)],
+      velocityKmps: [Number(form.vxKmps), Number(form.vyKmps), Number(form.vzKmps)],
+    },
+  };
 }
 
 function Telemetry({ label, value }: { label: string; value: string }) {

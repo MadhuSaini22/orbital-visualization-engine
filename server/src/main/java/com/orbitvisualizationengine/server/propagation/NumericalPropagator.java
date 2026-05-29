@@ -72,11 +72,7 @@ public class NumericalPropagator implements OrbitPropagator {
   }
 
   public org.orekit.propagation.numerical.NumericalPropagator buildPropagator(PropagationContext context) {
-    Frame inertial = orekit.eme2000();
-    TLEPropagator seedPropagator = TLEPropagator.selectExtrapolator(context.tle());
-    AbsoluteDate epoch = context.tle().getDate();
-    PVCoordinates seedPv = seedPropagator.getPVCoordinates(epoch, inertial);
-    Orbit initialOrbit = new CartesianOrbit(seedPv, inertial, epoch, Constants.EGM96_EARTH_MU);
+    Orbit initialOrbit = initialOrbit(context);
     SpacecraftState initialState = new SpacecraftState(initialOrbit, context.spacecraft().wetMassKg());
 
     DormandPrince853Integrator integrator = new DormandPrince853Integrator(0.1, 120.0, 1.0, 1.0);
@@ -89,6 +85,17 @@ public class NumericalPropagator implements OrbitPropagator {
 
     forceModels(context).forEach(propagator::addForceModel);
     return propagator;
+  }
+
+  private Orbit initialOrbit(PropagationContext context) {
+    if (context.initialOrbit() != null) {
+      return context.initialOrbit();
+    }
+    Frame inertial = orekit.eme2000();
+    TLEPropagator seedPropagator = TLEPropagator.selectExtrapolator(context.tle());
+    AbsoluteDate epoch = context.tle().getDate();
+    PVCoordinates seedPv = seedPropagator.getPVCoordinates(epoch, inertial);
+    return new CartesianOrbit(seedPv, inertial, epoch, Constants.EGM96_EARTH_MU);
   }
 
   public List<ForceModel> forceModels(PropagationContext context) {

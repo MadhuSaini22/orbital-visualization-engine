@@ -117,6 +117,7 @@ export type BackendPropagationResponse = {
 export type AnalysisPresetId = "FAST_PREVIEW" | "OPERATIONAL_REVIEW" | "HIGH_FIDELITY" | "MANEUVER_PLANNING";
 
 export type PropagatorTypeId = "TLE_SGP4" | "KEPLERIAN" | "NUMERICAL";
+export type ManualOrbitType = "TLE" | "CLASSICAL_ELEMENTS" | "CARTESIAN_STATE";
 
 export type BackendAnalysisConfig = {
   noradId: number;
@@ -137,6 +138,42 @@ export type BackendAnalysisConfig = {
 export type BackendAnalysisConfigResponse = {
   config: BackendAnalysisConfig;
   activeModes: string[];
+  warnings: string[];
+};
+
+export type CreateManualOrbitRequest = {
+  name: string;
+  type: ManualOrbitType;
+  epoch?: string;
+  frame?: string;
+  centralBody?: string;
+  propagatorType?: PropagatorTypeId;
+  tle?: {
+    line1: string;
+    line2: string;
+  };
+  classicalElements?: {
+    semiMajorAxisKm: number;
+    eccentricity: number;
+    inclinationDeg: number;
+    raanDeg: number;
+    argumentOfPeriapsisDeg: number;
+    trueAnomalyDeg: number;
+  };
+  cartesianState?: {
+    positionKm: [number, number, number];
+    velocityKmps: [number, number, number];
+  };
+};
+
+export type BackendManualOrbitResponse = {
+  id: string;
+  name: string;
+  type: ManualOrbitType;
+  epoch: string | null;
+  frame: string;
+  centralBody: string;
+  propagatorType: PropagatorTypeId;
   warnings: string[];
 };
 
@@ -175,6 +212,34 @@ export async function fetchOrbitTrajectory(
   init?: RequestInit,
 ) {
   return fetchJson<BackendPropagationResponse>(`/api/orbits/${noradId}/trajectory`, {
+    from,
+    to,
+    stepSeconds,
+  }, init);
+}
+
+export async function createManualOrbit(request: CreateManualOrbitRequest) {
+  return fetchJson<BackendManualOrbitResponse>("/api/manual-orbits", {}, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function fetchManualOrbitState(orbitId: string, time: string, init?: RequestInit) {
+  return fetchJson<BackendEphemerisState>(`/api/manual-orbits/${orbitId}/current`, { time }, init);
+}
+
+export async function fetchManualOrbitTrajectory(
+  orbitId: string,
+  from: string,
+  to: string,
+  stepSeconds: number,
+  init?: RequestInit,
+) {
+  return fetchJson<BackendPropagationResponse>(`/api/manual-orbits/${orbitId}/trajectory`, {
     from,
     to,
     stepSeconds,

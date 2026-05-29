@@ -17,7 +17,9 @@ export class SatelliteJsPropagator implements Propagator {
 
   constructor(satellites: SatelliteObject[]) {
     this.records = new Map(
-      satellites.map((sat) => [sat.id, satellite.twoline2satrec(sat.tle.line1, sat.tle.line2)]),
+      satellites
+        .filter((sat) => sat.tle)
+        .map((sat) => [sat.id, satellite.twoline2satrec(sat.tle!.line1, sat.tle!.line2)]),
     );
   }
 
