@@ -2,12 +2,11 @@
 
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { ChangeEvent, DragEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { OrbitState, SatelliteObject, SatelliteSnapshot, SatelliteVisualSettings } from "@/domain/orbit";
 import { GroundTrackMiniMap } from "@/components/GroundTrackMiniMap";
 import type { GroundTrackRangeId, GroundTrackRangeOption } from "@/components/GroundTrackMiniMap";
-import { sampleTle } from "@/data/sampleTle";
 import type { ConjunctionEvent, ConjunctionSnapshot } from "@/domain/conjunction";
 import { getConjunctionStatus, getConjunctionTone } from "@/domain/conjunction";
 import type { ManeuverEvent, ManeuverSnapshot } from "@/domain/maneuver";
@@ -28,7 +27,6 @@ import {
   fetchManualOrbitTrajectory,
   fetchManeuvers,
   fetchOrbitTrajectory,
-  getOrbitServerDisplayUrl,
   refreshConjunctions,
   setAnalysisMode,
 } from "@/services/orbitServerApi";
@@ -59,6 +57,8 @@ type ManeuverFocusRequest = {
   sequence: number;
 };
 type FrameMode = "earth-fixed" | "inertial";
+type OrbitSourceId = "catalog" | "tle" | "classical" | "cartesian";
+type TleImportMode = "paste" | "upload" | "url";
 
 const catalogGroupOptions = [
   { id: "STATIONS", label: "Stations" },
@@ -205,8 +205,8 @@ function manualOrbitToSatellite(orbit: BackendManualOrbitResponse): SatelliteObj
       showMarker: true,
       showLabel: true,
       showOrbit: true,
-      showGroundTrack: orbit.type !== "CLASSICAL_ELEMENTS",
-      showTrail: true,
+      showGroundTrack: false,
+      showTrail: false,
     },
     metadata: {
       mission: orbit.type.replaceAll("_", " ").toLowerCase(),
@@ -316,12 +316,12 @@ export function OrbitalDashboard() {
   const [tleUrl, setTleUrl] = useState("");
   const [activeDataSource, setActiveDataSource] = useState<ActiveDataSource>("sample");
   const [manualOrbitId, setManualOrbitId] = useState<string | null>(null);
+  const [activeSourceModal, setActiveSourceModal] = useState<OrbitSourceId | null>(null);
+  const [isSourcePickerOpen, setIsSourcePickerOpen] = useState(false);
   const [backendCatalogGroup, setBackendCatalogGroup] = useState<CatalogGroupId>("STATIONS");
-  const initialParsed = useMemo(() => parseSatelliteSource(sampleTle), []);
-  const initialSelectedSatelliteIds = useMemo(() => getInitialSelectedIds(initialParsed.satellites), [initialParsed.satellites]);
-  const [satellites, setSatellites] = useState<SatelliteObject[]>(initialParsed.satellites);
-  const [messages, setMessages] = useState<string[]>(initialParsed.errors);
-  const [selectedSatelliteIds, setSelectedSatelliteIds] = useState<string[]>(initialSelectedSatelliteIds);
+  const [satellites, setSatellites] = useState<SatelliteObject[]>([]);
+  const [messages, setMessages] = useState<string[]>([]);
+  const [selectedSatelliteIds, setSelectedSatelliteIds] = useState<string[]>([]);
   const [simTime, setSimTime] = useState(() => initialSimulationTime);
   const [trajectoryAnchorTime, setTrajectoryAnchorTime] = useState(() => initialSimulationTime);
   const [isPlaying, setIsPlaying] = useState(true);
@@ -353,6 +353,7 @@ export function OrbitalDashboard() {
   const [maneuverFocusRequest, setManeuverFocusRequest] = useState<ManeuverFocusRequest | null>(null);
   const lastTickRef = useRef<number | null>(null);
   const simTimeRef = useRef(simTime);
+  const hasOrbitLoaded = satellites.length > 0;
 
   const propagator = useMemo(() => new SatelliteJsPropagator(satellites), [satellites]);
   const stateCache = useMemo(() => new StateCacheService(propagator, satellites), [propagator, satellites]);
@@ -522,13 +523,12 @@ export function OrbitalDashboard() {
   const latestSelectedId = selectedSatelliteIds.at(-1) ?? null;
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
   const selectedNoradId = activeDataSource === "manual" ? null : selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? null;
-  const activeDataSourceLabel = activeDataSource === "backend"
-    ? `Backend ${backendCatalogGroup}`
-    : activeDataSource === "manual"
-      ? "Manual orbit"
-    : activeDataSource === "endpoint"
-      ? "Endpoint import"
-      : "Bundled sample";
+  const canUseRangeCheck = satellites.length >= 2;
+  const canShowManeuvers = maneuverSnapshots.length > 0;
+  const canShowConjunctions = satellites.length >= 2 && conjunctionSnapshots.length > 0;
+  const effectiveShowRangeCheck = showRangeCheck && canUseRangeCheck;
+  const effectiveShowManeuvers = showManeuvers && canShowManeuvers;
+  const effectiveShowConjunctions = showConjunctions && canShowConjunctions;
   const currentDisplayGmstRadRaw = selectedSnapshot?.state?.gmstRad ?? snapshots.find((item) => item.state?.gmstRad)?.state?.gmstRad;
   // Orbit arcs are rendered in a space-like frame and rotated into Cesium's
   // Earth-fixed scene. Quantizing avoids rebuilding long polylines every
@@ -545,7 +545,7 @@ export function OrbitalDashboard() {
     secondaryRangeSnapshot?.state ?? null,
   );
   const rangeMeasurement =
-    showRangeCheck && primaryRangeSnapshot && secondaryRangeSnapshot && rangeDistanceKm !== null
+    effectiveShowRangeCheck && primaryRangeSnapshot && secondaryRangeSnapshot && rangeDistanceKm !== null
       ? {
           primary: primaryRangeSnapshot,
           secondary: secondaryRangeSnapshot,
@@ -605,6 +605,9 @@ export function OrbitalDashboard() {
     setMessages(result.errors);
     setSatellites(result.satellites);
     setSelectedSatelliteIds(defaultSelectedIds);
+    setShowRangeCheck(false);
+    setShowManeuvers(false);
+    setShowConjunctions(false);
     setTrajectoryAnchorTime(simTime);
     return result;
   }, [simTime]);
@@ -698,70 +701,16 @@ export function OrbitalDashboard() {
   }, [satellites]);
 
   const toggleRangeCheck = useCallback(() => {
+    if (!canUseRangeCheck) {
+      setShowRangeCheck(false);
+      setSelectedSatelliteIds((selectedIds) => selectedIds.slice(-1));
+      return;
+    }
     if (showRangeCheck) {
       setSelectedSatelliteIds((selectedIds) => selectedIds.slice(-1));
     }
     setShowRangeCheck((current) => !current);
-  }, [showRangeCheck]);
-
-  const loadFromUrl = useCallback(async () => {
-    const source = tleUrl.trim();
-    if (!source) {
-      setMessages(["Enter a TLE endpoint URL before loading."]);
-      return;
-    }
-
-    setMessages([`Loading TLE data from ${source}...`]);
-    try {
-      const response = await fetch(getTleFetchUrl(source), { cache: "no-store" });
-      if (!response.ok) {
-        let message = `Request failed with ${response.status}`;
-        try {
-          const body = await response.json();
-          if (typeof body.error === "string") {
-            message = body.error;
-          }
-        } catch {
-          // The endpoint may return plain text for non-JSON errors.
-        }
-        throw new Error(message);
-      }
-      const result = loadTleText(await response.text());
-      setActiveDataSource("endpoint");
-      setManualOrbitId(null);
-      setMessages(
-        result.errors.length > 0
-          ? result.errors
-          : [`Loaded ${result.satellites.length} satellites from endpoint import.`],
-      );
-    } catch (error) {
-      setMessages([error instanceof Error ? error.message : "Unable to load TLE data from the URL."]);
-      setSatellites([]);
-      setSelectedSatelliteIds([]);
-    }
-  }, [loadTleText, tleUrl]);
-
-  const loadFromBackendCatalog = useCallback(async () => {
-    setMessages([`Loading ${backendCatalogGroup} satellites from backend server...`]);
-
-    try {
-      const rawTle = await fetchCatalogGroupTle(backendCatalogGroup, MAX_TLE_OBJECTS);
-      const result = loadTleText(rawTle);
-      setActiveDataSource("backend");
-      setManualOrbitId(null);
-      setMessages(
-        result.errors.length > 0
-          ? result.errors
-          : [`Loaded ${result.satellites.length} satellites from backend group ${backendCatalogGroup}.`],
-      );
-    } catch (error) {
-      setMessages([
-        error instanceof Error
-          ? error.message
-          : "Unable to load satellites from the backend server.",
-      ]);
-    }
-  }, [backendCatalogGroup, loadTleText]);
+  }, [canUseRangeCheck, showRangeCheck]);
 
   const handleCreateManualOrbit = useCallback(async (request: CreateManualOrbitRequest) => {
     setMessages([`Creating ${request.type.replaceAll("_", " ").toLowerCase()} orbit...`]);
@@ -769,6 +718,9 @@ export function OrbitalDashboard() {
     const satellite = manualOrbitToSatellite(orbit);
     setSatellites([satellite]);
     setSelectedSatelliteIds([satellite.id]);
+    setShowRangeCheck(false);
+    setShowManeuvers(false);
+    setShowConjunctions(false);
     setActiveDataSource("manual");
     setManualOrbitId(orbit.id);
     setTrajectoryAnchorTime(simTime);
@@ -777,7 +729,39 @@ export function OrbitalDashboard() {
     setServerOrbitSnapshots(null);
     setServerGroundTrackSnapshots(null);
     setMessages([`Manual orbit "${orbit.name}" created and loaded.`]);
+    setActiveSourceModal(null);
   }, [simTime]);
+
+  const handleLoadImportedTle = useCallback((raw: string, sourceLabel: string) => {
+    const result = loadTleText(raw);
+    if (result.satellites.length > 0) {
+      setActiveDataSource("endpoint");
+      setManualOrbitId(null);
+      setActiveSourceModal(null);
+    }
+    setMessages(
+      result.errors.length > 0
+        ? result.errors
+        : [`Loaded ${result.satellites.length} satellites from ${sourceLabel}.`],
+    );
+    return result;
+  }, [loadTleText]);
+
+  const handleLoadCatalogSatellite = useCallback((satellite: SatelliteObject) => {
+    setSatellites([satellite]);
+    setSelectedSatelliteIds([satellite.id]);
+    setShowRangeCheck(false);
+    setShowManeuvers(false);
+    setShowConjunctions(false);
+    setActiveDataSource("backend");
+    setManualOrbitId(null);
+    setTrajectoryAnchorTime(simTime);
+    setServerStateBySatelliteId(new Map());
+    setServerOrbitSnapshots(null);
+    setServerGroundTrackSnapshots(null);
+    setMessages([`Loaded ${satellite.name} from backend catalog ${backendCatalogGroup}.`]);
+    setActiveSourceModal(null);
+  }, [backendCatalogGroup, simTime]);
 
   const updateSelectedAnalysisConfig = useCallback(async (
     action: (noradId: string) => Promise<BackendAnalysisConfigResponse>,
@@ -810,6 +794,11 @@ export function OrbitalDashboard() {
       `${mode.toUpperCase()} ${enabled ? "enabled" : "disabled"}.`,
     );
   }, [updateSelectedAnalysisConfig]);
+
+  const openOrbitSource = useCallback((source: OrbitSourceId) => {
+    setActiveSourceModal(source);
+    setIsSourcePickerOpen(false);
+  }, []);
 
   const syncConjunctionsFromSpaceTrack = useCallback(async () => {
     setDynamicDataMessage("Syncing public CDM conjunctions from Space-Track...");
@@ -1286,29 +1275,33 @@ export function OrbitalDashboard() {
   return (
     <main className="relative min-h-screen overflow-hidden bg-black text-zinc-100">
       <div className="absolute inset-0">
-        <CesiumGlobe
-          snapshots={snapshots}
-          orbitSnapshots={orbitSnapshots}
-          rangeMeasurement={rangeMeasurement}
-          selectedSatelliteIds={selectedSatelliteIds}
-          showAllOrbits={showAllOrbits}
-          showLabels={showLabels}
-          frameMode={frameMode}
-          simTimeIso={simTime.toISOString()}
-          currentGmstRad={currentDisplayGmstRad}
-          focusRequest={focusRequest}
-          maneuverFocusRequest={maneuverFocusRequest}
-          maneuverSnapshots={maneuverSnapshots}
-          selectedManeuverId={selectedManeuver?.event.id ?? null}
-          showManeuvers={showManeuvers}
-          conjunctionSnapshots={conjunctionSnapshots}
-          selectedConjunctionId={selectedConjunction?.event.id ?? null}
-          showConjunctions={showConjunctions}
-          onSelectConjunction={setSelectedConjunctionId}
-          onSelectManeuver={setSelectedManeuverId}
-          onToggleSatellite={toggleSatelliteSelection}
-          resetSignal={resetSignal}
-        />
+        {hasOrbitLoaded ? (
+          <CesiumGlobe
+            snapshots={snapshots}
+            orbitSnapshots={orbitSnapshots}
+            rangeMeasurement={rangeMeasurement}
+            selectedSatelliteIds={selectedSatelliteIds}
+            showAllOrbits={showAllOrbits}
+            showLabels={showLabels}
+            frameMode={frameMode}
+            simTimeIso={simTime.toISOString()}
+            currentGmstRad={currentDisplayGmstRad}
+            focusRequest={focusRequest}
+            maneuverFocusRequest={maneuverFocusRequest}
+            maneuverSnapshots={maneuverSnapshots}
+            selectedManeuverId={selectedManeuver?.event.id ?? null}
+            showManeuvers={effectiveShowManeuvers}
+            conjunctionSnapshots={conjunctionSnapshots}
+            selectedConjunctionId={selectedConjunction?.event.id ?? null}
+            showConjunctions={effectiveShowConjunctions}
+            onSelectConjunction={setSelectedConjunctionId}
+            onSelectManeuver={setSelectedManeuverId}
+            onToggleSatellite={toggleSatelliteSelection}
+            resetSignal={resetSignal}
+          />
+        ) : (
+          <div className="h-full bg-[radial-gradient(circle_at_50%_38%,rgba(34,211,238,0.12),transparent_34%),linear-gradient(135deg,#020617_0%,#050b12_44%,#020617_100%)]" />
+        )}
       </div>
 
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_center,transparent_42%,rgba(0,0,0,0.45)_100%)]" />
@@ -1317,181 +1310,156 @@ export function OrbitalDashboard() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-xl font-semibold text-white">Multi-Satellite Orbital Operations</h1>
-            <p className="mt-1 font-mono text-[11px] uppercase tracking-[0.14em] text-cyan-300/70">{activeDataSourceLabel}</p>
           </div>
-          <div className="grid min-w-[520px] grid-cols-4 gap-3 max-lg:min-w-0 max-lg:flex-1 max-sm:grid-cols-2">
-            <HudMetric label="Satellites" value={`${satellites.length}/${MAX_TLE_OBJECTS}`} />
-            <HudMetric label="Visible" value={String(validCount)} />
-            <HudMetric label="Range" value={showRangeCheck && rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : "--"} />
-            <HudMetric label="Speed" value={`${speed}x`} />
-          </div>
+          {hasOrbitLoaded && (
+            <div className="flex flex-wrap items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setIsSourcePickerOpen(true)}
+                className="border border-cyan-300/55 px-4 py-2 font-mono text-xs uppercase tracking-[0.14em] text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-300 hover:text-slate-950"
+              >
+                Add Orbit
+              </button>
+              <div className="grid min-w-[520px] grid-cols-4 gap-3 max-lg:min-w-0 max-lg:flex-1 max-sm:grid-cols-2">
+                <HudMetric label="Satellites" value={`${satellites.length}/${MAX_TLE_OBJECTS}`} />
+                <HudMetric label="Visible" value={String(validCount)} />
+                <HudMetric label="Range" value={effectiveShowRangeCheck && rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : "--"} />
+                <HudMetric label="Speed" value={`${speed}x`} />
+              </div>
+            </div>
+          )}
         </div>
       </header>
 
-      <section className="pointer-events-auto absolute top-24 bottom-4 left-4 z-20 w-[360px] max-w-[calc(100vw-2rem)] space-y-3 overflow-y-auto pr-1 max-lg:relative max-lg:top-auto max-lg:bottom-auto max-lg:left-auto max-lg:mt-24 max-lg:ml-4 max-lg:max-h-[calc(100vh-7rem)]">
-        <HudPanel>
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">
-                {selectedSnapshot?.satellite.name ?? "No Target Lock"}
-              </p>
-              <p className="mt-1 text-xs text-zinc-500">NORAD {selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? "--"}</p>
-            </div>
-            <span className="border border-emerald-300/50 px-2 py-1 font-mono text-[10px] font-semibold uppercase text-emerald-300">
-              {selectedSnapshot ? "Tracking" : "Idle"}
-            </span>
-          </div>
-          <div className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4">
-            <Telemetry label="Altitude" value={`${formatNumber(selectedSnapshot?.state?.altitudeKm)} km`} />
-            <Telemetry label="Velocity" value={`${formatNumber((selectedSnapshot?.state?.velocityKmps ?? 0) * 3600)} km/h`} />
-            <Telemetry label="Latitude" value={`${formatNumber(selectedSnapshot?.state?.latitudeDeg)} deg`} />
-            <Telemetry label="Longitude" value={`${formatNumber(selectedSnapshot?.state?.longitudeDeg)} deg`} />
-            <Telemetry label="Mission" value={selectedSnapshot?.satellite.metadata?.mission ?? "--"} />
-            <Telemetry label="Source" value={selectedSnapshot?.satellite.sourceType ?? "--"} />
-          </div>
-        </HudPanel>
+      {!hasOrbitLoaded && (
+        <section className="pointer-events-auto absolute inset-x-4 top-1/2 z-20 mx-auto w-[min(880px,calc(100vw-2rem))] -translate-y-1/2">
+          <OrbitSourceSelection variant="center" onSelect={openOrbitSource} />
+        </section>
+      )}
 
-        <HudPanel>
-          <div className="flex items-center justify-between gap-3">
-            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Import</p>
-            <span className="font-mono text-[10px] uppercase text-cyan-100/80">{activeDataSourceLabel}</span>
-          </div>
-          <div className="mt-3 flex gap-2">
-            <input
-              value={tleUrl}
-              onChange={(event) => setTleUrl(event.target.value)}
-              className="min-w-0 flex-1 border border-cyan-300/25 bg-black/45 px-3 py-2 font-mono text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
-              placeholder="https://example.com/catalog.tle"
-            />
-            <button
-              onClick={loadFromUrl}
-              className="border border-cyan-300 bg-cyan-300 px-3 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-200"
-            >
-              Load
-            </button>
-          </div>
-          <div className="mt-3 border-t border-cyan-300/15 pt-3">
-            <div className="flex items-center justify-between gap-3">
-              <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-200/80">
-                Backend API
-              </p>
-              <span className="font-mono text-[10px] text-zinc-500">{getOrbitServerDisplayUrl()}</span>
-            </div>
-            <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
-              <select
-                value={backendCatalogGroup}
-                onChange={(event) => setBackendCatalogGroup(event.target.value as CatalogGroupId)}
-                className={`min-w-0 border bg-black/45 px-3 py-2 font-mono text-xs text-zinc-100 outline-none transition focus:border-cyan-300 ${
-                  activeDataSource === "backend" ? "border-cyan-300/60" : "border-cyan-300/25"
-                }`}
-              >
-                {catalogGroupOptions.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={loadFromBackendCatalog}
-                className="border border-cyan-300/70 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-cyan-100 transition hover:bg-cyan-300 hover:text-slate-950"
-              >
-                Load Server
-              </button>
-            </div>
-            <p className="mt-2 text-[10px] text-zinc-500">
-              Endpoint import and backend load are exclusive; the latest successful load becomes active.
-            </p>
-          </div>
-          {messages.length > 0 && (
-            <div className="mt-3 border border-amber-300/30 bg-amber-300/10 px-3 py-2 text-xs text-amber-100">
+      {hasOrbitLoaded && (
+      <section className="pointer-events-auto absolute top-24 bottom-4 left-4 z-20 w-[360px] max-w-[calc(100vw-2rem)] space-y-3 overflow-y-auto pr-1 max-lg:relative max-lg:top-auto max-lg:bottom-auto max-lg:left-auto max-lg:mt-24 max-lg:ml-4 max-lg:max-h-[calc(100vh-7rem)]">
+        {messages.length > 0 && (
+          <HudPanel className="p-3">
+            <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-300">System Message</p>
+            <div className="mt-2 space-y-1 text-xs leading-5 text-amber-100">
               {messages.map((message) => (
                 <p key={message}>{message}</p>
               ))}
             </div>
-          )}
-          {dynamicDataMessage && (
-            <div className="mt-3 border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-xs text-cyan-100">
-              {dynamicDataMessage}
-            </div>
-          )}
-        </HudPanel>
+          </HudPanel>
+        )}
 
-        <ManualOrbitCreator onCreate={handleCreateManualOrbit} />
+        {dynamicDataMessage && (
+          <HudPanel className="p-3">
+            <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-300">Backend Status</p>
+            <p className="mt-2 text-xs leading-5 text-cyan-100">{dynamicDataMessage}</p>
+          </HudPanel>
+        )}
 
-        <HudPanel className="p-3">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Analysis Config</p>
-              <p className="mt-1 font-mono text-[10px] text-zinc-500">NORAD {selectedNoradId ?? "--"}</p>
+        {hasOrbitLoaded && (
+          <HudPanel>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">
+                  {selectedSnapshot?.satellite.name ?? "No Target Lock"}
+                </p>
+                <p className="mt-1 text-xs text-zinc-500">{activeDataSource === "manual" ? "Manual Orbit" : `NORAD ${selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? "--"}`}</p>
+              </div>
+              <span className="border border-emerald-300/50 px-2 py-1 font-mono text-[10px] font-semibold uppercase text-emerald-300">
+                {selectedSnapshot ? "Tracking" : "Idle"}
+              </span>
             </div>
-            <span className="border border-cyan-300/30 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
-              {analysisConfig?.config.propagatorType.replaceAll("_", " ") ?? "--"}
-            </span>
-          </div>
-          <div className="mt-3 grid grid-cols-4 gap-1.5">
-            {analysisPresetOptions.map((preset) => (
-              <button
-                key={preset.id}
-                type="button"
-                onClick={() => applySelectedPreset(preset.id)}
-                className={`border px-2 py-1.5 font-mono text-[10px] uppercase transition ${
-                  analysisConfig?.config.preset === preset.id
-                    ? "border-cyan-300 bg-cyan-300 text-slate-950"
-                    : "border-cyan-300/25 text-cyan-100 hover:border-cyan-300"
-                }`}
-              >
-                {preset.label}
-              </button>
-            ))}
-          </div>
-          <div className="mt-2 grid grid-cols-3 gap-1.5">
-            {analysisModeOptions.map((mode) => {
-              const checked = Boolean(analysisConfig?.config[mode.key]);
-              return (
+            <div className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4">
+              <Telemetry label="Altitude" value={`${formatNumber(selectedSnapshot?.state?.altitudeKm)} km`} />
+              <Telemetry label="Velocity" value={`${formatNumber((selectedSnapshot?.state?.velocityKmps ?? 0) * 3600)} km/h`} />
+              <Telemetry label="Latitude" value={`${formatNumber(selectedSnapshot?.state?.latitudeDeg)} deg`} />
+              <Telemetry label="Longitude" value={`${formatNumber(selectedSnapshot?.state?.longitudeDeg)} deg`} />
+              <Telemetry label="Mission" value={selectedSnapshot?.satellite.metadata?.mission ?? "--"} />
+              <Telemetry label="Source" value={selectedSnapshot?.satellite.sourceType ?? "--"} />
+            </div>
+          </HudPanel>
+        )}
+
+        {hasOrbitLoaded && selectedNoradId && (
+          <HudPanel className="p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Analysis Config</p>
+                <p className="mt-1 font-mono text-[10px] text-zinc-500">NORAD {selectedNoradId}</p>
+              </div>
+              <span className="border border-cyan-300/30 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
+                {analysisConfig?.config.propagatorType.replaceAll("_", " ") ?? "--"}
+              </span>
+            </div>
+            <div className="mt-3 grid grid-cols-4 gap-1.5">
+              {analysisPresetOptions.map((preset) => (
                 <button
-                  key={mode.id}
+                  key={preset.id}
                   type="button"
-                  aria-pressed={checked}
-                  onClick={() => toggleSelectedMode(mode.id, !checked)}
+                  onClick={() => applySelectedPreset(preset.id)}
                   className={`border px-2 py-1.5 font-mono text-[10px] uppercase transition ${
-                    checked
-                      ? "border-lime-300 bg-lime-300/15 text-lime-100"
-                      : "border-white/10 text-zinc-500 hover:border-lime-300/60 hover:text-zinc-200"
+                    analysisConfig?.config.preset === preset.id
+                      ? "border-cyan-300 bg-cyan-300 text-slate-950"
+                      : "border-cyan-300/25 text-cyan-100 hover:border-cyan-300"
                   }`}
                 >
-                  {mode.label}
+                  {preset.label}
                 </button>
-              );
-            })}
-          </div>
-          <div className="mt-3 grid grid-cols-2 gap-3">
-            <DetailMetric label="Gravity" value={`${analysisConfig?.config.gravityDegree ?? "--"} x ${analysisConfig?.config.gravityOrder ?? "--"}`} />
-            <DetailMetric label="Preset" value={analysisConfig?.config.preset.replaceAll("_", " ") ?? "--"} />
-          </div>
-          {analysisConfig && analysisConfig.warnings.length > 0 && (
-            <p className="mt-2 line-clamp-3 text-[10px] leading-4 text-amber-100" title={analysisConfig.warnings[0]}>
-              {analysisConfig.warnings[0]}
-            </p>
-          )}
-          {analysisMessage && (
-            <div className="mt-3 border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-xs text-cyan-100">
-              {analysisMessage}
+              ))}
             </div>
-          )}
-        </HudPanel>
+            <div className="mt-2 grid grid-cols-3 gap-1.5">
+              {analysisModeOptions.map((mode) => {
+                const checked = Boolean(analysisConfig?.config[mode.key]);
+                return (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    aria-pressed={checked}
+                    onClick={() => toggleSelectedMode(mode.id, !checked)}
+                    className={`border px-2 py-1.5 font-mono text-[10px] uppercase transition ${
+                      checked
+                        ? "border-lime-300 bg-lime-300/15 text-lime-100"
+                        : "border-white/10 text-zinc-500 hover:border-lime-300/60 hover:text-zinc-200"
+                    }`}
+                  >
+                    {mode.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <DetailMetric label="Gravity" value={`${analysisConfig?.config.gravityDegree ?? "--"} x ${analysisConfig?.config.gravityOrder ?? "--"}`} />
+              <DetailMetric label="Preset" value={analysisConfig?.config.preset.replaceAll("_", " ") ?? "--"} />
+            </div>
+            {analysisConfig && analysisConfig.warnings.length > 0 && (
+              <p className="mt-2 line-clamp-3 text-[10px] leading-4 text-amber-100" title={analysisConfig.warnings[0]}>
+                {analysisConfig.warnings[0]}
+              </p>
+            )}
+            {analysisMessage && (
+              <div className="mt-3 border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-xs text-cyan-100">
+                {analysisMessage}
+              </div>
+            )}
+          </HudPanel>
+        )}
 
-        <GroundTrackMiniMap
-          currentSnapshots={snapshots}
-          groundTrackSnapshots={groundTrackSnapshots}
-          selectedSatelliteIds={selectedSatelliteIds}
-          rangeLabel={groundTrackRange.label}
-          rangeOptions={groundTrackRangeOptions}
-          selectedRangeId={groundTrackRangeId}
-          onRangeChange={setGroundTrackRangeId}
-        />
+        {hasOrbitLoaded && (
+          <GroundTrackMiniMap
+            currentSnapshots={snapshots}
+            groundTrackSnapshots={groundTrackSnapshots}
+            selectedSatelliteIds={selectedSatelliteIds}
+            rangeLabel={groundTrackRange.label}
+            rangeOptions={groundTrackRangeOptions}
+            selectedRangeId={groundTrackRangeId}
+            onRangeChange={setGroundTrackRangeId}
+          />
+        )}
       </section>
+      )}
 
+      {hasOrbitLoaded && (
       <section className="pointer-events-auto absolute top-24 right-4 bottom-4 z-20 w-[340px] max-w-[calc(100vw-2rem)] space-y-3 overflow-y-auto pr-1 max-sm:hidden">
         <HudPanel>
           <div className="flex items-center justify-between gap-3">
@@ -1507,8 +1475,8 @@ export function OrbitalDashboard() {
             </button>
           </div>
           <div className="mt-3 flex items-center justify-between border border-white/10 bg-black/30 px-3 py-2 text-xs text-zinc-300">
-            <span>{showRangeCheck ? "Selected range pair" : "Selected satellite"}</span>
-            <span className="font-mono text-cyan-200">{selectedSatelliteIds.length}/{showRangeCheck ? 2 : 1}</span>
+            <span>{effectiveShowRangeCheck ? "Selected range pair" : "Selected satellite"}</span>
+            <span className="font-mono text-cyan-200">{selectedSatelliteIds.length}/{effectiveShowRangeCheck ? 2 : 1}</span>
           </div>
           <div className="mt-3 max-h-[34vh] space-y-2 overflow-auto pr-1">
             {snapshots.map((snapshot) => (
@@ -1537,23 +1505,28 @@ export function OrbitalDashboard() {
           <div className="flex items-center justify-between gap-3">
             <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Range Check</p>
             <div className="flex items-center gap-2">
-              <span className="font-mono text-sm text-cyan-100">{showRangeCheck && rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : "--"}</span>
+              <span className="font-mono text-sm text-cyan-100">{effectiveShowRangeCheck && rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : "--"}</span>
               <button
                 type="button"
-                aria-pressed={showRangeCheck}
+                aria-pressed={effectiveShowRangeCheck}
+                disabled={!canUseRangeCheck}
                 onClick={toggleRangeCheck}
                 className={`flex min-w-16 items-center gap-2 border px-2 py-1 font-mono text-[10px] uppercase transition ${
-                  showRangeCheck ? "border-cyan-300 bg-cyan-300/15 text-cyan-100" : "border-white/10 text-zinc-500 hover:border-cyan-300"
+                  !canUseRangeCheck
+                    ? "cursor-not-allowed border-white/10 text-zinc-600 opacity-60"
+                    : effectiveShowRangeCheck
+                      ? "border-cyan-300 bg-cyan-300/15 text-cyan-100"
+                      : "border-white/10 text-zinc-500 hover:border-cyan-300"
                 }`}
               >
-                <span className={`h-2.5 w-2.5 rounded-full ${showRangeCheck ? "bg-cyan-300" : "bg-zinc-600"}`} />
-                {showRangeCheck ? "On" : "Off"}
+                <span className={`h-2.5 w-2.5 rounded-full ${effectiveShowRangeCheck ? "bg-cyan-300" : "bg-zinc-600"}`} />
+                {effectiveShowRangeCheck ? "On" : "Off"}
               </button>
             </div>
           </div>
-          {!showRangeCheck ? (
+          {!effectiveShowRangeCheck ? (
             <p className="mt-3 text-xs leading-5 text-zinc-500">
-              Range is off. Globe clicks select one active satellite only.
+              {canUseRangeCheck ? "Range is off. Globe clicks select one active satellite only." : "Load at least 2 satellites to enable range check."}
             </p>
           ) : satellites.length < 2 ? (
             <p className="mt-3 text-xs text-zinc-500">Load at least 2 satellites.</p>
@@ -1588,7 +1561,8 @@ export function OrbitalDashboard() {
         <ManeuverPanel
           maneuverSnapshots={maneuverSnapshots}
           selectedManeuverId={selectedManeuver?.event.id ?? null}
-          showManeuvers={showManeuvers}
+          showManeuvers={effectiveShowManeuvers}
+          disabled={!canShowManeuvers}
           onSelectManeuver={setSelectedManeuverId}
           onToggleManeuvers={() => setShowManeuvers((value) => !value)}
           onOpenManeuverModal={() => setIsManeuverModalOpen(true)}
@@ -1597,13 +1571,16 @@ export function OrbitalDashboard() {
         <ConjunctionPanel
           conjunctionSnapshots={conjunctionSnapshots}
           selectedConjunctionId={selectedConjunction?.event.id ?? null}
-          showConjunctions={showConjunctions}
+          showConjunctions={effectiveShowConjunctions}
+          disabled={!canShowConjunctions}
           onSelectConjunction={setSelectedConjunctionId}
           onToggleConjunctions={() => setShowConjunctions((value) => !value)}
           onRefreshConjunctions={syncConjunctionsFromSpaceTrack}
         />
       </section>
+      )}
 
+      {hasOrbitLoaded && (
       <section className="pointer-events-auto absolute right-1/2 bottom-4 z-20 w-[min(900px,calc(100vw-2rem))] translate-x-1/2 border border-cyan-300/25 bg-[#071016]/88 px-4 py-3 shadow-2xl backdrop-blur-md">
         <div className="flex flex-wrap items-center gap-4">
           <div className="min-w-[240px] border-r border-cyan-300/20 pr-4 max-sm:border-r-0">
@@ -1696,11 +1673,14 @@ export function OrbitalDashboard() {
           </div>
         </div>
       </section>
+      )}
 
+      {hasOrbitLoaded && (
       <div className="pointer-events-auto absolute bottom-4 left-4 z-20 flex flex-col gap-2 max-sm:hidden">
         <IconButton label="Home" onClick={() => setResetSignal((value) => value + 1)} />
         <IconButton label="Labels" active={showLabels} onClick={() => setShowLabels((value) => !value)} />
       </div>
+      )}
 
       {isManeuverModalOpen && (
         <ManeuverModal
@@ -1726,6 +1706,37 @@ export function OrbitalDashboard() {
             }
           }}
           onClose={() => setIsManeuverModalOpen(false)}
+        />
+      )}
+
+      {isSourcePickerOpen && (
+        <div className="pointer-events-auto fixed inset-0 z-40 grid place-items-center bg-black/72 p-4 backdrop-blur-md" role="dialog" aria-modal="true" aria-label="Select orbit source">
+          <div className="w-[min(880px,calc(100vw-2rem))]">
+            <div className="mb-3 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setIsSourcePickerOpen(false)}
+                className="border border-white/10 bg-black/35 px-3 py-2 font-mono text-xs uppercase text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100"
+              >
+                Close
+              </button>
+            </div>
+            <OrbitSourceSelection variant="center" onSelect={openOrbitSource} />
+          </div>
+        </div>
+      )}
+
+      {activeSourceModal && (
+        <OrbitSourceModal
+          source={activeSourceModal}
+          onClose={() => setActiveSourceModal(null)}
+          onCreateManualOrbit={handleCreateManualOrbit}
+          onLoadImportedTle={handleLoadImportedTle}
+          onLoadCatalogSatellite={handleLoadCatalogSatellite}
+          backendCatalogGroup={backendCatalogGroup}
+          onBackendCatalogGroupChange={setBackendCatalogGroup}
+          tleUrl={tleUrl}
+          onTleUrlChange={setTleUrl}
         />
       )}
     </main>
@@ -1769,12 +1780,6 @@ type ManualOrbitFormState = {
   vzKmps: string;
 };
 
-const manualOrbitTabs = [
-  { id: "TLE", label: "TLE" },
-  { id: "CLASSICAL_ELEMENTS", label: "Classical" },
-  { id: "CARTESIAN_STATE", label: "Cartesian" },
-] satisfies Array<{ id: ManualOrbitType; label: string }>;
-
 const defaultManualOrbitForm: ManualOrbitFormState = {
   type: "CLASSICAL_ELEMENTS",
   name: "Manual LEO Orbit",
@@ -1795,15 +1800,469 @@ const defaultManualOrbitForm: ManualOrbitFormState = {
   vzKmps: "1",
 };
 
-function ManualOrbitCreator({ onCreate }: { onCreate: (request: CreateManualOrbitRequest) => Promise<void> }) {
+const sourceCards = [
+  {
+    id: "catalog",
+    title: "Catalog TLE",
+    subtitle: "Browse satellites",
+    icon: "catalog",
+  },
+  {
+    id: "tle",
+    title: "Import TLE",
+    subtitle: "Paste or upload",
+    icon: "tle",
+  },
+  {
+    id: "classical",
+    title: "Classical Elements",
+    subtitle: "Define COE",
+    icon: "classical",
+  },
+  {
+    id: "cartesian",
+    title: "Cartesian State",
+    subtitle: "Position velocity",
+    icon: "cartesian",
+  },
+] satisfies Array<{ id: OrbitSourceId; title: string; subtitle: string; icon: string }>;
+
+function OrbitSourceSelection({
+  onSelect,
+  variant = "rail",
+}: {
+  onSelect: (source: OrbitSourceId) => void;
+  variant?: "rail" | "center";
+}) {
+  const isCenter = variant === "center";
+
+  return (
+    <HudPanel className={`overflow-hidden p-0 ${isCenter ? "bg-[#071016]/90" : ""}`}>
+      <div className={`border-b border-cyan-300/15 bg-cyan-300/[0.03] ${isCenter ? "px-8 py-7 text-center" : "px-5 py-4"}`}>
+        {isCenter && (
+          <div className="mx-auto mb-5 grid h-14 w-14 place-items-center border border-cyan-300/30 bg-cyan-300/10 text-cyan-100">
+            <svg viewBox="0 0 48 48" className="h-8 w-8" aria-hidden="true">
+              <circle cx="24" cy="24" r="5" fill="currentColor" />
+              <path d="M8 25c8-15 24-15 32 0M8 23c8 15 24 15 32 0" fill="none" stroke="currentColor" strokeWidth="2" />
+              <path d="M24 4v8M24 36v8M4 24h8M36 24h8" stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
+            </svg>
+          </div>
+        )}
+        {isCenter && <p className="mb-2 text-lg font-semibold text-white">No Orbit Loaded</p>}
+        <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Select Orbit Source</p>
+        <p className={`mt-2 text-sm leading-6 text-zinc-400 ${isCenter ? "mx-auto max-w-[42ch]" : ""}`}>Choose how you want to define the spacecraft orbit.</p>
+      </div>
+      <div className={`grid gap-3 p-4 ${isCenter ? "grid-cols-2 p-6 max-sm:grid-cols-1" : "grid-cols-1"}`}>
+        {sourceCards.map((card) => (
+          <button
+            key={card.id}
+            type="button"
+            onClick={() => onSelect(card.id)}
+            className={`group relative overflow-hidden border border-white/10 bg-black/25 text-left transition duration-200 hover:-translate-y-0.5 hover:border-cyan-300/60 hover:bg-cyan-300/10 hover:shadow-[0_0_30px_rgba(103,232,249,0.12)] ${isCenter ? "p-5" : "p-4"}`}
+          >
+            <div className="absolute inset-y-0 right-0 w-20 bg-cyan-300/[0.03] opacity-0 transition group-hover:opacity-100" />
+            <div className="relative flex items-center gap-3">
+              <SourceIcon id={card.icon} />
+              <span>
+                <span className="block text-sm font-semibold text-white">{card.title}</span>
+                <span className="mt-1 block text-xs text-zinc-500">{card.subtitle}</span>
+              </span>
+            </div>
+          </button>
+        ))}
+      </div>
+    </HudPanel>
+  );
+}
+
+function SourceIcon({ id }: { id: string }) {
+  return (
+    <span className="grid h-11 w-11 shrink-0 place-items-center border border-cyan-300/25 bg-cyan-300/10 text-cyan-100 transition group-hover:border-cyan-200 group-hover:bg-cyan-300/20">
+      <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+        {id === "catalog" && <path d="M4 6h16M4 12h16M4 18h10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square" />}
+        {id === "tle" && <path d="M6 4h9l3 3v13H6zM9 10h6M9 14h6M9 18h4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square" />}
+        {id === "classical" && <path d="M4 13c4-8 12-8 16 0M4 11c4 8 12 8 16 0M12 4v16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square" />}
+        {id === "cartesian" && <path d="M4 18h16M6 16V5M6 16l5-5M6 16l8-2" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square" />}
+      </svg>
+    </span>
+  );
+}
+
+function OrbitSourceModal({
+  source,
+  onClose,
+  onCreateManualOrbit,
+  onLoadImportedTle,
+  onLoadCatalogSatellite,
+  backendCatalogGroup,
+  onBackendCatalogGroupChange,
+  tleUrl,
+  onTleUrlChange,
+}: {
+  source: OrbitSourceId;
+  onClose: () => void;
+  onCreateManualOrbit: (request: CreateManualOrbitRequest) => Promise<void>;
+  onLoadImportedTle: (raw: string, sourceLabel: string) => { satellites: SatelliteObject[]; errors: string[] };
+  onLoadCatalogSatellite: (satellite: SatelliteObject) => void;
+  backendCatalogGroup: CatalogGroupId;
+  onBackendCatalogGroupChange: (group: CatalogGroupId) => void;
+  tleUrl: string;
+  onTleUrlChange: (value: string) => void;
+}) {
+  const title = source === "catalog"
+    ? "Catalog TLE"
+    : source === "tle"
+      ? "Import TLE"
+      : source === "classical"
+        ? "Classical Elements"
+        : "Cartesian State";
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
+      <div className="flex max-h-[88vh] w-[min(980px,94vw)] flex-col overflow-hidden border border-cyan-300/30 bg-[#071016]/96 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-cyan-300/20 px-5 py-4">
+          <div>
+            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Orbit Source Wizard</p>
+            <h2 className="mt-1 text-2xl font-semibold text-white">{title}</h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="grid h-9 w-9 place-items-center border border-white/15 text-zinc-200 transition hover:border-cyan-300 hover:text-white"
+            aria-label="Close orbit source wizard"
+            title="Close"
+          >
+            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
+            </svg>
+          </button>
+        </div>
+        <div className="min-h-0 overflow-auto p-5">
+          {source === "catalog" && (
+            <CatalogOrbitFlow
+              backendCatalogGroup={backendCatalogGroup}
+              onBackendCatalogGroupChange={onBackendCatalogGroupChange}
+              onLoadCatalogSatellite={onLoadCatalogSatellite}
+            />
+          )}
+          {source === "tle" && (
+            <TleImportFlow
+              tleUrl={tleUrl}
+              onTleUrlChange={onTleUrlChange}
+              onLoadImportedTle={onLoadImportedTle}
+            />
+          )}
+          {source === "classical" && (
+            <ManualOrbitForm
+              mode="CLASSICAL_ELEMENTS"
+              onCreate={onCreateManualOrbit}
+              onClose={onClose}
+            />
+          )}
+          {source === "cartesian" && (
+            <ManualOrbitForm
+              mode="CARTESIAN_STATE"
+              onCreate={onCreateManualOrbit}
+              onClose={onClose}
+            />
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function TleImportFlow({
+  tleUrl,
+  onTleUrlChange,
+  onLoadImportedTle,
+}: {
+  tleUrl: string;
+  onTleUrlChange: (value: string) => void;
+  onLoadImportedTle: (raw: string, sourceLabel: string) => { satellites: SatelliteObject[]; errors: string[] };
+}) {
+  const [mode, setMode] = useState<TleImportMode>("paste");
+  const [raw, setRaw] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const preview = raw.trim() ? parseSatelliteSource(raw) : { satellites: [], errors: [] };
+
+  const readFile = async (file: File) => {
+    const text = await file.text();
+    setRaw(text);
+    setStatus(`Loaded ${file.name}. Validate the preview, then import.`);
+  };
+
+  const fetchUrl = async () => {
+    if (!tleUrl.trim()) {
+      setStatus("Enter a TLE endpoint URL.");
+      return;
+    }
+    setIsLoading(true);
+    setStatus(null);
+    try {
+      const response = await fetch(getTleFetchUrl(tleUrl), { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`Endpoint returned ${response.status}.`);
+      }
+      const text = await response.text();
+      setRaw(text);
+      setStatus("Endpoint fetched. Review the preview and import.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unable to fetch TLE endpoint.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const importTle = () => {
+    const result = onLoadImportedTle(raw, mode === "url" ? "URL import" : mode === "upload" ? "uploaded file" : "pasted TLE");
+    if (result.satellites.length === 0) {
+      setStatus(result.errors[0] ?? "No valid TLE objects found.");
+    }
+  };
+
+  return (
+    <div className="grid gap-5 lg:grid-cols-[220px_1fr]">
+      <div className="space-y-2">
+        {[
+          { id: "paste" as const, label: "Paste TLE" },
+          { id: "upload" as const, label: "Upload File" },
+          { id: "url" as const, label: "Fetch From URL" },
+        ].map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => setMode(item.id)}
+            className={`w-full border px-3 py-3 text-left font-mono text-xs uppercase transition ${mode === item.id ? "border-cyan-300 bg-cyan-300 text-slate-950" : "border-white/10 text-zinc-400 hover:border-cyan-300/50 hover:text-cyan-100"}`}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+      <div className="space-y-4">
+        {mode === "paste" && (
+          <textarea
+            value={raw}
+            onChange={(event) => setRaw(event.target.value)}
+            rows={12}
+            className="w-full resize-none border border-cyan-300/25 bg-black/45 p-4 font-mono text-xs leading-5 text-zinc-100 outline-none transition focus:border-cyan-300"
+            placeholder="ISS (ZARYA)&#10;1 25544U ...&#10;2 25544 ..."
+          />
+        )}
+        {mode === "upload" && (
+          <FileDropZone onFile={readFile} />
+        )}
+        {mode === "url" && (
+          <div className="grid gap-3">
+            <input
+              value={tleUrl}
+              onChange={(event) => onTleUrlChange(event.target.value)}
+              className="border border-cyan-300/25 bg-black/45 px-4 py-3 font-mono text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
+              placeholder="https://example.com/catalog.tle"
+            />
+            <button
+              type="button"
+              onClick={fetchUrl}
+              disabled={isLoading}
+              className="w-fit border border-cyan-300/70 px-4 py-2 font-mono text-xs uppercase text-cyan-100 transition hover:bg-cyan-300 hover:text-slate-950 disabled:cursor-wait disabled:opacity-60"
+            >
+              {isLoading ? "Fetching" : "Validate Endpoint"}
+            </button>
+          </div>
+        )}
+
+        <div className="border border-white/10 bg-black/25 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Preview</p>
+              <p className="mt-1 text-sm text-zinc-300">{preview.satellites.length} valid object{preview.satellites.length === 1 ? "" : "s"} detected</p>
+            </div>
+            <button
+              type="button"
+              onClick={importTle}
+              disabled={preview.satellites.length === 0}
+              className="border border-cyan-300 bg-cyan-300 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/10 disabled:text-zinc-500"
+            >
+              Import
+            </button>
+          </div>
+          {preview.errors.length > 0 && (
+            <div className="mt-3 space-y-1 text-xs leading-5 text-amber-100">
+              {preview.errors.map((error) => <p key={error}>{error}</p>)}
+            </div>
+          )}
+          {status && <p className="mt-3 text-xs leading-5 text-cyan-100">{status}</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FileDropZone({ onFile }: { onFile: (file: File) => void }) {
+  const onDrop = (event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    const file = event.dataTransfer.files[0];
+    if (file) {
+      onFile(file);
+    }
+  };
+
+  const onChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      onFile(file);
+    }
+  };
+
+  return (
+    <label
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={onDrop}
+      className="grid min-h-64 cursor-pointer place-items-center border border-dashed border-cyan-300/35 bg-cyan-300/[0.04] p-8 text-center transition hover:border-cyan-300 hover:bg-cyan-300/10 focus-within:border-cyan-300 focus-within:bg-cyan-300/10"
+    >
+      <input type="file" accept=".tle,.txt,.json" className="sr-only" onChange={onChange} />
+      <span>
+        <span className="mx-auto grid h-14 w-14 place-items-center border border-cyan-300/35 bg-black/30 text-cyan-100">
+          <svg viewBox="0 0 24 24" className="h-6 w-6" aria-hidden="true">
+            <path d="M12 16V4M7 9l5-5 5 5M5 20h14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square" />
+          </svg>
+        </span>
+        <span className="mt-4 block text-sm font-semibold text-white">Drop a TLE file here</span>
+        <span className="mt-1 block text-xs text-zinc-500">or browse from disk</span>
+      </span>
+    </label>
+  );
+}
+
+function CatalogOrbitFlow({
+  backendCatalogGroup,
+  onBackendCatalogGroupChange,
+  onLoadCatalogSatellite,
+}: {
+  backendCatalogGroup: CatalogGroupId;
+  onBackendCatalogGroupChange: (group: CatalogGroupId) => void;
+  onLoadCatalogSatellite: (satellite: SatelliteObject) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [items, setItems] = useState<SatelliteObject[]>([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const filtered = items.filter((satellite) => {
+    const text = `${satellite.name} ${satellite.noradId ?? satellite.id}`.toLowerCase();
+    return text.includes(query.toLowerCase());
+  });
+
+  const loadCatalog = async () => {
+    setIsLoading(true);
+    setStatus(null);
+    try {
+      const raw = await fetchCatalogGroupTle(backendCatalogGroup, MAX_TLE_OBJECTS);
+      const result = parseSatelliteSource(raw);
+      setItems(result.satellites);
+      setSelectedId(result.satellites[0]?.id ?? "");
+      setStatus(result.errors[0] ?? `Loaded ${result.satellites.length} catalog satellites.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unable to load backend catalog.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const selected = filtered.find((satellite) => satellite.id === selectedId) ?? items.find((satellite) => satellite.id === selectedId);
+
+  return (
+    <div className="grid gap-5 lg:grid-cols-[280px_1fr]">
+      <div className="space-y-3 border border-white/10 bg-black/25 p-4">
+        <label className="block">
+          <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Catalog</span>
+          <select
+            value={backendCatalogGroup}
+            onChange={(event) => onBackendCatalogGroupChange(event.target.value as CatalogGroupId)}
+            className="mt-2 w-full border border-cyan-300/25 bg-black/45 px-3 py-2 font-mono text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
+          >
+            {catalogGroupOptions.map((option) => (
+              <option key={option.id} value={option.id}>{option.label}</option>
+            ))}
+          </select>
+        </label>
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          className="w-full border border-cyan-300/25 bg-black/45 px-3 py-2 font-mono text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
+          placeholder="Search name or NORAD"
+        />
+        <button
+          type="button"
+          onClick={loadCatalog}
+          disabled={isLoading}
+          className="w-full border border-cyan-300 bg-cyan-300 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-950 transition hover:bg-cyan-200 disabled:cursor-wait disabled:opacity-60"
+        >
+          {isLoading ? "Loading" : "Load Catalog"}
+        </button>
+        {status && <p className="text-xs leading-5 text-cyan-100">{status}</p>}
+      </div>
+      <div className="min-h-[360px] border border-white/10 bg-black/25">
+        {filtered.length === 0 ? (
+          <div className="grid h-full min-h-[360px] place-items-center p-8 text-center text-sm text-zinc-500">
+            Load a catalog group to browse satellites.
+          </div>
+        ) : (
+          <div className="max-h-[430px] overflow-auto p-3">
+            <div className="space-y-2">
+              {filtered.map((satellite) => (
+                <button
+                  key={satellite.id}
+                  type="button"
+                  onClick={() => setSelectedId(satellite.id)}
+                  className={`w-full border p-3 text-left transition ${selectedId === satellite.id ? "border-cyan-300 bg-cyan-300/10" : "border-white/10 bg-black/25 hover:border-cyan-300/45"}`}
+                >
+                  <span className="flex items-center justify-between gap-3">
+                    <span className="font-semibold text-white">{satellite.name}</span>
+                    <span className="font-mono text-[10px] text-zinc-500">NORAD {satellite.noradId ?? satellite.id}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="flex items-center justify-between border-t border-white/10 p-4">
+          <p className="text-xs text-zinc-500">{selected ? `Selected ${selected.name}` : "Select a satellite to load."}</p>
+          <button
+            type="button"
+            disabled={!selected}
+            onClick={() => selected && onLoadCatalogSatellite(selected)}
+            className="border border-cyan-300 bg-cyan-300 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/10 disabled:text-zinc-500"
+          >
+            Load
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ManualOrbitForm({
+  mode,
+  onCreate,
+  onClose,
+}: {
+  mode: "CLASSICAL_ELEMENTS" | "CARTESIAN_STATE";
+  onCreate: (request: CreateManualOrbitRequest) => Promise<void>;
+  onClose: () => void;
+}) {
   const [form, setForm] = useState<ManualOrbitFormState>(defaultManualOrbitForm);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [status, setStatus] = useState<{ tone: "success" | "error"; message: string } | null>(null);
-  const validation = validateManualOrbitForm(form);
+  const [propagatorType, setPropagatorType] = useState<"KEPLERIAN" | "NUMERICAL">("KEPLERIAN");
+  const activeForm = form.type === mode ? form : { ...form, type: mode };
+  const validation = validateManualOrbitForm(activeForm);
   const isValid = Object.keys(validation).length === 0;
 
   const update = (key: keyof ManualOrbitFormState, value: string) => {
-    setForm((current) => ({ ...current, [key]: value }));
+    setForm((current) => ({ ...current, type: mode, [key]: value }));
     setStatus(null);
   };
 
@@ -1815,7 +2274,10 @@ function ManualOrbitCreator({ onCreate }: { onCreate: (request: CreateManualOrbi
     setIsSubmitting(true);
     setStatus(null);
     try {
-      await onCreate(buildManualOrbitRequest(form));
+      await onCreate({
+        ...buildManualOrbitRequest(activeForm),
+        propagatorType,
+      });
       setStatus({ tone: "success", message: "Orbit created. Loading trajectory on the globe." });
     } catch (error) {
       setStatus({ tone: "error", message: error instanceof Error ? error.message : "Unable to create manual orbit." });
@@ -1825,99 +2287,91 @@ function ManualOrbitCreator({ onCreate }: { onCreate: (request: CreateManualOrbi
   };
 
   return (
-    <HudPanel className="overflow-hidden p-0">
-      <div className="border-b border-cyan-300/15 bg-cyan-300/[0.03] px-4 py-3">
-        <div className="flex items-start justify-between gap-3">
+    <div className="space-y-5">
+      <div className="grid gap-4 lg:grid-cols-[1fr_240px]">
+        <div className="space-y-4 border border-white/10 bg-black/25 p-4">
+          <ManualField label="Name" value={activeForm.name} onChange={(value) => update("name", value)} error={validation.name} help="Displayed on the globe and in the satellite list." />
+          <ManualField label="Epoch" value={activeForm.epoch} onChange={(value) => update("epoch", value)} error={validation.epoch} type="datetime-local" help="UTC epoch used for the seed state." />
+
+          {mode === "CLASSICAL_ELEMENTS" && (
+            <div className="grid grid-cols-2 gap-3">
+              <ManualField label="Semi-major Axis" unit="km" value={activeForm.semiMajorAxisKm} onChange={(value) => update("semiMajorAxisKm", value)} error={validation.semiMajorAxisKm} help="Must be greater than Earth radius." />
+              <ManualField label="Eccentricity" value={activeForm.eccentricity} onChange={(value) => update("eccentricity", value)} error={validation.eccentricity} help="0 <= e < 1." />
+              <ManualField label="Inclination" unit="deg" value={activeForm.inclinationDeg} onChange={(value) => update("inclinationDeg", value)} error={validation.inclinationDeg} help="0 to 180 degrees." />
+              <ManualField label="RAAN" unit="deg" value={activeForm.raanDeg} onChange={(value) => update("raanDeg", value)} error={validation.raanDeg} help="Right ascension of ascending node." />
+              <ManualField label="Argument of Periapsis" unit="deg" value={activeForm.argumentOfPeriapsisDeg} onChange={(value) => update("argumentOfPeriapsisDeg", value)} error={validation.argumentOfPeriapsisDeg} />
+              <ManualField label="True Anomaly" unit="deg" value={activeForm.trueAnomalyDeg} onChange={(value) => update("trueAnomalyDeg", value)} error={validation.trueAnomalyDeg} />
+            </div>
+          )}
+
+          {mode === "CARTESIAN_STATE" && (
+            <div className="space-y-4">
+              <div>
+                <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300/70">Position EME2000</p>
+                <div className="grid grid-cols-3 gap-3">
+                  <ManualField label="X" unit="km" value={activeForm.xKm} onChange={(value) => update("xKm", value)} error={validation.xKm} />
+                  <ManualField label="Y" unit="km" value={activeForm.yKm} onChange={(value) => update("yKm", value)} error={validation.yKm} />
+                  <ManualField label="Z" unit="km" value={activeForm.zKm} onChange={(value) => update("zKm", value)} error={validation.zKm} />
+                </div>
+              </div>
+              <div>
+                <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300/70">Velocity EME2000</p>
+                <div className="grid grid-cols-3 gap-3">
+                  <ManualField label="VX" unit="km/s" value={activeForm.vxKmps} onChange={(value) => update("vxKmps", value)} error={validation.vxKmps} />
+                  <ManualField label="VY" unit="km/s" value={activeForm.vyKmps} onChange={(value) => update("vyKmps", value)} error={validation.vyKmps} />
+                  <ManualField label="VZ" unit="km/s" value={activeForm.vzKmps} onChange={(value) => update("vzKmps", value)} error={validation.vzKmps} />
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <aside className="space-y-4 border border-white/10 bg-black/25 p-4">
           <div>
-            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Create Orbit</p>
-            <p className="mt-1 text-[11px] leading-5 text-zinc-500">Define one seed state and let Orekit build the trajectory.</p>
+            <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Propagator</p>
+            <div className="mt-2 grid gap-2">
+              {(["KEPLERIAN", "NUMERICAL"] as const).map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  onClick={() => setPropagatorType(item)}
+                  className={`border px-3 py-2 text-left font-mono text-xs uppercase transition ${propagatorType === item ? "border-cyan-300 bg-cyan-300 text-slate-950" : "border-white/10 text-zinc-400 hover:border-cyan-300/50 hover:text-cyan-100"}`}
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
           </div>
-          <span className="border border-lime-300/35 bg-lime-300/10 px-2 py-1 font-mono text-[10px] uppercase text-lime-100">Phase 1</span>
-        </div>
-        <div className="mt-3 grid grid-cols-3 gap-1 border border-white/10 bg-black/35 p-1">
-          {manualOrbitTabs.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => update("type", tab.id)}
-              className={`px-2 py-2 font-mono text-[10px] uppercase transition ${
-                form.type === tab.id ? "bg-cyan-300 text-slate-950 shadow-[0_0_18px_rgba(103,232,249,0.22)]" : "text-zinc-500 hover:bg-white/5 hover:text-cyan-100"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
+          <div className="border-t border-white/10 pt-4">
+            <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Frame</p>
+            <p className="mt-2 text-xs leading-5 text-zinc-400">Phase 1 manual states are Earth-centered and interpreted in EME2000.</p>
+          </div>
+        </aside>
       </div>
 
-      <div className="space-y-3 p-4">
-        <ManualField label="Name" value={form.name} onChange={(value) => update("name", value)} error={validation.name} help="Displayed on the globe and in the satellite list." />
-
-        {form.type === "TLE" && (
-          <div className="space-y-3">
-            <ManualField label="Line 1" value={form.line1} onChange={(value) => update("line1", value)} error={validation.line1} help="The first 69-character TLE record." multiline />
-            <ManualField label="Line 2" value={form.line2} onChange={(value) => update("line2", value)} error={validation.line2} help="The second TLE record with matching catalog number." multiline />
-          </div>
-        )}
-
-        {form.type === "CLASSICAL_ELEMENTS" && (
-          <div className="space-y-3">
-            <ManualField label="Epoch" value={form.epoch} onChange={(value) => update("epoch", value)} error={validation.epoch} type="datetime-local" help="UTC epoch used for the element set." />
-            <div className="grid grid-cols-2 gap-2">
-              <ManualField label="SMA" unit="km" value={form.semiMajorAxisKm} onChange={(value) => update("semiMajorAxisKm", value)} error={validation.semiMajorAxisKm} help="Semi-major axis." />
-              <ManualField label="Ecc" value={form.eccentricity} onChange={(value) => update("eccentricity", value)} error={validation.eccentricity} help="0 <= e < 1." />
-              <ManualField label="Inc" unit="deg" value={form.inclinationDeg} onChange={(value) => update("inclinationDeg", value)} error={validation.inclinationDeg} help="Inclination." />
-              <ManualField label="RAAN" unit="deg" value={form.raanDeg} onChange={(value) => update("raanDeg", value)} error={validation.raanDeg} help="Right ascension of ascending node." />
-              <ManualField label="AoP" unit="deg" value={form.argumentOfPeriapsisDeg} onChange={(value) => update("argumentOfPeriapsisDeg", value)} error={validation.argumentOfPeriapsisDeg} help="Argument of periapsis." />
-              <ManualField label="TA" unit="deg" value={form.trueAnomalyDeg} onChange={(value) => update("trueAnomalyDeg", value)} error={validation.trueAnomalyDeg} help="True anomaly." />
-            </div>
-          </div>
-        )}
-
-        {form.type === "CARTESIAN_STATE" && (
-          <div className="space-y-3">
-            <ManualField label="Epoch" value={form.epoch} onChange={(value) => update("epoch", value)} error={validation.epoch} type="datetime-local" help="UTC epoch used for the state vector." />
-            <div>
-              <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300/70">Position EME2000</p>
-              <div className="grid grid-cols-3 gap-2">
-                <ManualField label="X" unit="km" value={form.xKm} onChange={(value) => update("xKm", value)} error={validation.xKm} />
-                <ManualField label="Y" unit="km" value={form.yKm} onChange={(value) => update("yKm", value)} error={validation.yKm} />
-                <ManualField label="Z" unit="km" value={form.zKm} onChange={(value) => update("zKm", value)} error={validation.zKm} />
-              </div>
-            </div>
-            <div>
-              <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300/70">Velocity EME2000</p>
-              <div className="grid grid-cols-3 gap-2">
-                <ManualField label="VX" unit="km/s" value={form.vxKmps} onChange={(value) => update("vxKmps", value)} error={validation.vxKmps} />
-                <ManualField label="VY" unit="km/s" value={form.vyKmps} onChange={(value) => update("vyKmps", value)} error={validation.vyKmps} />
-                <ManualField label="VZ" unit="km/s" value={form.vzKmps} onChange={(value) => update("vzKmps", value)} error={validation.vzKmps} />
-              </div>
-            </div>
-          </div>
-        )}
-
-        <div className="flex items-center justify-between gap-3 border-t border-cyan-300/15 pt-3">
-          <div>
-            <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-zinc-500">Frame</p>
-            <p className="mt-1 font-mono text-xs text-cyan-100">{form.type === "TLE" ? "TEME / SGP4" : "EME2000 / Earth"}</p>
-          </div>
+      <div className="flex items-center justify-between border-t border-cyan-300/15 pt-4">
+        <button
+          type="button"
+          onClick={onClose}
+          className="border border-white/10 px-4 py-2 font-mono text-xs uppercase text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100"
+        >
+          Cancel
+        </button>
+        <div className="flex items-center gap-3">
+          {status && (
+            <p className={`text-xs ${status.tone === "success" ? "text-lime-100" : "text-rose-100"}`}>{status.message}</p>
+          )}
           <button
             type="button"
             onClick={submit}
             disabled={isSubmitting}
-            className="border border-cyan-300 bg-cyan-300 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-950 transition hover:bg-cyan-200 disabled:cursor-wait disabled:border-cyan-300/35 disabled:bg-cyan-300/35 disabled:text-slate-900"
+            className="border border-cyan-300 bg-cyan-300 px-5 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-950 transition hover:bg-cyan-200 disabled:cursor-wait disabled:opacity-60"
           >
-            {isSubmitting ? "Creating" : "Create"}
+            {isSubmitting ? "Creating" : "Create Orbit"}
           </button>
         </div>
-
-        {status && (
-          <div className={`border px-3 py-2 text-xs ${status.tone === "success" ? "border-lime-300/35 bg-lime-300/10 text-lime-100" : "border-rose-300/35 bg-rose-300/10 text-rose-100"}`}>
-            {status.message}
-          </div>
-        )}
       </div>
-    </HudPanel>
+    </div>
   );
 }
 
@@ -2189,6 +2643,7 @@ function ManeuverPanel({
   maneuverSnapshots,
   selectedManeuverId,
   showManeuvers,
+  disabled,
   onSelectManeuver,
   onToggleManeuvers,
   onOpenManeuverModal,
@@ -2196,12 +2651,16 @@ function ManeuverPanel({
   maneuverSnapshots: ManeuverSnapshot[];
   selectedManeuverId: string | null;
   showManeuvers: boolean;
+  disabled: boolean;
   onSelectManeuver: (maneuverId: string) => void;
   onToggleManeuvers: () => void;
   onOpenManeuverModal: () => void;
 }) {
   const selectedManeuver = maneuverSnapshots.find((snapshot) => snapshot.event.id === selectedManeuverId);
   const handleToggleManeuvers = () => {
+    if (disabled) {
+      return;
+    }
     if (!showManeuvers && !selectedManeuverId && maneuverSnapshots[0]) {
       onSelectManeuver(maneuverSnapshots[0].event.id);
     }
@@ -2217,9 +2676,14 @@ function ManeuverPanel({
           <button
             type="button"
             aria-pressed={showManeuvers}
+            disabled={disabled}
             onClick={handleToggleManeuvers}
             className={`flex min-w-16 items-center gap-2 border px-2 py-1 font-mono text-[10px] uppercase transition ${
-              showManeuvers ? "border-fuchsia-300 bg-fuchsia-300/15 text-fuchsia-100" : "border-white/10 text-zinc-500 hover:border-fuchsia-300"
+              disabled
+                ? "cursor-not-allowed border-white/10 text-zinc-600 opacity-60"
+                : showManeuvers
+                  ? "border-fuchsia-300 bg-fuchsia-300/15 text-fuchsia-100"
+                  : "border-white/10 text-zinc-500 hover:border-fuchsia-300"
             }`}
           >
             <span className={`h-2.5 w-2.5 rounded-full ${showManeuvers ? "bg-fuchsia-300" : "bg-zinc-600"}`} />
@@ -2227,8 +2691,9 @@ function ManeuverPanel({
           </button>
           <button
             type="button"
+            disabled={maneuverSnapshots.length === 0}
             onClick={onOpenManeuverModal}
-            className="grid h-8 w-8 place-items-center border border-fuchsia-300/35 text-fuchsia-100 transition hover:border-fuchsia-300 hover:bg-fuchsia-300/10"
+            className="grid h-8 w-8 place-items-center border border-fuchsia-300/35 text-fuchsia-100 transition hover:border-fuchsia-300 hover:bg-fuchsia-300/10 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-zinc-600 disabled:opacity-60"
             aria-label="Open maneuver details"
             title="Open maneuver details"
           >
@@ -2239,7 +2704,11 @@ function ManeuverPanel({
         </div>
       </div>
       <p className="mt-1 text-[11px] text-zinc-500">
-        {showManeuvers ? `${maneuverSnapshots.length} event markers visible` : "Enable to show maneuver markers and event details."}
+        {maneuverSnapshots.length === 0
+          ? "No maneuver events found for the loaded orbit."
+          : showManeuvers
+            ? `${maneuverSnapshots.length} event markers visible`
+            : "Enable to show maneuver markers and event details."}
       </p>
       {showManeuvers && selectedManeuver && (
         <button
@@ -2414,6 +2883,7 @@ function ConjunctionPanel({
   conjunctionSnapshots,
   selectedConjunctionId,
   showConjunctions,
+  disabled,
   onSelectConjunction,
   onToggleConjunctions,
   onRefreshConjunctions,
@@ -2421,6 +2891,7 @@ function ConjunctionPanel({
   conjunctionSnapshots: ConjunctionSnapshot[];
   selectedConjunctionId: string | null;
   showConjunctions: boolean;
+  disabled: boolean;
   onSelectConjunction: (conjunctionId: string) => void;
   onToggleConjunctions: () => void;
   onRefreshConjunctions: () => void;
@@ -2442,9 +2913,14 @@ function ConjunctionPanel({
           <button
             type="button"
             aria-pressed={showConjunctions}
+            disabled={disabled}
             onClick={onToggleConjunctions}
             className={`flex min-w-16 items-center gap-2 border px-2 py-1 font-mono text-[10px] uppercase transition ${
-              showConjunctions ? "border-amber-300 bg-amber-300/15 text-amber-100" : "border-white/10 text-zinc-500 hover:border-amber-300"
+              disabled
+                ? "cursor-not-allowed border-white/10 text-zinc-600 opacity-60"
+                : showConjunctions
+                  ? "border-amber-300 bg-amber-300/15 text-amber-100"
+                  : "border-white/10 text-zinc-500 hover:border-amber-300"
             }`}
           >
             <span className={`h-2.5 w-2.5 rounded-full ${showConjunctions ? "bg-amber-300" : "bg-zinc-600"}`} />
@@ -2453,7 +2929,11 @@ function ConjunctionPanel({
         </div>
       </div>
       <p className="mt-1 text-[11px] text-zinc-500">
-        {showConjunctions ? `${conjunctionSnapshots.length} close-approach pair visible` : "Enable to show close-approach links and risk labels."}
+        {conjunctionSnapshots.length === 0
+          ? "No conjunction events found for the loaded satellites."
+          : showConjunctions
+            ? `${conjunctionSnapshots.length} close-approach pair visible`
+            : "Enable to show close-approach links and risk labels."}
       </p>
       {showConjunctions && (
         <p className="mt-2 text-[11px] leading-5 text-zinc-500">
