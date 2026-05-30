@@ -253,11 +253,9 @@ export async function applyAnalysisPreset(noradId: string | number, preset: Anal
 }
 
 export async function setAnalysisMode(noradId: string | number, mode: string, enabled: boolean) {
-  return fetchJson<BackendAnalysisConfigResponse>(`/api/satellites/${noradId}/analysis-config/modes/${mode}`, {}, {
+  return fetchJson<BackendAnalysisConfigResponse>(`/api/satellites/${noradId}/analysis-config/modes/${mode}`, {
+    enabled: enabled ? "true" : "false",
+  }, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ enabled }),
   });
 }

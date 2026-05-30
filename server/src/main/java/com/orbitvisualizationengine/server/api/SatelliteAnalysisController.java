@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -44,8 +45,11 @@ public class SatelliteAnalysisController {
   AnalysisConfigResponse mode(
       @PathVariable int noradId,
       @PathVariable String mode,
+      @RequestParam(required = false) Boolean enabled,
       @RequestBody(required = false) ModeToggleRequest request) {
-    boolean enabled = request == null || request.enabled() == null || request.enabled();
-    return analysisConfigService.setMode(noradId, mode, enabled);
+    boolean requestedEnabled = enabled != null
+        ? enabled
+        : request == null || request.enabled() == null || request.enabled();
+    return analysisConfigService.setMode(noradId, mode, requestedEnabled);
   }
 }

@@ -39,6 +39,7 @@ import type {
   BackendManeuverEvent,
   CreateManualOrbitRequest,
   ManualOrbitType,
+  PropagatorTypeId,
 } from "@/services/orbitServerApi";
 import { StateCacheService } from "@/services/StateCacheService";
 
@@ -73,10 +74,14 @@ const trajectoryOptions = {
   futureMinutes: 110,
   pastMinutes: 35,
 };
+const ephemerisRefreshMarginMinutes = 18;
 const speedPresetOptions = [
-  { speed: 60, label: "1 min/sec" },
-  { speed: 300, label: "5 min/sec" },
-  { speed: 600, label: "10 min/sec" },
+  { speed: 1, label: "Realtime" },
+  { speed: 10, label: "10x" },
+  { speed: 60, label: "60x" },
+  { speed: 300, label: "300x" },
+  { speed: 1000, label: "1000x" },
+  { speed: 10000, label: "10000x" },
 ] as const;
 const maneuverWindowMinutes = 45;
 const conjunctionStepSec = 120;
@@ -165,17 +170,115 @@ function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * 60 * 1000);
 }
 
-function getAdaptiveSampleSpacingSec(simulationSpeed: number) {
-  return Math.max(10, simulationSpeed / 2);
+function getEphemerisSampleStepSec(source: ActiveDataSource, propagatorType?: PropagatorTypeId) {
+  if (!isServerDrivenSource(source)) {
+    return 1;
+  }
+
+  return propagatorType === "NUMERICAL" ? 10 : 5;
 }
 
-function normalizeCustomMinutesPerSecond(value: string) {
+function normalizeCustomSpeedMultiplier(value: string) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) {
     return null;
   }
 
-  return Math.min(Math.max(parsed, 1), 180);
+  return Math.min(Math.max(parsed, 1), 100000);
+}
+
+function timestampMs(value: string) {
+  return new Date(value).getTime();
+}
+
+function lerpNumber(a: number | undefined, b: number | undefined, alpha: number) {
+  if (typeof a !== "number" || typeof b !== "number") {
+    return undefined;
+  }
+  return a + (b - a) * alpha;
+}
+
+function lerpVector(
+  a: [number, number, number] | undefined,
+  b: [number, number, number] | undefined,
+  alpha: number,
+) {
+  if (!a || !b) {
+    return undefined;
+  }
+  return [
+    a[0] + (b[0] - a[0]) * alpha,
+    a[1] + (b[1] - a[1]) * alpha,
+    a[2] + (b[2] - a[2]) * alpha,
+  ] as [number, number, number];
+}
+
+function lerpLongitudeDeg(a: number, b: number, alpha: number) {
+  let delta = b - a;
+  if (delta > 180) {
+    delta -= 360;
+  } else if (delta < -180) {
+    delta += 360;
+  }
+
+  const value = a + delta * alpha;
+  return value > 180 ? value - 360 : value < -180 ? value + 360 : value;
+}
+
+function interpolateStateFromSamples(
+  satelliteId: string,
+  samples: OrbitState[] | undefined,
+  timeUtc: string,
+): OrbitState | null {
+  if (!samples || samples.length === 0) {
+    return null;
+  }
+
+  const targetMs = timestampMs(timeUtc);
+  const ordered = samples.toSorted((a, b) => timestampMs(a.timeUtc) - timestampMs(b.timeUtc));
+  if (targetMs <= timestampMs(ordered[0].timeUtc)) {
+    return { ...ordered[0], satelliteId };
+  }
+  if (targetMs >= timestampMs(ordered.at(-1)!.timeUtc)) {
+    return { ...ordered.at(-1)!, satelliteId };
+  }
+
+  let low = 0;
+  let high = ordered.length - 1;
+  while (high - low > 1) {
+    const mid = Math.floor((low + high) / 2);
+    if (timestampMs(ordered[mid].timeUtc) <= targetMs) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+
+  const before = ordered[low];
+  const after = ordered[high];
+  const beforeMs = timestampMs(before.timeUtc);
+  const afterMs = timestampMs(after.timeUtc);
+  const alpha = (targetMs - beforeMs) / Math.max(1, afterMs - beforeMs);
+  const velocityEciKmps = lerpVector(before.velocityEciKmps, after.velocityEciKmps, alpha);
+  const velocityEcefKmps = lerpVector(before.velocityEcefKmps, after.velocityEcefKmps, alpha);
+  const velocityVector = velocityEcefKmps ?? velocityEciKmps;
+
+  return {
+    satelliteId,
+    timeUtc,
+    frame: before.frame,
+    positionEciKm: lerpVector(before.positionEciKm, after.positionEciKm, alpha),
+    velocityEciKmps,
+    positionEcefKm: lerpVector(before.positionEcefKm, after.positionEcefKm, alpha),
+    velocityEcefKmps,
+    gmstRad: lerpNumber(before.gmstRad, after.gmstRad, alpha),
+    latitudeDeg: before.latitudeDeg + (after.latitudeDeg - before.latitudeDeg) * alpha,
+    longitudeDeg: lerpLongitudeDeg(before.longitudeDeg, after.longitudeDeg, alpha),
+    altitudeKm: before.altitudeKm + (after.altitudeKm - before.altitudeKm) * alpha,
+    velocityKmps: velocityVector
+      ? Math.sqrt(velocityVector[0] ** 2 + velocityVector[1] ** 2 + velocityVector[2] ** 2)
+      : lerpNumber(before.velocityKmps, after.velocityKmps, alpha),
+  };
 }
 
 function backendStateToOrbitState(satelliteId: string, state: BackendEphemerisState): OrbitState {
@@ -326,7 +429,7 @@ export function OrbitalDashboard() {
   const [trajectoryAnchorTime, setTrajectoryAnchorTime] = useState(() => initialSimulationTime);
   const [isPlaying, setIsPlaying] = useState(true);
   const [speed, setSpeed] = useState(60);
-  const [customSpeedInput, setCustomSpeedInput] = useState("2");
+  const [customSpeedInput, setCustomSpeedInput] = useState("120");
   const [frameMode, setFrameMode] = useState<FrameMode>("earth-fixed");
   const [showLabels, setShowLabels] = useState(true);
   const [showAllOrbits, setShowAllOrbits] = useState(false);
@@ -353,59 +456,67 @@ export function OrbitalDashboard() {
   const [maneuverFocusRequest, setManeuverFocusRequest] = useState<ManeuverFocusRequest | null>(null);
   const lastTickRef = useRef<number | null>(null);
   const simTimeRef = useRef(simTime);
+  const viewerClockAvailableRef = useRef(false);
+  const trajectoryRequestInFlightRef = useRef(false);
+  const lastTrajectoryAnchorShiftMsRef = useRef(0);
   const hasOrbitLoaded = satellites.length > 0;
 
   const propagator = useMemo(() => new SatelliteJsPropagator(satellites), [satellites]);
   const stateCache = useMemo(() => new StateCacheService(propagator, satellites), [propagator, satellites]);
   const groundTrackRange = groundTrackRangeOptions.find((option) => option.id === groundTrackRangeId) ?? groundTrackRangeOptions[0];
-  const adaptiveSampleSpacingSec = getAdaptiveSampleSpacingSec(speed);
+  const trajectorySampleStepSec = getEphemerisSampleStepSec(
+    activeDataSource,
+    analysisConfig?.config.propagatorType,
+  );
   const trajectoryWindowOptions = useMemo(() => ({
     ...trajectoryOptions,
-    stepSec: adaptiveSampleSpacingSec,
-  }), [adaptiveSampleSpacingSec]);
+    stepSec: trajectorySampleStepSec,
+  }), [trajectorySampleStepSec]);
   const groundTrackStepSec = groundTrackRange.id === "live"
-    ? adaptiveSampleSpacingSec
-    : Math.max(groundTrackRange.stepSec, adaptiveSampleSpacingSec);
+    ? 30
+    : groundTrackRange.stepSec;
   const groundTrackAnchorMs = Math.floor(simTime.getTime() / groundTrackRange.bucketMs) * groundTrackRange.bucketMs;
   const serverGroundTrackAnchorMs = isServerDrivenSource(activeDataSource)
     ? trajectoryAnchorTime.getTime()
     : groundTrackAnchorMs;
-  const localSnapshots: SatelliteSnapshot[] = useMemo(() => {
-    return stateCache.getCurrentSnapshots(simTime.toISOString());
-  }, [stateCache, simTime]);
-  const snapshots: SatelliteSnapshot[] = useMemo(() => {
-    if (isServerDrivenSource(activeDataSource)) {
-      return satellites.map((satellite) => {
-        const serverState = serverStateBySatelliteId.get(satellite.id) ?? null;
-        return {
-          satellite,
-          state: serverState,
-          error: serverState ? undefined : "Waiting for backend ephemeris state.",
-        };
-      });
-    }
-
-    if (serverStateBySatelliteId.size === 0) {
-      return localSnapshots;
-    }
-
-    return localSnapshots.map((snapshot) => {
-      const serverState = serverStateBySatelliteId.get(snapshot.satellite.id);
-      return serverState
-        ? {
-            ...snapshot,
-            state: serverState,
-            error: undefined,
-          }
-        : snapshot;
-    });
-  }, [activeDataSource, localSnapshots, satellites, serverStateBySatelliteId]);
   const orbitSnapshots: SatelliteSnapshot[] = useMemo(() => {
     if (isServerDrivenSource(activeDataSource) && serverOrbitSnapshots) {
       return serverOrbitSnapshots;
     }
     return stateCache.getWindowedSnapshots(trajectoryAnchorTime.toISOString(), trajectoryWindowOptions);
   }, [activeDataSource, serverOrbitSnapshots, stateCache, trajectoryAnchorTime, trajectoryWindowOptions]);
+  const snapshots: SatelliteSnapshot[] = useMemo(() => {
+    const simTimeIso = simTime.toISOString();
+    const ephemerisBySatelliteId = new Map(orbitSnapshots.map((snapshot) => [
+      snapshot.satellite.id,
+      snapshot.trajectory ?? [],
+    ]));
+
+    return satellites.map((satellite) => {
+      const ephemerisState = interpolateStateFromSamples(
+        satellite.id,
+        ephemerisBySatelliteId.get(satellite.id),
+        simTimeIso,
+      );
+      if (ephemerisState) {
+        return {
+          satellite,
+          state: ephemerisState,
+          error: undefined,
+        };
+      }
+
+      const fallbackState = isServerDrivenSource(activeDataSource)
+        ? serverStateBySatelliteId.get(satellite.id) ?? null
+        : propagator.getState(satellite.id, simTimeIso);
+
+      return {
+        satellite,
+        state: fallbackState,
+        error: fallbackState ? undefined : "Waiting for ephemeris samples.",
+      };
+    });
+  }, [activeDataSource, orbitSnapshots, propagator, satellites, serverStateBySatelliteId, simTime]);
   const groundTrackSnapshots: SatelliteSnapshot[] = useMemo(() => {
     if (isServerDrivenSource(activeDataSource) && serverGroundTrackSnapshots) {
       return serverGroundTrackSnapshots;
@@ -523,6 +634,7 @@ export function OrbitalDashboard() {
   const latestSelectedId = selectedSatelliteIds.at(-1) ?? null;
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
   const selectedNoradId = activeDataSource === "manual" ? null : selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? null;
+  const canUseAnalysisConfig = activeDataSource === "backend" && Boolean(selectedNoradId);
   const canUseRangeCheck = satellites.length >= 2;
   const canShowManeuvers = maneuverSnapshots.length > 0;
   const canShowConjunctions = satellites.length >= 2 && conjunctionSnapshots.length > 0;
@@ -590,13 +702,13 @@ export function OrbitalDashboard() {
   }, [backendRequestPauseUntil]);
 
   const applyCustomSpeed = useCallback(() => {
-    const minutesPerSecond = normalizeCustomMinutesPerSecond(customSpeedInput);
-    if (minutesPerSecond === null) {
+    const customSpeed = normalizeCustomSpeedMultiplier(customSpeedInput);
+    if (customSpeed === null) {
       return;
     }
 
-    setSpeed(minutesPerSecond * 60);
-    setCustomSpeedInput(String(minutesPerSecond));
+    setSpeed(customSpeed);
+    setCustomSpeedInput(String(customSpeed));
   }, [customSpeedInput]);
 
   const loadTleText = useCallback((raw: string) => {
@@ -767,8 +879,8 @@ export function OrbitalDashboard() {
     action: (noradId: string) => Promise<BackendAnalysisConfigResponse>,
     successMessage: string,
   ) => {
-    if (!selectedNoradId) {
-      setAnalysisMessage("Select a satellite before changing analysis settings.");
+    if (!selectedNoradId || !canUseAnalysisConfig) {
+      setAnalysisMessage("Analysis config is available for backend catalog orbits only.");
       return;
     }
 
@@ -776,10 +888,13 @@ export function OrbitalDashboard() {
       const response = await action(selectedNoradId);
       setAnalysisConfig(response);
       setAnalysisMessage(successMessage);
+      setBackendRequestsPaused(false);
+      setServerOrbitSnapshots(null);
+      setTrajectoryAnchorTime(simTimeRef.current);
     } catch (error) {
       setAnalysisMessage(error instanceof Error ? error.message : "Unable to update analysis configuration.");
     }
-  }, [selectedNoradId]);
+  }, [canUseAnalysisConfig, selectedNoradId]);
 
   const applySelectedPreset = useCallback((preset: AnalysisPresetId) => {
     updateSelectedAnalysisConfig(
@@ -816,6 +931,14 @@ export function OrbitalDashboard() {
     }
   }, [loadedNoradIds]);
 
+  const handleCesiumClockTick = useCallback((timeIso: string) => {
+    viewerClockAvailableRef.current = true;
+    setSimTime((current) => {
+      const next = new Date(timeIso);
+      return Number.isNaN(next.getTime()) || next.getTime() === current.getTime() ? current : next;
+    });
+  }, []);
+
   const shiftSimulationTime = useCallback((minutes: number) => {
     setSimTime((current) => {
       const next = new Date(current.getTime() + minutes * 60 * 1000);
@@ -823,76 +946,6 @@ export function OrbitalDashboard() {
       return next;
     });
   }, []);
-
-  useEffect(() => {
-    let ignore = false;
-    const controller = new AbortController();
-    let inFlight = false;
-
-    async function loadServerStates() {
-      if (inFlight) {
-        return;
-      }
-      if (!isServerDrivenSource(activeDataSource)) {
-        setServerStateBySatelliteId(new Map());
-        return;
-      }
-      if (activeDataSource === "manual" && !manualOrbitId) {
-        return;
-      }
-      if (!isPlaying) {
-        return;
-      }
-      if (backendRequestsPaused) {
-        return;
-      }
-
-      inFlight = true;
-      const timeUtc = simTimeRef.current.toISOString();
-      const pairs: Array<[string, OrbitState] | null> = [];
-      try {
-        for (const satellite of satellites) {
-          if (ignore || controller.signal.aborted) {
-            return;
-          }
-          const noradId = satellite.noradId ?? satellite.id;
-          try {
-            const state = activeDataSource === "manual" && manualOrbitId
-              ? await fetchManualOrbitState(manualOrbitId, timeUtc, { signal: controller.signal })
-              : await fetchCurrentOrbitState(noradId, timeUtc, { signal: controller.signal });
-            pairs.push([satellite.id, backendStateToOrbitState(satellite.id, state)]);
-          } catch (error) {
-            if (isAbortError(error)) {
-              return;
-            }
-            pairs.push(null);
-            pauseBackendRequests(error);
-            break;
-          }
-        }
-
-        if (!ignore) {
-          if (satellites.length > 0 && pairs.every((pair) => pair === null)) {
-            pauseBackendRequests("Backend current-state requests are unavailable.");
-          }
-          setServerStateBySatelliteId(new Map(pairs.filter((pair): pair is [string, OrbitState] => pair !== null)));
-        }
-      } finally {
-        inFlight = false;
-      }
-    }
-
-    if (isPlaying) {
-      loadServerStates();
-    }
-    const intervalId = window.setInterval(loadServerStates, 3_000);
-
-    return () => {
-      ignore = true;
-      window.clearInterval(intervalId);
-      controller.abort();
-    };
-  }, [activeDataSource, backendRequestsPaused, isPlaying, manualOrbitId, pauseBackendRequests, satellites]);
 
   useEffect(() => {
     let ignore = false;
@@ -909,6 +962,9 @@ export function OrbitalDashboard() {
       if (backendRequestsPaused) {
         return;
       }
+      if (trajectoryRequestInFlightRef.current) {
+        return;
+      }
 
       const centerTime = trajectoryAnchorTime;
       const start = addMinutes(centerTime, -trajectoryOptions.pastMinutes);
@@ -920,56 +976,65 @@ export function OrbitalDashboard() {
         return satellite.visual.showOrbit || satellite.visual.showTrail || satellite.visual.showGroundTrack;
       });
       const nextSnapshots: SatelliteSnapshot[] = [];
-
-      for (const satellite of targetSatellites) {
-        if (ignore || controller.signal.aborted) {
-          return;
-        }
-        const noradId = satellite.noradId ?? satellite.id;
-        try {
-          const response = activeDataSource === "manual" && manualOrbitId
-            ? await fetchManualOrbitTrajectory(
-                manualOrbitId,
-                start.toISOString(),
-                end.toISOString(),
-                trajectoryWindowOptions.stepSec,
-                { signal: controller.signal },
-              )
-            : await fetchOrbitTrajectory(
-                noradId,
-                start.toISOString(),
-                end.toISOString(),
-                trajectoryWindowOptions.stepSec,
-                { signal: controller.signal },
-              );
-          const states = response.states.map((state) => backendStateToOrbitState(satellite.id, state));
-          nextSnapshots.push({
-            satellite,
-            state: null,
-            trajectory: states.filter((state) => new Date(state.timeUtc) >= centerTime),
-            futureTrajectory: states.filter((state) => new Date(state.timeUtc) >= centerTime),
-            pastTrail: states.filter((state) => new Date(state.timeUtc) <= centerTime),
-            groundTrack: states,
-          });
-        } catch (error) {
-          if (isAbortError(error)) {
-            return;
-          }
-          nextSnapshots.push({
-            satellite,
-            state: null,
-            error: error instanceof Error ? error.message : "Unable to load backend trajectory.",
-          });
-          pauseBackendRequests(error);
-          break;
-        }
+      if (targetSatellites.length === 0) {
+        setServerOrbitSnapshots([]);
+        return;
       }
 
-      if (!ignore) {
-        if (targetSatellites.length > 0 && nextSnapshots.every((snapshot) => snapshot.error)) {
-          pauseBackendRequests("Backend trajectory requests are unavailable.");
+      trajectoryRequestInFlightRef.current = true;
+      try {
+        for (const satellite of targetSatellites) {
+          if (ignore || controller.signal.aborted) {
+            return;
+          }
+          const noradId = satellite.noradId ?? satellite.id;
+          try {
+            const response = activeDataSource === "manual" && manualOrbitId
+              ? await fetchManualOrbitTrajectory(
+                  manualOrbitId,
+                  start.toISOString(),
+                  end.toISOString(),
+                  trajectoryWindowOptions.stepSec,
+                  { signal: controller.signal },
+                )
+              : await fetchOrbitTrajectory(
+                  noradId,
+                  start.toISOString(),
+                  end.toISOString(),
+                  trajectoryWindowOptions.stepSec,
+                  { signal: controller.signal },
+                );
+            const states = response.states.map((state) => backendStateToOrbitState(satellite.id, state));
+            nextSnapshots.push({
+              satellite,
+              state: null,
+              trajectory: states,
+              futureTrajectory: states.filter((state) => new Date(state.timeUtc) >= centerTime),
+              pastTrail: states.filter((state) => new Date(state.timeUtc) <= centerTime),
+              groundTrack: states,
+            });
+          } catch (error) {
+            if (isAbortError(error)) {
+              return;
+            }
+            nextSnapshots.push({
+              satellite,
+              state: null,
+              error: error instanceof Error ? error.message : "Unable to load backend trajectory.",
+            });
+            pauseBackendRequests(error);
+            break;
+          }
         }
-        setServerOrbitSnapshots(nextSnapshots);
+
+        if (!ignore) {
+          if (targetSatellites.length > 0 && nextSnapshots.every((snapshot) => snapshot.error)) {
+            pauseBackendRequests("Backend trajectory requests are unavailable.");
+          }
+          setServerOrbitSnapshots(nextSnapshots);
+        }
+      } finally {
+        trajectoryRequestInFlightRef.current = false;
       }
     }
 
@@ -977,6 +1042,7 @@ export function OrbitalDashboard() {
 
     return () => {
       ignore = true;
+      trajectoryRequestInFlightRef.current = false;
       controller.abort();
     };
   }, [activeDataSource, backendRequestsPaused, manualOrbitId, pauseBackendRequests, satellites, selectedSatelliteIds, showAllOrbits, trajectoryAnchorTime, trajectoryWindowOptions.stepSec]);
@@ -1182,7 +1248,7 @@ export function OrbitalDashboard() {
     let ignore = false;
 
     async function loadAnalysisConfig() {
-      if (!selectedNoradId) {
+      if (!selectedNoradId || !canUseAnalysisConfig) {
         await Promise.resolve();
         if (!ignore) {
           setAnalysisConfig(null);
@@ -1210,7 +1276,7 @@ export function OrbitalDashboard() {
     return () => {
       ignore = true;
     };
-  }, [selectedNoradId]);
+  }, [canUseAnalysisConfig, selectedNoradId]);
 
   useEffect(() => {
     let ignore = false;
@@ -1250,6 +1316,27 @@ export function OrbitalDashboard() {
   }, [loadedNoradIds]);
 
   useEffect(() => {
+    const windowStartMs = addMinutes(trajectoryAnchorTime, -trajectoryOptions.pastMinutes).getTime();
+    const windowEndMs = addMinutes(trajectoryAnchorTime, trajectoryOptions.futureMinutes).getTime();
+    const marginMs = ephemerisRefreshMarginMinutes * 60 * 1000;
+    const simTimeMs = simTime.getTime();
+
+    if (simTimeMs < windowStartMs + marginMs || simTimeMs > windowEndMs - marginMs) {
+      const nowMs = Date.now();
+      if (trajectoryRequestInFlightRef.current || nowMs - lastTrajectoryAnchorShiftMsRef.current < 5000) {
+        return;
+      }
+      lastTrajectoryAnchorShiftMsRef.current = nowMs;
+      const timeoutId = window.setTimeout(() => setTrajectoryAnchorTime(simTime), 0);
+      return () => window.clearTimeout(timeoutId);
+    }
+  }, [simTime, trajectoryAnchorTime]);
+
+  useEffect(() => {
+    if (viewerClockAvailableRef.current) {
+      return;
+    }
+
     if (!isPlaying) {
       lastTickRef.current = null;
       return;
@@ -1285,6 +1372,8 @@ export function OrbitalDashboard() {
             showLabels={showLabels}
             frameMode={frameMode}
             simTimeIso={simTime.toISOString()}
+            isPlaying={isPlaying}
+            simulationSpeed={speed}
             currentGmstRad={currentDisplayGmstRad}
             focusRequest={focusRequest}
             maneuverFocusRequest={maneuverFocusRequest}
@@ -1298,6 +1387,7 @@ export function OrbitalDashboard() {
             onSelectManeuver={setSelectedManeuverId}
             onToggleSatellite={toggleSatelliteSelection}
             resetSignal={resetSignal}
+            onClockTick={handleCesiumClockTick}
           />
         ) : (
           <div className="h-full bg-[radial-gradient(circle_at_50%_38%,rgba(34,211,238,0.12),transparent_34%),linear-gradient(135deg,#020617_0%,#050b12_44%,#020617_100%)]" />
@@ -1381,7 +1471,7 @@ export function OrbitalDashboard() {
           </HudPanel>
         )}
 
-        {hasOrbitLoaded && selectedNoradId && (
+        {hasOrbitLoaded && selectedNoradId && canUseAnalysisConfig && (
           <HudPanel className="p-3">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -1656,10 +1746,10 @@ export function OrbitalDashboard() {
                   }
                 }}
                 inputMode="numeric"
-                aria-label="Custom simulation minutes per real second"
+                aria-label="Custom simulation speed multiplier"
                 className="h-9 w-14 border-l border-cyan-300/20 bg-black/35 px-2 font-mono text-xs text-cyan-50 outline-none focus:bg-cyan-300/10"
               />
-              <span className="pr-2 font-mono text-xs text-cyan-200">min/sec</span>
+              <span className="pr-2 font-mono text-xs text-cyan-200">x</span>
             </div>
             <ControlButton
               label="Now"

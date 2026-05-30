@@ -43,33 +43,31 @@ export class StateCacheService {
     const groundEndUtc = addMinutes(centerTime, options.futureMinutes).toISOString();
 
     return this.satellites.map((satellite) => {
-      const futureTrajectory = this.propagator.getTrajectory(
+      const trajectory = this.propagator.getTrajectory(
         satellite.id,
-        futureStartUtc,
+        pastStartUtc,
         futureEndUtc,
         options.stepSec,
       );
-      const pastTrail = this.propagator.getTrajectory(
-        satellite.id,
-        pastStartUtc,
-        pastEndUtc,
-        options.stepSec,
-      );
+      const futureStartMs = new Date(futureStartUtc).getTime();
+      const pastEndMs = new Date(pastEndUtc).getTime();
+      const futureTrajectory = trajectory.filter((state) => new Date(state.timeUtc).getTime() >= futureStartMs);
+      const pastTrail = trajectory.filter((state) => new Date(state.timeUtc).getTime() <= pastEndMs);
 
       // Ground track uses the same propagated states as orbit rendering, but the
       // Cesium layer projects each state to altitude zero. Keeping it here makes
       // the renderer a consumer of states rather than an owner of propagation.
-      const groundTrack = this.propagator.getTrajectory(
-        satellite.id,
-        groundStartUtc,
-        groundEndUtc,
-        options.stepSec,
-      );
+      const groundStartMs = new Date(groundStartUtc).getTime();
+      const groundEndMs = new Date(groundEndUtc).getTime();
+      const groundTrack = trajectory.filter((state) => {
+        const stateMs = new Date(state.timeUtc).getTime();
+        return stateMs >= groundStartMs && stateMs <= groundEndMs;
+      });
 
       return {
         satellite,
         state: null,
-        trajectory: futureTrajectory,
+        trajectory,
         futureTrajectory,
         pastTrail,
         groundTrack,
