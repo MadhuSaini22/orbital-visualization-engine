@@ -7,6 +7,7 @@ import org.orekit.bodies.GeodeticPoint;
 import org.orekit.bodies.OneAxisEllipsoid;
 import org.orekit.frames.Frame;
 import org.orekit.propagation.Propagator;
+import org.orekit.propagation.SpacecraftState;
 import org.orekit.time.AbsoluteDate;
 import org.orekit.time.TimeScalesFactory;
 import org.orekit.utils.PVCoordinates;
@@ -27,6 +28,28 @@ public final class OrekitStateMapper {
       String frameName) {
     AbsoluteDate date = toAbsoluteDate(instant);
     PVCoordinates fixedPv = propagator.getPVCoordinates(date, outputFrame);
+    Vector3D position = fixedPv.getPosition();
+    Vector3D velocity = fixedPv.getVelocity();
+    GeodeticPoint point = earth.transform(position, outputFrame, date);
+
+    return new EphemerisState(
+        instant,
+        frameName,
+        new double[] {position.getX() / 1000.0, position.getY() / 1000.0, position.getZ() / 1000.0},
+        new double[] {velocity.getX() / 1000.0, velocity.getY() / 1000.0, velocity.getZ() / 1000.0},
+        Math.toDegrees(point.getLatitude()),
+        Math.toDegrees(point.getLongitude()),
+        point.getAltitude() / 1000.0);
+  }
+
+  public static EphemerisState spacecraftStateToEphemerisState(
+      SpacecraftState state,
+      Frame outputFrame,
+      OneAxisEllipsoid earth,
+      String frameName) {
+    AbsoluteDate date = state.getDate();
+    Instant instant = date.toDate(TimeScalesFactory.getUTC()).toInstant();
+    PVCoordinates fixedPv = state.getPVCoordinates(outputFrame);
     Vector3D position = fixedPv.getPosition();
     Vector3D velocity = fixedPv.getVelocity();
     GeodeticPoint point = earth.transform(position, outputFrame, date);

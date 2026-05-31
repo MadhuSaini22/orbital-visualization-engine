@@ -32,6 +32,8 @@ import org.orekit.orbits.CartesianOrbit;
 import org.orekit.orbits.Orbit;
 import org.orekit.orbits.OrbitType;
 import org.orekit.orbits.PositionAngleType;
+import org.orekit.propagation.BoundedPropagator;
+import org.orekit.propagation.EphemerisGenerator;
 import org.orekit.propagation.SpacecraftState;
 import org.orekit.propagation.analytical.tle.TLEPropagator;
 import org.orekit.time.AbsoluteDate;
@@ -64,6 +66,40 @@ public class NumericalPropagator implements OrbitPropagator {
         orekit.itrf(),
         orekit.earth(),
         "ITRF");
+  }
+
+  @Override
+  public List<EphemerisState> trajectory(
+      PropagationContext context,
+      Instant start,
+      Instant end,
+      int stepSeconds) {
+    if (start.isAfter(end)) {
+      return List.of();
+    }
+    if (stepSeconds <= 0) {
+      throw new IllegalArgumentException("Trajectory stepSeconds must be greater than zero.");
+    }
+
+    org.orekit.propagation.numerical.NumericalPropagator propagator = buildPropagator(context);
+    AbsoluteDate startDate = OrekitStateMapper.toAbsoluteDate(start);
+    AbsoluteDate endDate = OrekitStateMapper.toAbsoluteDate(end);
+    EphemerisGenerator generator = propagator.getEphemerisGenerator();
+
+    propagator.propagate(startDate, endDate);
+    BoundedPropagator ephemeris = generator.getGeneratedEphemeris();
+
+    List<EphemerisState> states = new ArrayList<>();
+    ephemeris.clearStepHandlers();
+    ephemeris.setStepHandler(
+        stepSeconds,
+        state -> states.add(OrekitStateMapper.spacecraftStateToEphemerisState(
+            state,
+            orekit.itrf(),
+            orekit.earth(),
+            "ITRF")));
+    ephemeris.propagate(startDate, endDate);
+    return states;
   }
 
   @Override
