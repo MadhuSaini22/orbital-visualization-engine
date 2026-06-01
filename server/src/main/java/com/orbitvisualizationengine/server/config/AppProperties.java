@@ -10,5 +10,6 @@ public record AppProperties(
     String spaceTrackPassword,
     String orekitDataPath,
     boolean ingestionEnabled,
-    String corsOriginPattern) {
+    String corsOriginPattern,
+    boolean missionTimelinePropagationEnabled) {
 }

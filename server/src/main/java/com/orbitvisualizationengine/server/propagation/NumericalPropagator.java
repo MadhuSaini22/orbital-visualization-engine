@@ -1,19 +1,14 @@
 package com.orbitvisualizationengine.server.propagation;
 
 import com.orbitvisualizationengine.server.domain.EphemerisState;
-import com.orbitvisualizationengine.server.domain.ManeuverEvent;
 import com.orbitvisualizationengine.server.dto.diagnostics.ForceContribution;
 import com.orbitvisualizationengine.server.dto.diagnostics.ForceDiagnosticsSample;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
-import java.util.Map;
 import java.util.function.Supplier;
 import org.hipparchus.geometry.euclidean.threed.Vector3D;
 import org.hipparchus.ode.nonstiff.DormandPrince853Integrator;
-import org.orekit.attitudes.AttitudeProvider;
-import org.orekit.attitudes.LofOffset;
 import org.orekit.bodies.CelestialBodyFactory;
 import org.orekit.forces.ForceModel;
 import org.orekit.forces.drag.DragForce;
@@ -21,11 +16,9 @@ import org.orekit.forces.drag.IsotropicDrag;
 import org.orekit.forces.gravity.HolmesFeatherstoneAttractionModel;
 import org.orekit.forces.gravity.ThirdBodyAttraction;
 import org.orekit.forces.gravity.potential.GravityFieldFactory;
-import org.orekit.forces.maneuvers.ConstantThrustManeuver;
 import org.orekit.forces.radiation.IsotropicRadiationSingleCoefficient;
 import org.orekit.forces.radiation.SolarRadiationPressure;
 import org.orekit.frames.Frame;
-import org.orekit.frames.LOFType;
 import org.orekit.models.earth.atmosphere.NRLMSISE00;
 import org.orekit.models.earth.atmosphere.data.CssiSpaceWeatherData;
 import org.orekit.orbits.CartesianOrbit;
@@ -48,9 +41,20 @@ public class NumericalPropagator implements OrbitPropagator {
       new PropagationCapabilities(true, true, true, true);
 
   private final OrekitEnvironment orekit;
+  private final OrekitManeuverFactory maneuverFactory;
+  private final LegacyManeuverCommandAdapter legacyManeuverCommandAdapter;
 
   public NumericalPropagator(OrekitEnvironment orekit) {
+    this(orekit, new OrekitManeuverFactory(orekit), new LegacyManeuverCommandAdapter());
+  }
+
+  public NumericalPropagator(
+      OrekitEnvironment orekit,
+      OrekitManeuverFactory maneuverFactory,
+      LegacyManeuverCommandAdapter legacyManeuverCommandAdapter) {
     this.orekit = orekit;
+    this.maneuverFactory = maneuverFactory;
+    this.legacyManeuverCommandAdapter = legacyManeuverCommandAdapter;
   }
 
   @Override
@@ -176,7 +180,13 @@ public class NumericalPropagator implements OrbitPropagator {
     if (config.maneuverModelEnabled()) {
       context.maneuvers().stream()
           .filter(maneuver -> maneuver.durationSec() > 0)
-          .map(maneuver -> thrustManeuver(context, maneuver))
+          .map(maneuver -> legacyManeuverCommandAdapter.fromLegacy(maneuver, context.spacecraft()))
+          .map(maneuverFactory::constantThrust)
+          .forEach(models::add);
+      context.maneuverCommands().stream()
+          .filter(PropagationManeuverCommand::enabled)
+          .filter(command -> command.durationSeconds() > 0)
+          .map(maneuverFactory::constantThrust)
           .forEach(models::add);
     }
 
@@ -222,48 +232,6 @@ public class NumericalPropagator implements OrbitPropagator {
         new double[] {total.getX(), total.getY(), total.getZ()},
         totalNorm,
         contributions);
-  }
-
-  private ConstantThrustManeuver thrustManeuver(PropagationContext context, ManeuverEvent maneuver) {
-    Vector3D direction = thrustDirection(maneuver.vector());
-    double thrust = numericMetadata(maneuver, "thrustN", context.spacecraft().nominalThrustN());
-    double isp = numericMetadata(maneuver, "ispS", context.spacecraft().nominalIspS());
-    AttitudeProvider attitude = attitudeProvider(maneuver.frame());
-    return new ConstantThrustManeuver(
-        OrekitStateMapper.toAbsoluteDate(maneuver.eventTime()),
-        maneuver.durationSec(),
-        thrust,
-        isp,
-        attitude,
-        direction,
-        "burn-" + maneuver.id());
-  }
-
-  private AttitudeProvider attitudeProvider(String frame) {
-    String normalized = frame == null ? "" : frame.trim().toUpperCase(Locale.ROOT);
-    if ("RTN".equals(normalized) || "RSW".equals(normalized) || "QSW".equals(normalized)) {
-      return new LofOffset(orekit.eme2000(), LOFType.QSW);
-    }
-    if ("TNW".equals(normalized) || "VNC".equals(normalized)) {
-      return new LofOffset(orekit.eme2000(), LOFType.TNW);
-    }
-    if ("LVLH".equals(normalized)) {
-      return new LofOffset(orekit.eme2000(), LOFType.LVLH);
-    }
-    return new LofOffset(orekit.eme2000(), LOFType.QSW);
-  }
-
-  private Vector3D thrustDirection(Map<String, Double> vector) {
-    Vector3D raw = new Vector3D(
-        vector.getOrDefault("r", vector.getOrDefault("x", 0.0)),
-        vector.getOrDefault("t", vector.getOrDefault("y", 1.0)),
-        vector.getOrDefault("n", vector.getOrDefault("z", 0.0)));
-    return raw.getNorm() == 0.0 ? Vector3D.PLUS_J : raw.normalize();
-  }
-
-  private double numericMetadata(ManeuverEvent maneuver, String key, double fallback) {
-    Object value = maneuver.metadata().get(key);
-    return value instanceof Number number ? number.doubleValue() : fallback;
   }
 
   private void addRequired(List<ForceModel> models, String label, Supplier<ForceModel> supplier) {

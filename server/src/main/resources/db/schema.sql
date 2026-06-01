@@ -142,7 +142,7 @@ create table if not exists mission_timeline_events (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint mission_timeline_sequence_nonnegative check (sequence_index >= 0),
-  constraint mission_timeline_type_valid check (type in ('COAST', 'IMPULSIVE_BURN', 'VECTOR_BURN', 'FINITE_BURN'))
+  constraint mission_timeline_type_valid check (type in ('COAST', 'IMPULSIVE_BURN', 'VECTOR_BURN', 'FINITE_BURN', 'STATION_KEEPING', 'PLANE_CHANGE', 'HOHMANN_TRANSFER'))
 );
 
 create unique index if not exists mission_timeline_events_mission_sequence_unique
@@ -177,14 +177,10 @@ begin
     alter table mission_timeline_events
       add constraint mission_timeline_sequence_nonnegative check (sequence_index >= 0);
   end if;
-  if not exists (
-    select 1 from pg_constraint
-    where conname = 'mission_timeline_type_valid'
-      and conrelid = 'mission_timeline_events'::regclass
-  ) then
-    alter table mission_timeline_events
-      add constraint mission_timeline_type_valid check (type in ('COAST', 'IMPULSIVE_BURN', 'VECTOR_BURN', 'FINITE_BURN'));
-  end if;
+  alter table mission_timeline_events
+    drop constraint if exists mission_timeline_type_valid;
+  alter table mission_timeline_events
+    add constraint mission_timeline_type_valid check (type in ('COAST', 'IMPULSIVE_BURN', 'VECTOR_BURN', 'FINITE_BURN', 'STATION_KEEPING', 'PLANE_CHANGE', 'HOHMANN_TRANSFER'));
 end $$;
 
 create table if not exists conjunctions (

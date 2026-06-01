@@ -11,7 +11,17 @@ public record PropagationContext(
     OrbitSeed seed,
     SatelliteAnalysisConfig analysisConfig,
     SpacecraftModel spacecraft,
-    List<ManeuverEvent> maneuvers) {
+    List<ManeuverEvent> maneuvers,
+    List<PropagationManeuverCommand> maneuverCommands) {
+
+  public PropagationContext(
+      int noradId,
+      OrbitSeed seed,
+      SatelliteAnalysisConfig analysisConfig,
+      SpacecraftModel spacecraft,
+      List<ManeuverEvent> maneuvers) {
+    this(noradId, seed, analysisConfig, spacecraft, maneuvers, List.of());
+  }
 
   public PropagationContext(
       int noradId,
@@ -19,7 +29,11 @@ public record PropagationContext(
       SatelliteAnalysisConfig analysisConfig,
       SpacecraftModel spacecraft,
       List<ManeuverEvent> maneuvers) {
-    this(noradId, OrbitSeed.tle(tle), analysisConfig, spacecraft, maneuvers);
+    this(noradId, OrbitSeed.tle(tle), analysisConfig, spacecraft, maneuvers, List.of());
+  }
+
+  public PropagationContext withManeuverCommands(List<PropagationManeuverCommand> commands) {
+    return new PropagationContext(noradId, seed, analysisConfig, spacecraft, maneuvers, commands);
   }
 
   public TLE tle() {

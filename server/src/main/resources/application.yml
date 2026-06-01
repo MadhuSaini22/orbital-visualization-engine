@@ -23,3 +23,4 @@ orbit:
   orekit-data-path: ${OREKIT_DATA_PATH:}
   ingestion-enabled: ${INGESTION_ENABLED:false}
   cors-origin-pattern: ${CORS_ORIGIN_PATTERN:http://localhost:*}
+  mission-timeline-propagation-enabled: ${MISSION_TIMELINE_PROPAGATION_ENABLED:false}
