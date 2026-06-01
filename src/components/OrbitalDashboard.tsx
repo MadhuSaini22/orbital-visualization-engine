@@ -15,6 +15,11 @@ import { parseSatelliteSource } from "@/domain/satelliteConfig";
 import { MAX_TLE_OBJECTS } from "@/domain/tle";
 import { distanceBetweenOrbitStatesKm } from "@/geometry/distance";
 import { formatNumber, formatUtc } from "@/geometry/format";
+import {
+  dateTimeLocalUtcInputToIso,
+  isValidUtcDateTimeLocalInput,
+  utcIsoToDateTimeLocalInput,
+} from "@/geometry/utcDateTime";
 import { SatelliteJsPropagator } from "@/propagation/SatelliteJsPropagator";
 import {
   applyAnalysisPreset,
@@ -474,7 +479,7 @@ function timelineDraftFromEvent(event: BackendMissionTimelineEvent): TimelineEdi
   return {
     type: event.type === "COAST" ? "COAST" : "FINITE_BURN",
     name: event.name,
-    executionUtc: toDateTimeLocal(event.executionTime),
+    executionUtc: utcIsoToDateTimeLocalInput(event.executionTime, initialSimulationTime.toISOString()),
     durationSeconds: String(readNumberParameter(parameters, "durationSeconds", 120)),
     thrustNewton: String(readNumberParameter(parameters, "thrustNewton", 0.2)),
     ispSeconds: String(readNumberParameter(parameters, "ispSeconds", 220)),
@@ -490,7 +495,7 @@ function buildTimelineRequest(
   sequenceIndex: number,
   enabled: boolean,
 ): CreateTimelineEventRequest {
-  const executionTime = new Date(draft.executionUtc).toISOString();
+  const executionTime = dateTimeLocalUtcInputToIso(draft.executionUtc);
   if (draft.type === "COAST") {
     return {
       sequenceIndex,
@@ -525,7 +530,7 @@ function validateTimelineDraft(draft: TimelineEditorDraft) {
   if (!draft.name.trim()) {
     errors.name = "Required";
   }
-  if (!draft.executionUtc || Number.isNaN(new Date(draft.executionUtc).getTime())) {
+  if (!draft.executionUtc || !isValidUtcDateTimeLocalInput(draft.executionUtc)) {
     errors.executionUtc = "UTC required";
   }
   if (draft.type === "FINITE_BURN") {
@@ -565,11 +570,6 @@ function readNumberParameter(parameters: Record<string, unknown>, key: string, f
 function readStringParameter(parameters: Record<string, unknown>, key: string, fallback: string) {
   const value = parameters[key];
   return typeof value === "string" && value.trim() ? value : fallback;
-}
-
-function toDateTimeLocal(iso: string) {
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? initialSimulationTime.toISOString().slice(0, 16) : date.toISOString().slice(0, 16);
 }
 
 function getConjunctionStatusFromRisk(event: ConjunctionEvent, missDistanceKm: number) {
