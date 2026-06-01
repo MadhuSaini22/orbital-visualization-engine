@@ -115,6 +115,78 @@ create table if not exists maneuvers (
 create index if not exists maneuvers_sat_time_idx
   on maneuvers(norad_id, event_time);
 
+create table if not exists missions (
+  id text primary key,
+  name text not null,
+  propagator_type text not null,
+  scenario_start timestamptz not null,
+  scenario_end timestamptz not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint missions_scenario_window_valid check (scenario_start < scenario_end),
+  constraint missions_propagator_type_valid check (propagator_type in ('TLE_SGP4', 'KEPLERIAN', 'NUMERICAL'))
+);
+
+create index if not exists missions_updated_idx
+  on missions(updated_at desc);
+
+create table if not exists mission_timeline_events (
+  id text primary key,
+  mission_id text not null references missions(id) on delete cascade,
+  sequence_index integer not null,
+  type text not null,
+  name text not null,
+  enabled boolean not null default true,
+  execution_time timestamptz not null,
+  parameters jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint mission_timeline_sequence_nonnegative check (sequence_index >= 0),
+  constraint mission_timeline_type_valid check (type in ('COAST', 'IMPULSIVE_BURN', 'VECTOR_BURN', 'FINITE_BURN'))
+);
+
+create unique index if not exists mission_timeline_events_mission_sequence_unique
+  on mission_timeline_events(mission_id, sequence_index);
+
+create index if not exists mission_timeline_events_mission_time_idx
+  on mission_timeline_events(mission_id, execution_time);
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'missions_scenario_window_valid'
+      and conrelid = 'missions'::regclass
+  ) then
+    alter table missions
+      add constraint missions_scenario_window_valid check (scenario_start < scenario_end);
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'missions_propagator_type_valid'
+      and conrelid = 'missions'::regclass
+  ) then
+    alter table missions
+      add constraint missions_propagator_type_valid check (propagator_type in ('TLE_SGP4', 'KEPLERIAN', 'NUMERICAL'));
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'mission_timeline_sequence_nonnegative'
+      and conrelid = 'mission_timeline_events'::regclass
+  ) then
+    alter table mission_timeline_events
+      add constraint mission_timeline_sequence_nonnegative check (sequence_index >= 0);
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'mission_timeline_type_valid'
+      and conrelid = 'mission_timeline_events'::regclass
+  ) then
+    alter table mission_timeline_events
+      add constraint mission_timeline_type_valid check (type in ('COAST', 'IMPULSIVE_BURN', 'VECTOR_BURN', 'FINITE_BURN'));
+  end if;
+end $$;
+
 create table if not exists conjunctions (
   id text primary key,
   sat1_norad_id integer,
