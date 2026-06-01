@@ -132,13 +132,17 @@ public class OrekitOrbitAnalysisService implements OrbitAnalysisService {
   }
 
   private PropagationContext buildContext(int noradId) {
+    return buildContext(noradId, true);
+  }
+
+  public PropagationContext buildContext(int noradId, boolean includeLegacyManeuvers) {
     SatelliteAnalysisConfig config = analysisConfigService.getOrCreate(noradId);
     return new PropagationContext(
         noradId,
         loadTle(noradId),
         config,
         SpacecraftModel.fromConfig(config),
-        maneuvers.findByNoradId(noradId));
+        includeLegacyManeuvers ? maneuvers.findByNoradId(noradId) : List.of());
   }
 
   private OrbitPropagator selectPropagator(PropagatorType type) {

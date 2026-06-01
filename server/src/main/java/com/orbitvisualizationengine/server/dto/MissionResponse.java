@@ -7,6 +7,7 @@ import java.time.Instant;
 public record MissionResponse(
     String id,
     String name,
+    Integer subjectNoradId,
     PropagatorType propagatorType,
     Instant scenarioStart,
     Instant scenarioEnd,
@@ -17,6 +18,7 @@ public record MissionResponse(
     return new MissionResponse(
         mission.id(),
         mission.name(),
+        mission.subjectNoradId(),
         mission.propagatorType(),
         mission.scenarioStart(),
         mission.scenarioEnd(),

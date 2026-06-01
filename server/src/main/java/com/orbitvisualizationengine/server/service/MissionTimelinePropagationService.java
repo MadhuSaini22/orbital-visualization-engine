@@ -30,6 +30,10 @@ public class MissionTimelinePropagationService {
     if (!properties.missionTimelinePropagationEnabled()) {
       return List.of();
     }
+    return requiredCommandsForMission(missionId);
+  }
+
+  public List<PropagationManeuverCommand> requiredCommandsForMission(String missionId) {
     missions.get(missionId);
     List<MissionTimelineEvent> events = timelineEvents.findByMissionId(missionId);
     return timelineExecutor.toPropagationCommands(events);

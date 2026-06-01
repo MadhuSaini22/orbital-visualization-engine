@@ -118,6 +118,7 @@ create index if not exists maneuvers_sat_time_idx
 create table if not exists missions (
   id text primary key,
   name text not null,
+  subject_norad_id integer references satellites(norad_id) on delete restrict,
   propagator_type text not null,
   scenario_start timestamptz not null,
   scenario_end timestamptz not null,
@@ -153,6 +154,8 @@ create index if not exists mission_timeline_events_mission_time_idx
 
 do $$
 begin
+  alter table missions
+    add column if not exists subject_norad_id integer references satellites(norad_id) on delete restrict;
   if not exists (
     select 1 from pg_constraint
     where conname = 'missions_scenario_window_valid'

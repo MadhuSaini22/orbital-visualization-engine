@@ -24,6 +24,7 @@ public class MissionService {
     return missions.save(new Mission(
         "mission-" + UUID.randomUUID(),
         request.name().trim(),
+        request.subjectNoradId(),
         request.propagatorType(),
         request.scenarioStart(),
         request.scenarioEnd(),

@@ -2,12 +2,16 @@ package com.orbitvisualizationengine.server.api;
 
 import com.orbitvisualizationengine.server.dto.CreateMissionRequest;
 import com.orbitvisualizationengine.server.dto.CreateTimelineEventRequest;
+import com.orbitvisualizationengine.server.dto.MissionTrajectoryRequest;
 import com.orbitvisualizationengine.server.dto.MissionResponse;
 import com.orbitvisualizationengine.server.dto.MissionTimelineEventResponse;
+import com.orbitvisualizationengine.server.dto.PropagationResponse;
 import com.orbitvisualizationengine.server.dto.ReorderTimelineRequest;
 import com.orbitvisualizationengine.server.dto.UpdateTimelineEventRequest;
+import com.orbitvisualizationengine.server.service.AnalysisConfigService;
 import com.orbitvisualizationengine.server.service.MissionService;
 import com.orbitvisualizationengine.server.service.MissionTimelineService;
+import com.orbitvisualizationengine.server.service.MissionTrajectoryService;
 import jakarta.validation.Valid;
 import java.util.List;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -24,10 +28,18 @@ import org.springframework.web.bind.annotation.RestController;
 public class MissionController {
   private final MissionService missions;
   private final MissionTimelineService timeline;
+  private final MissionTrajectoryService trajectories;
+  private final AnalysisConfigService analysisConfigService;
 
-  public MissionController(MissionService missions, MissionTimelineService timeline) {
+  public MissionController(
+      MissionService missions,
+      MissionTimelineService timeline,
+      MissionTrajectoryService trajectories,
+      AnalysisConfigService analysisConfigService) {
     this.missions = missions;
     this.timeline = timeline;
+    this.trajectories = trajectories;
+    this.analysisConfigService = analysisConfigService;
   }
 
   @PostMapping
@@ -91,5 +103,21 @@ public class MissionController {
   @PostMapping("/{missionId}/timeline/events/{eventId}/disable")
   MissionTimelineEventResponse disableEvent(@PathVariable String missionId, @PathVariable String eventId) {
     return MissionTimelineEventResponse.from(timeline.setEnabled(missionId, eventId, false));
+  }
+
+  @PostMapping("/{missionId}/trajectory")
+  PropagationResponse trajectory(
+      @PathVariable String missionId,
+      @Valid @RequestBody MissionTrajectoryRequest request) {
+    var states = trajectories.trajectory(missionId, request);
+    var mission = missions.get(missionId);
+    var config = analysisConfigService.get(mission.subjectNoradId());
+    return new PropagationResponse(
+        mission.subjectNoradId(),
+        "OREKIT_NUMERICAL",
+        "ITRF",
+        config.config(),
+        config.warnings(),
+        states);
   }
 }
