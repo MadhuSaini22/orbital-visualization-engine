@@ -831,6 +831,13 @@ export function OrbitalDashboard() {
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
   const selectedNoradId = activeDataSource === "manual" ? null : selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? null;
   const canUseAnalysisConfig = activeDataSource === "backend" && Boolean(selectedNoradId);
+  const missionTimelineUnavailableReason = canUseAnalysisConfig
+    ? null
+    : activeDataSource === "manual"
+      ? "Mission planning currently requires a backend catalog orbit. Manual orbit mission binding is not wired yet."
+      : activeDataSource === "endpoint"
+        ? "Mission planning currently requires a backend catalog orbit. Imported TLEs run locally in the browser."
+        : "Load a backend catalog orbit to create a mission timeline.";
   const canUseRangeCheck = satellites.length >= 2;
   const canShowManeuvers = maneuverSnapshots.length > 0;
   const canShowConjunctions = satellites.length >= 2 && conjunctionSnapshots.length > 0;
@@ -2073,11 +2080,13 @@ export function OrbitalDashboard() {
           selectedEventId={selectedTimelineEvent?.id ?? null}
           status={timelineStatus}
           canUseMissionTimeline={canUseAnalysisConfig}
+          unavailableReason={missionTimelineUnavailableReason}
           isTrajectoryLoading={isMissionTrajectoryLoading}
           showComparison={showMissionComparison}
           trajectoryOverlay={missionTrajectoryOverlay}
           dragEventId={timelineDragEventId}
           onInitializeMission={initializeMissionTimeline}
+          onOpenCatalog={() => openOrbitSource("catalog")}
           onCreateEvent={openCreateTimelineModal}
           onEditEvent={openEditTimelineModal}
           onDeleteEvent={deleteTimelineEvent}
@@ -3186,11 +3195,13 @@ function MissionTimelinePanel({
   selectedEventId,
   status,
   canUseMissionTimeline,
+  unavailableReason,
   isTrajectoryLoading,
   showComparison,
   trajectoryOverlay,
   dragEventId,
   onInitializeMission,
+  onOpenCatalog,
   onCreateEvent,
   onEditEvent,
   onDeleteEvent,
@@ -3206,11 +3217,13 @@ function MissionTimelinePanel({
   selectedEventId: string | null;
   status: string | null;
   canUseMissionTimeline: boolean;
+  unavailableReason: string | null;
   isTrajectoryLoading: boolean;
   showComparison: boolean;
   trajectoryOverlay: MissionTrajectoryOverlay | null;
   dragEventId: string | null;
   onInitializeMission: () => void;
+  onOpenCatalog: () => void;
   onCreateEvent: (type?: TimelineEditorDraft["type"]) => void;
   onEditEvent: (event: BackendMissionTimelineEvent) => void;
   onDeleteEvent: (event: BackendMissionTimelineEvent) => void;
@@ -3229,14 +3242,25 @@ function MissionTimelinePanel({
           <p className="mt-1 font-mono text-[10px] text-zinc-500">{mission ? mission.name : "No mission"}</p>
         </div>
         {!mission ? (
-          <button
-            type="button"
-            disabled={!canUseMissionTimeline}
-            onClick={onInitializeMission}
-            className="border border-emerald-300/50 px-3 py-1.5 font-mono text-[10px] uppercase text-emerald-100 transition hover:border-emerald-300 hover:bg-emerald-300/10 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-zinc-600"
-          >
-            New
-          </button>
+          <div className="flex items-center gap-1.5">
+            {!canUseMissionTimeline && (
+              <button
+                type="button"
+                onClick={onOpenCatalog}
+                className="border border-cyan-300/45 px-3 py-1.5 font-mono text-[10px] uppercase text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-300/10"
+              >
+                Catalog
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={!canUseMissionTimeline}
+              onClick={onInitializeMission}
+              className="border border-emerald-300/50 px-3 py-1.5 font-mono text-[10px] uppercase text-emerald-100 transition hover:border-emerald-300 hover:bg-emerald-300/10 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-zinc-600"
+            >
+              Create Mission
+            </button>
+          </div>
         ) : (
           <div className="flex items-center gap-1.5">
             <button
@@ -3256,6 +3280,18 @@ function MissionTimelinePanel({
           </div>
         )}
       </div>
+
+      {!mission && (
+        <div className={`mt-3 border px-3 py-2 text-xs leading-5 ${
+          canUseMissionTimeline
+            ? "border-emerald-300/20 bg-emerald-300/[0.04] text-emerald-100"
+            : "border-amber-300/20 bg-amber-300/[0.04] text-amber-100"
+        }`}>
+          {canUseMissionTimeline
+            ? "Create a mission for this catalog orbit, then add Coast and Finite Burn events."
+            : unavailableReason}
+        </div>
+      )}
 
       <div className="mt-3 overflow-hidden border border-white/10 bg-black/25">
         <div className="flex items-center gap-1 overflow-x-auto px-3 py-2">

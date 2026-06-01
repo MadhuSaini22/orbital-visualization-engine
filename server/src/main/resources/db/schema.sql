@@ -152,39 +152,32 @@ create unique index if not exists mission_timeline_events_mission_sequence_uniqu
 create index if not exists mission_timeline_events_mission_time_idx
   on mission_timeline_events(mission_id, execution_time);
 
-do $$
-begin
-  alter table missions
-    add column if not exists subject_norad_id integer references satellites(norad_id) on delete restrict;
-  if not exists (
-    select 1 from pg_constraint
-    where conname = 'missions_scenario_window_valid'
-      and conrelid = 'missions'::regclass
-  ) then
-    alter table missions
-      add constraint missions_scenario_window_valid check (scenario_start < scenario_end);
-  end if;
-  if not exists (
-    select 1 from pg_constraint
-    where conname = 'missions_propagator_type_valid'
-      and conrelid = 'missions'::regclass
-  ) then
-    alter table missions
-      add constraint missions_propagator_type_valid check (propagator_type in ('TLE_SGP4', 'KEPLERIAN', 'NUMERICAL'));
-  end if;
-  if not exists (
-    select 1 from pg_constraint
-    where conname = 'mission_timeline_sequence_nonnegative'
-      and conrelid = 'mission_timeline_events'::regclass
-  ) then
-    alter table mission_timeline_events
-      add constraint mission_timeline_sequence_nonnegative check (sequence_index >= 0);
-  end if;
-  alter table mission_timeline_events
-    drop constraint if exists mission_timeline_type_valid;
-  alter table mission_timeline_events
-    add constraint mission_timeline_type_valid check (type in ('COAST', 'IMPULSIVE_BURN', 'VECTOR_BURN', 'FINITE_BURN', 'STATION_KEEPING', 'PLANE_CHANGE', 'HOHMANN_TRANSFER'));
-end $$;
+alter table missions
+  add column if not exists subject_norad_id integer references satellites(norad_id) on delete restrict;
+
+alter table missions
+  drop constraint if exists missions_scenario_window_valid;
+
+alter table missions
+  add constraint missions_scenario_window_valid check (scenario_start < scenario_end);
+
+alter table missions
+  drop constraint if exists missions_propagator_type_valid;
+
+alter table missions
+  add constraint missions_propagator_type_valid check (propagator_type in ('TLE_SGP4', 'KEPLERIAN', 'NUMERICAL'));
+
+alter table mission_timeline_events
+  drop constraint if exists mission_timeline_sequence_nonnegative;
+
+alter table mission_timeline_events
+  add constraint mission_timeline_sequence_nonnegative check (sequence_index >= 0);
+
+alter table mission_timeline_events
+  drop constraint if exists mission_timeline_type_valid;
+
+alter table mission_timeline_events
+  add constraint mission_timeline_type_valid check (type in ('COAST', 'IMPULSIVE_BURN', 'VECTOR_BURN', 'FINITE_BURN', 'STATION_KEEPING', 'PLANE_CHANGE', 'HOHMANN_TRANSFER'));
 
 create table if not exists conjunctions (
   id text primary key,
