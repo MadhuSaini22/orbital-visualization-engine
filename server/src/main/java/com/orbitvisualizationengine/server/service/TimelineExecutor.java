@@ -23,6 +23,7 @@ public class TimelineExecutor {
     return events.stream()
         .sorted(Comparator.comparingInt(MissionTimelineEvent::sequenceIndex))
         .filter(MissionTimelineEvent::enabled)
+        .filter(event -> event.type() != TimelineEventType.COAST)
         .map(this::toPropagationCommand)
         .toList();
   }

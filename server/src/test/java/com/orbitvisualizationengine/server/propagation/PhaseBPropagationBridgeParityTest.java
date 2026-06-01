@@ -66,6 +66,13 @@ class PhaseBPropagationBridgeParityTest {
   }
 
   @Test
+  void coastTimelineEventsArePropagationNoOps() {
+    TimelineExecutor executor = new TimelineExecutor(new MissionTimelineValidator());
+
+    assertEquals(List.of(), executor.toPropagationCommands(List.of(timelineEvent(TimelineEventType.COAST, true))));
+  }
+
+  @Test
   void legacyAndTimelinePathsGenerateEquivalentForceModelsAndTrajectories() {
     OrekitTestDataLoader.ensureLoaded();
     OrekitEnvironment environment = new OrekitEnvironment();

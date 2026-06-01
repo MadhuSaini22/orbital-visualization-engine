@@ -117,7 +117,51 @@ export type BackendPropagationResponse = {
 export type AnalysisPresetId = "FAST_PREVIEW" | "OPERATIONAL_REVIEW" | "HIGH_FIDELITY" | "MANEUVER_PLANNING";
 
 export type PropagatorTypeId = "TLE_SGP4" | "KEPLERIAN" | "NUMERICAL";
+export type MissionTimelineEventType = "COAST" | "FINITE_BURN" | "IMPULSIVE_BURN" | "VECTOR_BURN" | "STATION_KEEPING" | "PLANE_CHANGE" | "HOHMANN_TRANSFER";
 export type ManualOrbitType = "TLE" | "CLASSICAL_ELEMENTS" | "CARTESIAN_STATE";
+
+export type BackendMission = {
+  id: string;
+  name: string;
+  subjectNoradId: number | null;
+  propagatorType: PropagatorTypeId;
+  scenarioStart: string;
+  scenarioEnd: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type BackendMissionTimelineEvent = {
+  id: string;
+  missionId: string;
+  sequenceIndex: number;
+  type: MissionTimelineEventType;
+  name: string;
+  enabled: boolean;
+  executionTime: string;
+  parameters: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateMissionRequest = {
+  name: string;
+  subjectNoradId?: number;
+  propagatorType: PropagatorTypeId;
+  scenarioStart: string;
+  scenarioEnd: string;
+};
+
+export type CreateTimelineEventRequest = {
+  sequenceIndex: number;
+  type: "COAST" | "FINITE_BURN";
+  name: string;
+  enabled: boolean;
+  executionTime: string;
+  parameters: Record<string, unknown>;
+};
+
+export type UpdateTimelineEventRequest = Partial<CreateTimelineEventRequest>;
 
 export type BackendAnalysisConfig = {
   noradId: number;
@@ -216,6 +260,90 @@ export async function fetchOrbitTrajectory(
     to,
     stepSeconds,
   }, init);
+}
+
+export async function fetchMissions() {
+  return fetchJson<BackendMission[]>("/api/missions");
+}
+
+export async function createMission(request: CreateMissionRequest) {
+  return fetchJson<BackendMission>("/api/missions", {}, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function fetchMissionTimelineEvents(missionId: string) {
+  return fetchJson<BackendMissionTimelineEvent[]>(`/api/missions/${missionId}/timeline/events`);
+}
+
+export async function createMissionTimelineEvent(missionId: string, request: CreateTimelineEventRequest) {
+  return fetchJson<BackendMissionTimelineEvent>(`/api/missions/${missionId}/timeline/events`, {}, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function updateMissionTimelineEvent(
+  missionId: string,
+  eventId: string,
+  request: UpdateTimelineEventRequest,
+) {
+  return fetchJson<BackendMissionTimelineEvent>(`/api/missions/${missionId}/timeline/events/${eventId}`, {}, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function deleteMissionTimelineEvent(missionId: string, eventId: string) {
+  return fetchJson<void>(`/api/missions/${missionId}/timeline/events/${eventId}`, {}, {
+    method: "DELETE",
+  });
+}
+
+export async function reorderMissionTimelineEvents(missionId: string, eventIds: string[]) {
+  return fetchJson<BackendMissionTimelineEvent[]>(`/api/missions/${missionId}/timeline/events/reorder`, {}, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ eventIds }),
+  });
+}
+
+export async function setMissionTimelineEventEnabled(missionId: string, eventId: string, enabled: boolean) {
+  return fetchJson<BackendMissionTimelineEvent>(`/api/missions/${missionId}/timeline/events/${eventId}/${enabled ? "enable" : "disable"}`, {}, {
+    method: "POST",
+  });
+}
+
+export async function fetchMissionTrajectory(
+  missionId: string,
+  startTime: string,
+  endTime: string,
+  stepSeconds: number,
+) {
+  return fetchJson<BackendPropagationResponse>(`/api/missions/${missionId}/trajectory`, {}, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      missionId,
+      startTime,
+      endTime,
+      stepSeconds,
+    }),
+  });
 }
 
 export async function createManualOrbit(request: CreateManualOrbitRequest) {

@@ -19,24 +19,36 @@ import { SatelliteJsPropagator } from "@/propagation/SatelliteJsPropagator";
 import {
   applyAnalysisPreset,
   createManualOrbit,
+  createMission,
+  createMissionTimelineEvent,
+  deleteMissionTimelineEvent,
   fetchCatalogGroupTle,
   fetchAnalysisConfig,
   fetchConjunctions,
   fetchCurrentOrbitState,
+  fetchMissionTimelineEvents,
+  fetchMissionTrajectory,
+  fetchMissions,
   fetchManualOrbitState,
   fetchManualOrbitTrajectory,
   fetchManeuvers,
   fetchOrbitTrajectory,
   refreshConjunctions,
+  reorderMissionTimelineEvents,
   setAnalysisMode,
+  setMissionTimelineEventEnabled,
+  updateMissionTimelineEvent,
 } from "@/services/orbitServerApi";
 import type {
   AnalysisPresetId,
+  BackendMission,
+  BackendMissionTimelineEvent,
   BackendManualOrbitResponse,
   BackendAnalysisConfigResponse,
   BackendConjunctionRecord,
   BackendEphemerisState,
   BackendManeuverEvent,
+  CreateTimelineEventRequest,
   CreateManualOrbitRequest,
   ManualOrbitType,
   PropagatorTypeId,
@@ -60,6 +72,25 @@ type ManeuverFocusRequest = {
 type FrameMode = "earth-fixed" | "inertial";
 type OrbitSourceId = "catalog" | "tle" | "classical" | "cartesian";
 type TleImportMode = "paste" | "upload" | "url";
+type TimelineModalMode = "create" | "edit";
+type TimelineEditorDraft = {
+  type: "COAST" | "FINITE_BURN";
+  name: string;
+  executionUtc: string;
+  durationSeconds: string;
+  thrustNewton: string;
+  ispSeconds: string;
+  directionFrame: "TNW" | "QSW" | "LVLH" | "RTN";
+  directionX: string;
+  directionY: string;
+  directionZ: string;
+};
+type MissionTrajectoryOverlay = {
+  mission: SatelliteSnapshot | null;
+  legacy: SatelliteSnapshot | null;
+  generatedAt: string;
+  message: string;
+};
 
 const catalogGroupOptions = [
   { id: "STATIONS", label: "Stations" },
@@ -85,6 +116,7 @@ const speedPresetOptions = [
 ] as const;
 const maneuverWindowMinutes = 45;
 const conjunctionStepSec = 120;
+const defaultMissionTrajectoryWindowMinutes = 90;
 const analysisPresetOptions = [
   { id: "FAST_PREVIEW", label: "Fast" },
   { id: "OPERATIONAL_REVIEW", label: "Ops" },
@@ -100,6 +132,18 @@ const analysisModeOptions = [
   { id: "maneuver", label: "Burn", key: "maneuverModelEnabled" },
 ] satisfies Array<{ id: string; label: string; key: keyof BackendAnalysisConfigResponse["config"] }>;
 type ActiveDataSource = "sample" | "endpoint" | "backend" | "manual";
+const defaultTimelineDraft: TimelineEditorDraft = {
+  type: "FINITE_BURN",
+  name: "Finite Burn",
+  executionUtc: initialSimulationTime.toISOString().slice(0, 16),
+  durationSeconds: "120",
+  thrustNewton: "0.2",
+  ispSeconds: "220",
+  directionFrame: "TNW",
+  directionX: "1",
+  directionY: "0",
+  directionZ: "0",
+};
 const groundTrackRangeOptions = [
   {
     id: "live",
@@ -393,6 +437,141 @@ function normalizeBackendConjunctions(raw: BackendConjunctionRecord[]): Conjunct
   });
 }
 
+function missionOverlaySatellite(base: SatelliteObject, mode: "mission" | "legacy"): SatelliteObject {
+  return {
+    ...base,
+    id: `${base.id}-${mode}-trajectory`,
+    name: mode === "mission" ? `${base.name} Mission` : `${base.name} Legacy`,
+    sourceType: "EPHEMERIS",
+    visual: {
+      showMarker: false,
+      showLabel: false,
+      showOrbit: true,
+      showGroundTrack: false,
+      showTrail: false,
+    },
+    metadata: {
+      ...base.metadata,
+      mission: mode === "mission" ? "mission timeline preview" : "legacy trajectory comparison",
+    },
+  };
+}
+
+function buildTrajectorySnapshot(satellite: SatelliteObject, states: BackendEphemerisState[], centerTime: Date): SatelliteSnapshot {
+  const trajectory = states.map((state) => backendStateToOrbitState(satellite.id, state));
+  return {
+    satellite,
+    state: null,
+    trajectory,
+    futureTrajectory: trajectory.filter((state) => new Date(state.timeUtc) >= centerTime),
+    pastTrail: trajectory.filter((state) => new Date(state.timeUtc) <= centerTime),
+    groundTrack: trajectory,
+  };
+}
+
+function timelineDraftFromEvent(event: BackendMissionTimelineEvent): TimelineEditorDraft {
+  const parameters = event.parameters ?? {};
+  return {
+    type: event.type === "COAST" ? "COAST" : "FINITE_BURN",
+    name: event.name,
+    executionUtc: toDateTimeLocal(event.executionTime),
+    durationSeconds: String(readNumberParameter(parameters, "durationSeconds", 120)),
+    thrustNewton: String(readNumberParameter(parameters, "thrustNewton", 0.2)),
+    ispSeconds: String(readNumberParameter(parameters, "ispSeconds", 220)),
+    directionFrame: readStringParameter(parameters, "directionFrame", "TNW") as TimelineEditorDraft["directionFrame"],
+    directionX: String(readNumberParameter(parameters, "directionX", 1)),
+    directionY: String(readNumberParameter(parameters, "directionY", 0)),
+    directionZ: String(readNumberParameter(parameters, "directionZ", 0)),
+  };
+}
+
+function buildTimelineRequest(
+  draft: TimelineEditorDraft,
+  sequenceIndex: number,
+  enabled: boolean,
+): CreateTimelineEventRequest {
+  const executionTime = new Date(draft.executionUtc).toISOString();
+  if (draft.type === "COAST") {
+    return {
+      sequenceIndex,
+      type: "COAST",
+      name: draft.name.trim() || "Coast",
+      enabled,
+      executionTime,
+      parameters: {},
+    };
+  }
+
+  return {
+    sequenceIndex,
+    type: "FINITE_BURN",
+    name: draft.name.trim() || "Finite Burn",
+    enabled,
+    executionTime,
+    parameters: {
+      durationSeconds: Number(draft.durationSeconds),
+      thrustNewton: Number(draft.thrustNewton),
+      ispSeconds: Number(draft.ispSeconds),
+      directionFrame: draft.directionFrame,
+      directionX: Number(draft.directionX),
+      directionY: Number(draft.directionY),
+      directionZ: Number(draft.directionZ),
+    },
+  };
+}
+
+function validateTimelineDraft(draft: TimelineEditorDraft) {
+  const errors: Partial<Record<keyof TimelineEditorDraft, string>> = {};
+  if (!draft.name.trim()) {
+    errors.name = "Required";
+  }
+  if (!draft.executionUtc || Number.isNaN(new Date(draft.executionUtc).getTime())) {
+    errors.executionUtc = "UTC required";
+  }
+  if (draft.type === "FINITE_BURN") {
+    validatePositiveDraftNumber(draft.durationSeconds, "durationSeconds", errors);
+    validatePositiveDraftNumber(draft.thrustNewton, "thrustNewton", errors);
+    validatePositiveDraftNumber(draft.ispSeconds, "ispSeconds", errors);
+    (["directionX", "directionY", "directionZ"] as const).forEach((key) => {
+      const value = Number(draft[key]);
+      if (!Number.isFinite(value)) {
+        errors[key] = "Number required";
+      }
+    });
+  }
+  return errors;
+}
+
+function validatePositiveDraftNumber(
+  value: string,
+  key: keyof TimelineEditorDraft,
+  errors: Partial<Record<keyof TimelineEditorDraft, string>>,
+) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    errors[key] = "Number required";
+    return;
+  }
+  if (parsed <= 0) {
+    errors[key] = "> 0 required";
+  }
+}
+
+function readNumberParameter(parameters: Record<string, unknown>, key: string, fallback: number) {
+  const value = parameters[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function readStringParameter(parameters: Record<string, unknown>, key: string, fallback: string) {
+  const value = parameters[key];
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function toDateTimeLocal(iso: string) {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? initialSimulationTime.toISOString().slice(0, 16) : date.toISOString().slice(0, 16);
+}
+
 function getConjunctionStatusFromRisk(event: ConjunctionEvent, missDistanceKm: number) {
   if (event.risk === "CRITICAL") {
     return "critical" as const;
@@ -439,6 +618,16 @@ export function OrbitalDashboard() {
   const [maneuverEvents, setManeuverEvents] = useState<ManeuverEvent[]>([]);
   const [selectedManeuverId, setSelectedManeuverId] = useState<string | null>(null);
   const [isManeuverModalOpen, setIsManeuverModalOpen] = useState(false);
+  const [mission, setMission] = useState<BackendMission | null>(null);
+  const [missionTimelineEvents, setMissionTimelineEvents] = useState<BackendMissionTimelineEvent[]>([]);
+  const [selectedTimelineEventId, setSelectedTimelineEventId] = useState<string | null>(null);
+  const [timelineModalMode, setTimelineModalMode] = useState<TimelineModalMode | null>(null);
+  const [timelineDraft, setTimelineDraft] = useState<TimelineEditorDraft>(defaultTimelineDraft);
+  const [timelineStatus, setTimelineStatus] = useState<string | null>(null);
+  const [timelineDragEventId, setTimelineDragEventId] = useState<string | null>(null);
+  const [missionTrajectoryOverlay, setMissionTrajectoryOverlay] = useState<MissionTrajectoryOverlay | null>(null);
+  const [showMissionComparison, setShowMissionComparison] = useState(false);
+  const [isMissionTrajectoryLoading, setIsMissionTrajectoryLoading] = useState(false);
   const [showConjunctions, setShowConjunctions] = useState(false);
   const [conjunctionEvents, setConjunctionEvents] = useState<ConjunctionEvent[]>([]);
   const [selectedConjunctionId, setSelectedConjunctionId] = useState<string | null>(null);
@@ -485,9 +674,15 @@ export function OrbitalDashboard() {
     }
     return stateCache.getWindowedSnapshots(trajectoryAnchorTime.toISOString(), trajectoryWindowOptions);
   }, [activeDataSource, serverOrbitSnapshots, stateCache, trajectoryAnchorTime, trajectoryWindowOptions]);
+  const displayOrbitSnapshots = useMemo(() => {
+    const overlays = showMissionComparison && missionTrajectoryOverlay
+      ? [missionTrajectoryOverlay.legacy, missionTrajectoryOverlay.mission].filter((snapshot): snapshot is SatelliteSnapshot => snapshot !== null)
+      : [];
+    return overlays.length > 0 ? [...orbitSnapshots, ...overlays] : orbitSnapshots;
+  }, [missionTrajectoryOverlay, orbitSnapshots, showMissionComparison]);
   const snapshots: SatelliteSnapshot[] = useMemo(() => {
     const simTimeIso = simTime.toISOString();
-    const ephemerisBySatelliteId = new Map(orbitSnapshots.map((snapshot) => [
+    const ephemerisBySatelliteId = new Map(displayOrbitSnapshots.map((snapshot) => [
       snapshot.satellite.id,
       snapshot.trajectory ?? [],
     ]));
@@ -516,7 +711,7 @@ export function OrbitalDashboard() {
         error: fallbackState ? undefined : "Waiting for ephemeris samples.",
       };
     });
-  }, [activeDataSource, orbitSnapshots, propagator, satellites, serverStateBySatelliteId, simTime]);
+  }, [activeDataSource, displayOrbitSnapshots, propagator, satellites, serverStateBySatelliteId, simTime]);
   const groundTrackSnapshots: SatelliteSnapshot[] = useMemo(() => {
     if (isServerDrivenSource(activeDataSource) && serverGroundTrackSnapshots) {
       return serverGroundTrackSnapshots;
@@ -560,6 +755,7 @@ export function OrbitalDashboard() {
     });
   }, [activeDataSource, maneuverEvents, propagator, satellites, serverEventStateByKey, simTime]);
   const selectedManeuver = maneuverSnapshots.find((snapshot) => snapshot.event.id === selectedManeuverId) ?? maneuverSnapshots[0] ?? null;
+  const selectedTimelineEvent = missionTimelineEvents.find((event) => event.id === selectedTimelineEventId) ?? missionTimelineEvents[0] ?? null;
   const conjunctionSnapshots: ConjunctionSnapshot[] = useMemo(() => {
     return conjunctionEvents.flatMap((event): ConjunctionSnapshot[] => {
       const primary = satellites.find((item) => item.id === event.primarySatelliteId || item.noradId === event.primarySatelliteId);
@@ -915,6 +1111,176 @@ export function OrbitalDashboard() {
     setIsSourcePickerOpen(false);
   }, []);
 
+  const refreshMissionTimeline = useCallback(async (missionId: string) => {
+    const events = await fetchMissionTimelineEvents(missionId);
+    setMissionTimelineEvents(events);
+    setSelectedTimelineEventId((current) => events.some((event) => event.id === current) ? current : events[0]?.id ?? null);
+    return events;
+  }, []);
+
+  const initializeMissionTimeline = useCallback(async () => {
+    if (!selectedNoradId || !selectedSnapshot?.satellite) {
+      setTimelineStatus("Select a backend catalog satellite first.");
+      return;
+    }
+
+    setTimelineStatus("Creating mission timeline...");
+    try {
+      const start = addMinutes(simTimeRef.current, -defaultMissionTrajectoryWindowMinutes);
+      const end = addMinutes(simTimeRef.current, defaultMissionTrajectoryWindowMinutes);
+      const created = await createMission({
+        name: `${selectedSnapshot.satellite.name} Mission`,
+        subjectNoradId: Number(selectedNoradId),
+        propagatorType: "NUMERICAL",
+        scenarioStart: start.toISOString(),
+        scenarioEnd: end.toISOString(),
+      });
+      setMission(created);
+      await refreshMissionTimeline(created.id);
+      setTimelineStatus("Mission timeline initialized.");
+    } catch (error) {
+      setTimelineStatus(error instanceof Error ? error.message : "Unable to initialize mission timeline.");
+    }
+  }, [refreshMissionTimeline, selectedNoradId, selectedSnapshot]);
+
+  const openCreateTimelineModal = useCallback((type: TimelineEditorDraft["type"] = "FINITE_BURN") => {
+    setTimelineDraft({
+      ...defaultTimelineDraft,
+      type,
+      name: type === "COAST" ? "Coast" : "Finite Burn",
+      executionUtc: simTimeRef.current.toISOString().slice(0, 16),
+    });
+    setTimelineModalMode("create");
+  }, []);
+
+  const openEditTimelineModal = useCallback((event: BackendMissionTimelineEvent) => {
+    setTimelineDraft(timelineDraftFromEvent(event));
+    setSelectedTimelineEventId(event.id);
+    setTimelineModalMode("edit");
+  }, []);
+
+  const saveTimelineEvent = useCallback(async () => {
+    if (!mission) {
+      setTimelineStatus("Initialize a mission before editing the timeline.");
+      return;
+    }
+
+    const errors = validateTimelineDraft(timelineDraft);
+    if (Object.keys(errors).length > 0) {
+      setTimelineStatus(Object.values(errors)[0] ?? "Fix timeline event fields.");
+      return;
+    }
+
+    setTimelineStatus("Saving timeline event...");
+    try {
+      if (timelineModalMode === "edit" && selectedTimelineEvent) {
+        const request = buildTimelineRequest(timelineDraft, selectedTimelineEvent.sequenceIndex, selectedTimelineEvent.enabled);
+        await updateMissionTimelineEvent(mission.id, selectedTimelineEvent.id, request);
+      } else {
+        const request = buildTimelineRequest(timelineDraft, missionTimelineEvents.length, true);
+        await createMissionTimelineEvent(mission.id, request);
+      }
+      await refreshMissionTimeline(mission.id);
+      setTimelineModalMode(null);
+      setMissionTrajectoryOverlay(null);
+      setTimelineStatus("Timeline saved.");
+    } catch (error) {
+      setTimelineStatus(error instanceof Error ? error.message : "Unable to save timeline event.");
+    }
+  }, [mission, missionTimelineEvents.length, refreshMissionTimeline, selectedTimelineEvent, timelineDraft, timelineModalMode]);
+
+  const deleteTimelineEvent = useCallback(async (event: BackendMissionTimelineEvent) => {
+    if (!mission) {
+      return;
+    }
+    setTimelineStatus("Deleting timeline event...");
+    try {
+      await deleteMissionTimelineEvent(mission.id, event.id);
+      await refreshMissionTimeline(mission.id);
+      setMissionTrajectoryOverlay(null);
+      setTimelineStatus("Timeline event deleted.");
+    } catch (error) {
+      setTimelineStatus(error instanceof Error ? error.message : "Unable to delete timeline event.");
+    }
+  }, [mission, refreshMissionTimeline]);
+
+  const toggleTimelineEventEnabled = useCallback(async (event: BackendMissionTimelineEvent) => {
+    if (!mission) {
+      return;
+    }
+    setTimelineStatus(event.enabled ? "Disabling event..." : "Enabling event...");
+    try {
+      await setMissionTimelineEventEnabled(mission.id, event.id, !event.enabled);
+      await refreshMissionTimeline(mission.id);
+      setMissionTrajectoryOverlay(null);
+      setTimelineStatus(event.enabled ? "Event disabled." : "Event enabled.");
+    } catch (error) {
+      setTimelineStatus(error instanceof Error ? error.message : "Unable to update event state.");
+    }
+  }, [mission, refreshMissionTimeline]);
+
+  const reorderTimelineEvent = useCallback(async (sourceEventId: string, targetEventId: string) => {
+    if (!mission || sourceEventId === targetEventId) {
+      return;
+    }
+    const sourceIndex = missionTimelineEvents.findIndex((event) => event.id === sourceEventId);
+    const targetIndex = missionTimelineEvents.findIndex((event) => event.id === targetEventId);
+    if (sourceIndex < 0 || targetIndex < 0) {
+      return;
+    }
+    const next = [...missionTimelineEvents];
+    const [moved] = next.splice(sourceIndex, 1);
+    next.splice(targetIndex, 0, moved);
+    setMissionTimelineEvents(next.map((event, index) => ({ ...event, sequenceIndex: index })));
+    setTimelineStatus("Reordering timeline...");
+    try {
+      const reordered = await reorderMissionTimelineEvents(mission.id, next.map((event) => event.id));
+      setMissionTimelineEvents(reordered);
+      setMissionTrajectoryOverlay(null);
+      setTimelineStatus("Timeline reordered.");
+    } catch (error) {
+      await refreshMissionTimeline(mission.id);
+      setTimelineStatus(error instanceof Error ? error.message : "Unable to reorder timeline.");
+    }
+  }, [mission, missionTimelineEvents, refreshMissionTimeline]);
+
+  const generateMissionTrajectory = useCallback(async () => {
+    if (!mission || !selectedSnapshot?.satellite) {
+      setTimelineStatus("Initialize a mission before generating a trajectory.");
+      return;
+    }
+    if (!selectedNoradId) {
+      setTimelineStatus("Mission trajectory preview is available for backend catalog orbits.");
+      return;
+    }
+
+    const centerTime = trajectoryAnchorTime;
+    const start = addMinutes(centerTime, -defaultMissionTrajectoryWindowMinutes);
+    const end = addMinutes(centerTime, defaultMissionTrajectoryWindowMinutes);
+    setIsMissionTrajectoryLoading(true);
+    setTimelineStatus("Generating mission trajectory...");
+    try {
+      const [missionResponse, legacyResponse] = await Promise.all([
+        fetchMissionTrajectory(mission.id, start.toISOString(), end.toISOString(), trajectoryWindowOptions.stepSec),
+        fetchOrbitTrajectory(selectedNoradId, start.toISOString(), end.toISOString(), trajectoryWindowOptions.stepSec),
+      ]);
+      const missionSatellite = missionOverlaySatellite(selectedSnapshot.satellite, "mission");
+      const legacySatellite = missionOverlaySatellite(selectedSnapshot.satellite, "legacy");
+      setMissionTrajectoryOverlay({
+        mission: buildTrajectorySnapshot(missionSatellite, missionResponse.states, centerTime),
+        legacy: buildTrajectorySnapshot(legacySatellite, legacyResponse.states, centerTime),
+        generatedAt: new Date().toISOString(),
+        message: `${missionResponse.states.length} mission samples generated.`,
+      });
+      setShowMissionComparison(true);
+      setTimelineStatus("Mission trajectory generated.");
+    } catch (error) {
+      setTimelineStatus(error instanceof Error ? error.message : "Unable to generate mission trajectory.");
+    } finally {
+      setIsMissionTrajectoryLoading(false);
+    }
+  }, [mission, selectedNoradId, selectedSnapshot, trajectoryAnchorTime, trajectoryWindowOptions.stepSec]);
+
   const syncConjunctionsFromSpaceTrack = useCallback(async () => {
     setDynamicDataMessage("Syncing public CDM conjunctions from Space-Track...");
 
@@ -946,6 +1312,59 @@ export function OrbitalDashboard() {
       return next;
     });
   }, []);
+
+  useEffect(() => {
+    let ignore = false;
+
+    async function loadMission() {
+      if (!selectedNoradId || !canUseAnalysisConfig) {
+        await Promise.resolve();
+        if (!ignore) {
+          setMission(null);
+          setMissionTimelineEvents([]);
+          setSelectedTimelineEventId(null);
+          setMissionTrajectoryOverlay(null);
+          setTimelineStatus(null);
+        }
+        return;
+      }
+
+      try {
+        const allMissions = await fetchMissions();
+        const selectedMission = allMissions.find((item) => String(item.subjectNoradId) === String(selectedNoradId)) ?? null;
+        if (ignore) {
+          return;
+        }
+        setMission(selectedMission);
+        setMissionTrajectoryOverlay(null);
+        if (!selectedMission) {
+          setMissionTimelineEvents([]);
+          setSelectedTimelineEventId(null);
+          setTimelineStatus(null);
+          return;
+        }
+        const events = await fetchMissionTimelineEvents(selectedMission.id);
+        if (!ignore) {
+          setMissionTimelineEvents(events);
+          setSelectedTimelineEventId((current) => events.some((event) => event.id === current) ? current : events[0]?.id ?? null);
+          setTimelineStatus(null);
+        }
+      } catch (error) {
+        if (!ignore) {
+          setMission(null);
+          setMissionTimelineEvents([]);
+          setSelectedTimelineEventId(null);
+          setTimelineStatus(error instanceof Error ? error.message : "Unable to load mission timeline.");
+        }
+      }
+    }
+
+    loadMission();
+
+    return () => {
+      ignore = true;
+    };
+  }, [canUseAnalysisConfig, selectedNoradId]);
 
   useEffect(() => {
     let ignore = false;
@@ -1365,7 +1784,7 @@ export function OrbitalDashboard() {
         {hasOrbitLoaded ? (
           <CesiumGlobe
             snapshots={snapshots}
-            orbitSnapshots={orbitSnapshots}
+            orbitSnapshots={displayOrbitSnapshots}
             rangeMeasurement={rangeMeasurement}
             selectedSatelliteIds={selectedSatelliteIds}
             showAllOrbits={showAllOrbits}
@@ -1648,6 +2067,28 @@ export function OrbitalDashboard() {
           )}
         </HudPanel>
 
+        <MissionTimelinePanel
+          mission={mission}
+          events={missionTimelineEvents}
+          selectedEventId={selectedTimelineEvent?.id ?? null}
+          status={timelineStatus}
+          canUseMissionTimeline={canUseAnalysisConfig}
+          isTrajectoryLoading={isMissionTrajectoryLoading}
+          showComparison={showMissionComparison}
+          trajectoryOverlay={missionTrajectoryOverlay}
+          dragEventId={timelineDragEventId}
+          onInitializeMission={initializeMissionTimeline}
+          onCreateEvent={openCreateTimelineModal}
+          onEditEvent={openEditTimelineModal}
+          onDeleteEvent={deleteTimelineEvent}
+          onToggleEvent={toggleTimelineEventEnabled}
+          onSelectEvent={setSelectedTimelineEventId}
+          onGenerateTrajectory={generateMissionTrajectory}
+          onToggleComparison={() => setShowMissionComparison((value) => !value)}
+          onDragEvent={setTimelineDragEventId}
+          onDropEvent={reorderTimelineEvent}
+        />
+
         <ManeuverPanel
           maneuverSnapshots={maneuverSnapshots}
           selectedManeuverId={selectedManeuver?.event.id ?? null}
@@ -1796,6 +2237,16 @@ export function OrbitalDashboard() {
             }
           }}
           onClose={() => setIsManeuverModalOpen(false)}
+        />
+      )}
+
+      {timelineModalMode && (
+        <TimelineEventModal
+          mode={timelineModalMode}
+          draft={timelineDraft}
+          onDraftChange={setTimelineDraft}
+          onSave={saveTimelineEvent}
+          onClose={() => setTimelineModalMode(null)}
         />
       )}
 
@@ -2727,6 +3178,374 @@ function getConjunctionStatusDescription(status: ConjunctionSnapshot["status"]) 
   }
 
   return "Safe means the closest approach stays outside the configured warning threshold.";
+}
+
+function MissionTimelinePanel({
+  mission,
+  events,
+  selectedEventId,
+  status,
+  canUseMissionTimeline,
+  isTrajectoryLoading,
+  showComparison,
+  trajectoryOverlay,
+  dragEventId,
+  onInitializeMission,
+  onCreateEvent,
+  onEditEvent,
+  onDeleteEvent,
+  onToggleEvent,
+  onSelectEvent,
+  onGenerateTrajectory,
+  onToggleComparison,
+  onDragEvent,
+  onDropEvent,
+}: {
+  mission: BackendMission | null;
+  events: BackendMissionTimelineEvent[];
+  selectedEventId: string | null;
+  status: string | null;
+  canUseMissionTimeline: boolean;
+  isTrajectoryLoading: boolean;
+  showComparison: boolean;
+  trajectoryOverlay: MissionTrajectoryOverlay | null;
+  dragEventId: string | null;
+  onInitializeMission: () => void;
+  onCreateEvent: (type?: TimelineEditorDraft["type"]) => void;
+  onEditEvent: (event: BackendMissionTimelineEvent) => void;
+  onDeleteEvent: (event: BackendMissionTimelineEvent) => void;
+  onToggleEvent: (event: BackendMissionTimelineEvent) => void;
+  onSelectEvent: (eventId: string) => void;
+  onGenerateTrajectory: () => void;
+  onToggleComparison: () => void;
+  onDragEvent: (eventId: string | null) => void;
+  onDropEvent: (sourceEventId: string, targetEventId: string) => void;
+}) {
+  return (
+    <HudPanel>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Mission Timeline</p>
+          <p className="mt-1 font-mono text-[10px] text-zinc-500">{mission ? mission.name : "No mission"}</p>
+        </div>
+        {!mission ? (
+          <button
+            type="button"
+            disabled={!canUseMissionTimeline}
+            onClick={onInitializeMission}
+            className="border border-emerald-300/50 px-3 py-1.5 font-mono text-[10px] uppercase text-emerald-100 transition hover:border-emerald-300 hover:bg-emerald-300/10 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-zinc-600"
+          >
+            New
+          </button>
+        ) : (
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => onCreateEvent("COAST")}
+              className="border border-white/15 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100"
+            >
+              Coast
+            </button>
+            <button
+              type="button"
+              onClick={() => onCreateEvent("FINITE_BURN")}
+              className="border border-rose-300/50 px-2 py-1.5 font-mono text-[10px] uppercase text-rose-100 transition hover:border-rose-300 hover:bg-rose-300/10"
+            >
+              Burn
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-3 overflow-hidden border border-white/10 bg-black/25">
+        <div className="flex items-center gap-1 overflow-x-auto px-3 py-2">
+          {events.length === 0 ? (
+            <span className="font-mono text-[10px] uppercase text-zinc-600">Empty timeline</span>
+          ) : (
+            events.map((event, index) => (
+              <span key={event.id} className="flex items-center gap-1">
+                <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${event.type === "FINITE_BURN" ? "border-rose-300/45 text-rose-100" : "border-sky-300/35 text-sky-100"}`}>
+                  {event.type === "FINITE_BURN" ? "Burn" : "Coast"}
+                </span>
+                {index < events.length - 1 && <span className="text-zinc-600">→</span>}
+              </span>
+            ))
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 max-h-[34vh] space-y-2 overflow-auto pr-1">
+        {events.map((event, index) => (
+          <TimelineEventCard
+            key={event.id}
+            event={event}
+            index={index}
+            selected={selectedEventId === event.id}
+            dragging={dragEventId === event.id}
+            onSelect={() => onSelectEvent(event.id)}
+            onEdit={() => onEditEvent(event)}
+            onDelete={() => onDeleteEvent(event)}
+            onToggle={() => onToggleEvent(event)}
+            onDragStart={() => onDragEvent(event.id)}
+            onDragEnd={() => onDragEvent(null)}
+            onDrop={() => {
+              if (dragEventId) {
+                onDropEvent(dragEventId, event.id);
+              }
+              onDragEvent(null);
+            }}
+          />
+        ))}
+      </div>
+
+      {mission && (
+        <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
+          <button
+            type="button"
+            onClick={onGenerateTrajectory}
+            disabled={isTrajectoryLoading}
+            className="border border-cyan-300 bg-cyan-300 px-3 py-2 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-950 transition hover:bg-cyan-200 disabled:cursor-wait disabled:opacity-60"
+          >
+            {isTrajectoryLoading ? "Generating" : "Generate Trajectory"}
+          </button>
+          <button
+            type="button"
+            disabled={!trajectoryOverlay}
+            aria-pressed={showComparison}
+            onClick={onToggleComparison}
+            className={`border px-3 py-2 font-mono text-[10px] uppercase transition ${
+              showComparison && trajectoryOverlay
+                ? "border-lime-300 bg-lime-300/15 text-lime-100"
+                : "border-white/10 text-zinc-500 hover:border-lime-300/60 hover:text-lime-100 disabled:cursor-not-allowed disabled:text-zinc-700"
+            }`}
+          >
+            Overlay
+          </button>
+        </div>
+      )}
+
+      {trajectoryOverlay && (
+        <div className="mt-3 border border-lime-300/20 bg-lime-300/[0.04] px-3 py-2">
+          <p className="font-mono text-[10px] uppercase text-lime-200">{showComparison ? "Mission vs Legacy" : "Trajectory Ready"}</p>
+          <p className="mt-1 text-xs text-zinc-400">{trajectoryOverlay.message}</p>
+        </div>
+      )}
+
+      {status && (
+        <p className="mt-3 border border-white/10 bg-black/25 px-3 py-2 text-xs leading-5 text-zinc-300">{status}</p>
+      )}
+    </HudPanel>
+  );
+}
+
+function TimelineEventCard({
+  event,
+  index,
+  selected,
+  dragging,
+  onSelect,
+  onEdit,
+  onDelete,
+  onToggle,
+  onDragStart,
+  onDragEnd,
+  onDrop,
+}: {
+  event: BackendMissionTimelineEvent;
+  index: number;
+  selected: boolean;
+  dragging: boolean;
+  onSelect: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+  onToggle: () => void;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+  onDrop: () => void;
+}) {
+  const parameters = event.parameters ?? {};
+  const isBurn = event.type === "FINITE_BURN";
+  const summary = isBurn
+    ? `${readNumberParameter(parameters, "durationSeconds", 0)}s, ${readNumberParameter(parameters, "thrustNewton", 0)} N, ${readStringParameter(parameters, "directionFrame", "TNW")}`
+    : "Coast segment";
+
+  return (
+    <div
+      draggable
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onDragOver={(dragEvent) => dragEvent.preventDefault()}
+      onDrop={onDrop}
+      className={`border bg-black/30 p-3 transition ${
+        selected ? "border-cyan-300/70" : "border-white/10 hover:border-cyan-300/45"
+      } ${dragging ? "opacity-50" : "opacity-100"}`}
+    >
+      <button type="button" onClick={onSelect} className="w-full text-left">
+        <span className="flex items-start justify-between gap-3">
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-semibold text-white">[{index + 1}] {event.name}</span>
+            <span className="mt-1 block font-mono text-[10px] uppercase text-zinc-500">{formatUtc(new Date(event.executionTime))}</span>
+          </span>
+          <span className={`border px-2 py-0.5 font-mono text-[10px] uppercase ${isBurn ? "border-rose-300/45 text-rose-100" : "border-sky-300/35 text-sky-100"}`}>
+            {isBurn ? "Finite" : "Coast"}
+          </span>
+        </span>
+        <span className="mt-2 block truncate text-xs text-zinc-400">{summary}</span>
+      </button>
+      <div className="mt-3 grid grid-cols-4 gap-1.5">
+        <button
+          type="button"
+          onClick={onToggle}
+          className={`border px-2 py-1.5 font-mono text-[10px] uppercase transition ${
+            event.enabled ? "border-lime-300/50 text-lime-100 hover:bg-lime-300/10" : "border-white/10 text-zinc-500 hover:border-zinc-300"
+          }`}
+        >
+          {event.enabled ? "On" : "Off"}
+        </button>
+        <button type="button" onClick={onEdit} className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100">
+          Edit
+        </button>
+        <button type="button" onClick={onDelete} className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-300 transition hover:border-rose-300 hover:text-rose-100">
+          Del
+        </button>
+        <span className="grid place-items-center border border-white/10 font-mono text-[10px] uppercase text-zinc-600" title="Drag to reorder">
+          Move
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function TimelineEventModal({
+  mode,
+  draft,
+  onDraftChange,
+  onSave,
+  onClose,
+}: {
+  mode: TimelineModalMode;
+  draft: TimelineEditorDraft;
+  onDraftChange: (draft: TimelineEditorDraft) => void;
+  onSave: () => void;
+  onClose: () => void;
+}) {
+  const errors = validateTimelineDraft(draft);
+  const update = (patch: Partial<TimelineEditorDraft>) => onDraftChange({ ...draft, ...patch });
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
+      <div className="flex max-h-[88vh] w-[min(720px,94vw)] flex-col overflow-hidden border border-cyan-300/30 bg-[#071016]/96 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-cyan-300/20 px-5 py-4">
+          <div>
+            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Mission Timeline</p>
+            <h2 className="mt-1 text-xl font-semibold text-white">{mode === "edit" ? "Edit Event" : "Create Event"}</h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="grid h-9 w-9 place-items-center border border-white/15 text-zinc-200 transition hover:border-cyan-300 hover:text-white"
+            aria-label="Close timeline event modal"
+            title="Close"
+          >
+            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="min-h-0 overflow-auto p-5">
+          <div className="grid grid-cols-2 gap-2">
+            {(["COAST", "FINITE_BURN"] as const).map((type) => (
+              <button
+                key={type}
+                type="button"
+                onClick={() => update({ type, name: draft.name || (type === "COAST" ? "Coast" : "Finite Burn") })}
+                className={`border px-3 py-2 font-mono text-xs uppercase transition ${
+                  draft.type === type ? "border-cyan-300 bg-cyan-300 text-slate-950" : "border-white/10 text-zinc-400 hover:border-cyan-300/50"
+                }`}
+              >
+                {type === "FINITE_BURN" ? "Finite Burn" : "Coast"}
+              </button>
+            ))}
+          </div>
+
+          <div className="mt-5 grid gap-4">
+            <TimelineField label="Name" error={errors.name}>
+              <input value={draft.name} onChange={(event) => update({ name: event.target.value })} className="timeline-input" />
+            </TimelineField>
+            <TimelineField label="Execution UTC" error={errors.executionUtc}>
+              <input type="datetime-local" value={draft.executionUtc} onChange={(event) => update({ executionUtc: event.target.value })} className="timeline-input" />
+            </TimelineField>
+
+            {draft.type === "FINITE_BURN" && (
+              <>
+                <div className="grid grid-cols-3 gap-3 max-sm:grid-cols-1">
+                  <TimelineField label="Duration sec" error={errors.durationSeconds}>
+                    <input value={draft.durationSeconds} onChange={(event) => update({ durationSeconds: event.target.value })} inputMode="decimal" className="timeline-input" />
+                  </TimelineField>
+                  <TimelineField label="Thrust N" error={errors.thrustNewton}>
+                    <input value={draft.thrustNewton} onChange={(event) => update({ thrustNewton: event.target.value })} inputMode="decimal" className="timeline-input" />
+                  </TimelineField>
+                  <TimelineField label="ISP sec" error={errors.ispSeconds}>
+                    <input value={draft.ispSeconds} onChange={(event) => update({ ispSeconds: event.target.value })} inputMode="decimal" className="timeline-input" />
+                  </TimelineField>
+                </div>
+                <TimelineField label="Attitude Frame">
+                  <select value={draft.directionFrame} onChange={(event) => update({ directionFrame: event.target.value as TimelineEditorDraft["directionFrame"] })} className="timeline-input">
+                    <option value="TNW">TNW</option>
+                    <option value="QSW">QSW</option>
+                    <option value="RTN">RTN</option>
+                    <option value="LVLH">LVLH</option>
+                  </select>
+                </TimelineField>
+                <div className="grid grid-cols-3 gap-3 max-sm:grid-cols-1">
+                  <TimelineField label="Direction X" error={errors.directionX}>
+                    <input value={draft.directionX} onChange={(event) => update({ directionX: event.target.value })} inputMode="decimal" className="timeline-input" />
+                  </TimelineField>
+                  <TimelineField label="Direction Y" error={errors.directionY}>
+                    <input value={draft.directionY} onChange={(event) => update({ directionY: event.target.value })} inputMode="decimal" className="timeline-input" />
+                  </TimelineField>
+                  <TimelineField label="Direction Z" error={errors.directionZ}>
+                    <input value={draft.directionZ} onChange={(event) => update({ directionZ: event.target.value })} inputMode="decimal" className="timeline-input" />
+                  </TimelineField>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-cyan-300/20 px-5 py-4">
+          <button type="button" onClick={onClose} className="border border-white/10 px-4 py-2 font-mono text-xs uppercase text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100">
+            Cancel
+          </button>
+          <button type="button" onClick={onSave} className="border border-cyan-300 bg-cyan-300 px-4 py-2 font-mono text-xs font-semibold uppercase text-slate-950 transition hover:bg-cyan-200">
+            Save
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function TimelineField({
+  label,
+  error,
+  children,
+}: {
+  label: string;
+  error?: string;
+  children: ReactNode;
+}) {
+  return (
+    <label className="block">
+      <span className="flex items-center justify-between gap-3">
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">{label}</span>
+        {error && <span className="font-mono text-[10px] uppercase text-rose-200">{error}</span>}
+      </span>
+      <span className="mt-1 block">{children}</span>
+    </label>
+  );
 }
 
 function ManeuverPanel({
