@@ -47,6 +47,24 @@ import {
   setMissionTimelineEventEnabled,
   updateMissionTimelineEvent,
 } from "@/services/orbitServerApi";
+import {
+  buildWorkspace,
+  deleteMission,
+  deleteOrbit,
+  duplicateMission,
+  duplicateOrbit,
+  readMissionLibrary,
+  readOrbitLibrary,
+  storedEventFromBackend,
+  storedMissionFromBackend,
+  upsertMission,
+  upsertMissionEvents,
+  upsertOrbit,
+  validateWorkspaceImport,
+  writeMissionLibrary,
+  writeOrbitLibrary,
+  writeWorkspace,
+} from "@/services/workspaceStorage";
 import type {
   AnalysisPresetId,
   BackendMission,
@@ -61,6 +79,14 @@ import type {
   ManualOrbitType,
   PropagatorTypeId,
 } from "@/services/orbitServerApi";
+import type {
+  MissionLibraryState,
+  StoredEvent,
+  StoredMission,
+  StoredOrbit,
+  StoredOrbitSourceType,
+  StoredWorkspace,
+} from "@/services/workspaceStorage";
 import { StateCacheService } from "@/services/StateCacheService";
 
 const CesiumGlobe = dynamic(
@@ -386,6 +412,126 @@ function manualOrbitToSatellite(orbit: BackendManualOrbitResponse): SatelliteObj
       objectType: "payload",
     },
   };
+}
+
+function manualOrbitSourceType(type: ManualOrbitType): StoredOrbitSourceType {
+  if (type === "CARTESIAN_STATE") {
+    return "MANUAL_CARTESIAN";
+  }
+  if (type === "CLASSICAL_ELEMENTS") {
+    return "MANUAL_CLASSICAL";
+  }
+  return "MANUAL_TLE";
+}
+
+function orbitSummaryForSatellite(satellite: SatelliteObject, sourceType: StoredOrbitSourceType) {
+  return {
+    sourceType,
+    noradId: satellite.noradId ?? null,
+    objectType: satellite.metadata?.objectType ?? null,
+    mission: typeof satellite.metadata?.mission === "string" ? satellite.metadata.mission : null,
+  };
+}
+
+function storedOrbitFromCatalogSatellite(satellite: SatelliteObject, catalogGroup: string): StoredOrbit {
+  const now = new Date().toISOString();
+  return {
+    orbitId: `catalog-${satellite.noradId ?? satellite.id}`,
+    orbitName: satellite.name,
+    sourceType: "CATALOG_TLE",
+    creationDate: now,
+    lastModified: now,
+    orbitDefinition: {
+      satellite,
+      catalogGroup,
+    },
+    propagatorType: "NUMERICAL",
+    summary: orbitSummaryForSatellite(satellite, "CATALOG_TLE"),
+  };
+}
+
+function storedOrbitsFromImportedTle(satellites: SatelliteObject[], rawTle: string, sourceLabel: string): StoredOrbit[] {
+  const now = new Date().toISOString();
+  return satellites.map((satellite) => ({
+    orbitId: `tle-${satellite.noradId ?? satellite.id}`,
+    orbitName: satellite.name,
+    sourceType: "IMPORTED_TLE",
+    creationDate: now,
+    lastModified: now,
+    orbitDefinition: {
+      satellite,
+      rawTle,
+    },
+    propagatorType: "TLE_SGP4",
+    summary: {
+      ...orbitSummaryForSatellite(satellite, "IMPORTED_TLE"),
+      sourceLabel,
+    },
+  }));
+}
+
+function storedOrbitFromManualOrbit(
+  request: CreateManualOrbitRequest,
+  response: BackendManualOrbitResponse,
+  satellite: SatelliteObject,
+): StoredOrbit {
+  const now = new Date().toISOString();
+  const sourceType = manualOrbitSourceType(request.type);
+  return {
+    orbitId: response.id,
+    orbitName: response.name,
+    sourceType,
+    creationDate: now,
+    lastModified: now,
+    orbitDefinition: {
+      satellite,
+      manualRequest: request,
+      backendManualOrbitId: response.id,
+    },
+    propagatorType: response.propagatorType,
+    summary: {
+      ...orbitSummaryForSatellite(satellite, sourceType),
+      frame: response.frame,
+      epoch: response.epoch,
+    },
+  };
+}
+
+function eventsFromStoredMission(state: MissionLibraryState, missionId: string): BackendMissionTimelineEvent[] {
+  return state.events
+    .filter((event) => event.missionId === missionId && event.backendEvent)
+    .map((event) => event.backendEvent!)
+    .toSorted((a, b) => a.sequenceIndex - b.sequenceIndex);
+}
+
+function missionFromStoredMission(storedMission: StoredMission): BackendMission | null {
+  if (storedMission.backendMission) {
+    return storedMission.backendMission;
+  }
+  if (!storedMission.backendMissionId) {
+    return null;
+  }
+  return {
+    id: storedMission.backendMissionId,
+    name: storedMission.missionName,
+    subjectNoradId: null,
+    subjectOrbitId: null,
+    propagatorType: "NUMERICAL",
+    scenarioStart: storedMission.startTime,
+    scenarioEnd: storedMission.endTime,
+    createdAt: storedMission.createdAt,
+    updatedAt: storedMission.updatedAt,
+  };
+}
+
+function downloadJson(filename: string, value: unknown) {
+  const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 function isServerDrivenSource(source: ActiveDataSource) {
@@ -812,6 +958,11 @@ export function OrbitalDashboard() {
   const [isManeuverModalOpen, setIsManeuverModalOpen] = useState(false);
   const [mission, setMission] = useState<BackendMission | null>(null);
   const [missionTimelineEvents, setMissionTimelineEvents] = useState<BackendMissionTimelineEvent[]>([]);
+  const [orbitLibrary, setOrbitLibrary] = useState<StoredOrbit[]>(() => readOrbitLibrary());
+  const [missionLibrary, setMissionLibrary] = useState<MissionLibraryState>(() => readMissionLibrary());
+  const [activeWorkspaceOrbitId, setActiveWorkspaceOrbitId] = useState<string | null>(null);
+  const [activeWorkspaceMissionId, setActiveWorkspaceMissionId] = useState<string | null>(null);
+  const workspaceImportInputRef = useRef<HTMLInputElement | null>(null);
   const [selectedTimelineEventId, setSelectedTimelineEventId] = useState<string | null>(null);
   const [timelineModalMode, setTimelineModalMode] = useState<TimelineModalMode | null>(null);
   const [timelineDraft, setTimelineDraft] = useState<TimelineEditorDraft>(defaultTimelineDraft);
@@ -1072,6 +1223,27 @@ export function OrbitalDashboard() {
       .map((satellite) => satellite.noradId ?? satellite.id)
       .filter((id): id is string => Boolean(id));
   }, [activeDataSource, satellites]);
+  const activeStoredOrbit = useMemo(() => {
+    if (activeWorkspaceOrbitId) {
+      return orbitLibrary.find((orbit) => orbit.orbitId === activeWorkspaceOrbitId) ?? null;
+    }
+    if (manualOrbitId) {
+      return orbitLibrary.find((orbit) => orbit.orbitDefinition.backendManualOrbitId === manualOrbitId || orbit.orbitId === manualOrbitId) ?? null;
+    }
+    if (selectedNoradId) {
+      return orbitLibrary.find((orbit) => orbit.orbitId === `catalog-${selectedNoradId}` || orbit.orbitId === `tle-${selectedNoradId}`) ?? null;
+    }
+    return null;
+  }, [activeWorkspaceOrbitId, manualOrbitId, orbitLibrary, selectedNoradId]);
+  const activeStoredMission = useMemo(() => {
+    if (activeWorkspaceMissionId) {
+      return missionLibrary.missions.find((item) => item.missionId === activeWorkspaceMissionId) ?? null;
+    }
+    if (mission) {
+      return missionLibrary.missions.find((item) => item.backendMissionId === mission.id || item.missionId === mission.id) ?? null;
+    }
+    return null;
+  }, [activeWorkspaceMissionId, mission, missionLibrary.missions]);
   const isPresetSpeed = speedPresetOptions.some((option) => option.speed === speed);
   const pauseBackendRequests = useCallback((error: unknown) => {
     setBackendRequestPauseUntil(Date.now() + 10_000);
@@ -1110,6 +1282,215 @@ export function OrbitalDashboard() {
     setSpeed(customSpeed);
     setCustomSpeedInput(String(customSpeed));
   }, [customSpeedInput]);
+
+  const saveOrbitLibrary = useCallback((next: StoredOrbit[]) => {
+    setOrbitLibrary(next);
+    writeOrbitLibrary(next);
+  }, []);
+
+  const saveMissionLibrary = useCallback((next: MissionLibraryState) => {
+    setMissionLibrary(next);
+    writeMissionLibrary(next);
+  }, []);
+
+  const rememberOrbit = useCallback((orbit: StoredOrbit) => {
+    setActiveWorkspaceOrbitId(orbit.orbitId);
+    setOrbitLibrary((current) => {
+      const next = upsertOrbit(current, orbit);
+      writeOrbitLibrary(next);
+      return next;
+    });
+  }, []);
+
+  const rememberMission = useCallback((backendMission: BackendMission, orbitId: string) => {
+    const stored = storedMissionFromBackend(backendMission, orbitId);
+    setActiveWorkspaceMissionId(stored.missionId);
+    setMissionLibrary((current) => {
+      const next = upsertMission(current, stored);
+      writeMissionLibrary(next);
+      return next;
+    });
+  }, []);
+
+  const rememberMissionEvents = useCallback((missionId: string, events: BackendMissionTimelineEvent[]) => {
+    setMissionLibrary((current) => {
+      const next = upsertMissionEvents(current, missionId, events.map((event) => storedEventFromBackend(event, missionId)));
+      writeMissionLibrary(next);
+      return next;
+    });
+  }, []);
+
+  const loadStoredOrbit = useCallback(async (orbit: StoredOrbit) => {
+    const storedSatellites = orbit.orbitDefinition.satellites ?? (orbit.orbitDefinition.satellite ? [orbit.orbitDefinition.satellite] : []);
+    const satellite = storedSatellites[0];
+    if (!satellite) {
+      toast.error("Stored orbit is missing its orbit definition.");
+      return;
+    }
+
+    setSatellites(storedSatellites);
+    setSelectedSatelliteIds(getInitialSelectedIds(storedSatellites));
+    setShowRangeCheck(false);
+    setShowManeuvers(false);
+    setShowConjunctions(false);
+    setTrajectoryAnchorTime(simTime);
+    setServerOrbitSnapshots(null);
+    setServerGroundTrackSnapshots(null);
+    setMissionTrajectoryOverlay(null);
+    setActiveWorkspaceOrbitId(orbit.orbitId);
+
+    if (orbit.sourceType.startsWith("MANUAL")) {
+      const backendManualOrbitId = orbit.orbitDefinition.backendManualOrbitId ?? orbit.orbitId;
+      setActiveDataSource("manual");
+      setManualOrbitId(backendManualOrbitId);
+      try {
+        const currentState = await fetchManualOrbitState(backendManualOrbitId, simTime.toISOString());
+        setServerStateBySatelliteId(new Map([[satellite.id, backendStateToOrbitState(satellite.id, currentState)]]));
+      } catch (error) {
+        setServerStateBySatelliteId(new Map());
+        toast.error(userErrorMessage(error, "Unable to load manual orbit state."));
+      }
+    } else {
+      setActiveDataSource(orbit.sourceType === "CATALOG_TLE" ? "backend" : "endpoint");
+      setManualOrbitId(null);
+      setServerStateBySatelliteId(new Map());
+    }
+
+    const linkedMission = missionLibrary.missions.find((item) => item.orbitId === orbit.orbitId) ?? null;
+    if (linkedMission) {
+      setActiveWorkspaceMissionId(linkedMission.missionId);
+    }
+    setMessages([`Loaded orbit "${orbit.orbitName}" from Orbit Library.`]);
+    toast.success("Orbit loaded from library.");
+  }, [missionLibrary.missions, simTime]);
+
+  const openStoredMission = useCallback((storedMission: StoredMission) => {
+    const backendMission = missionFromStoredMission(storedMission);
+    setActiveWorkspaceMissionId(storedMission.missionId);
+    if (!backendMission) {
+      setTimelineStatus("This cloned/imported mission is stored locally. Recreate it against the backend before trajectory generation.");
+      toast.info("Local mission opened as a library draft.");
+      setMissionTimelineEvents(eventsFromStoredMission(missionLibrary, storedMission.missionId));
+      return;
+    }
+    setMission(backendMission);
+    setMissionTimelineEvents(eventsFromStoredMission(missionLibrary, storedMission.missionId));
+    setTimelineStatus("Mission opened from library.");
+    toast.success("Mission opened from library.");
+  }, [missionLibrary]);
+
+  const renameStoredOrbit = useCallback((orbit: StoredOrbit) => {
+    const name = window.prompt("Rename orbit", orbit.orbitName)?.trim();
+    if (!name) {
+      return;
+    }
+    saveOrbitLibrary(upsertOrbit(orbitLibrary, { ...orbit, orbitName: name }));
+  }, [orbitLibrary, saveOrbitLibrary]);
+
+  const renameStoredMission = useCallback((storedMission: StoredMission) => {
+    const name = window.prompt("Rename mission", storedMission.missionName)?.trim();
+    if (!name) {
+      return;
+    }
+    saveMissionLibrary(upsertMission(missionLibrary, { ...storedMission, missionName: name }));
+  }, [missionLibrary, saveMissionLibrary]);
+
+  const deleteStoredOrbit = useCallback((orbit: StoredOrbit) => {
+    if (!window.confirm(`Delete orbit "${orbit.orbitName}" and its local missions?`)) {
+      return;
+    }
+    const result = deleteOrbit(orbitLibrary, missionLibrary, orbit.orbitId);
+    saveOrbitLibrary(result.orbits);
+    saveMissionLibrary(result.missionState);
+    if (activeWorkspaceOrbitId === orbit.orbitId) {
+      setActiveWorkspaceOrbitId(null);
+      setActiveWorkspaceMissionId(null);
+    }
+  }, [activeWorkspaceOrbitId, missionLibrary, orbitLibrary, saveMissionLibrary, saveOrbitLibrary]);
+
+  const deleteStoredMission = useCallback((storedMission: StoredMission) => {
+    if (!window.confirm(`Delete local mission "${storedMission.missionName}"? Backend records are not deleted.`)) {
+      return;
+    }
+    const next = deleteMission(missionLibrary, storedMission.missionId);
+    saveMissionLibrary(next);
+    if (activeWorkspaceMissionId === storedMission.missionId) {
+      setActiveWorkspaceMissionId(null);
+    }
+  }, [activeWorkspaceMissionId, missionLibrary, saveMissionLibrary]);
+
+  const cloneStoredOrbit = useCallback((orbit: StoredOrbit, cloneMissions: boolean) => {
+    const result = duplicateOrbit(orbitLibrary, orbit.orbitId, cloneMissions, missionLibrary);
+    saveOrbitLibrary(result.orbits);
+    saveMissionLibrary(result.missionState);
+    if (result.clonedOrbitId) {
+      setActiveWorkspaceOrbitId(result.clonedOrbitId);
+      toast.success(cloneMissions ? "Orbit and missions cloned locally." : "Orbit cloned locally.");
+    }
+  }, [missionLibrary, orbitLibrary, saveMissionLibrary, saveOrbitLibrary]);
+
+  const cloneStoredMission = useCallback((storedMission: StoredMission) => {
+    const result = duplicateMission(missionLibrary, storedMission.missionId);
+    saveMissionLibrary(result.missionState);
+    if (result.clonedMissionId) {
+      setActiveWorkspaceMissionId(result.clonedMissionId);
+      toast.success("Mission cloned locally.");
+    }
+  }, [missionLibrary, saveMissionLibrary]);
+
+  const exportStoredOrbit = useCallback((orbit: StoredOrbit) => {
+    downloadJson(`${orbit.orbitName.replaceAll(/\s+/g, "-").toLowerCase()}-orbit.json`, orbit);
+  }, []);
+
+  const exportStoredMission = useCallback((storedMission: StoredMission) => {
+    const events = missionLibrary.events.filter((event) => event.missionId === storedMission.missionId);
+    downloadJson(`${storedMission.missionName.replaceAll(/\s+/g, "-").toLowerCase()}-mission.json`, {
+      schemaVersion: 1,
+      exportedAt: new Date().toISOString(),
+      ownerMode: "anonymous",
+      orbits: orbitLibrary.filter((orbit) => orbit.orbitId === storedMission.orbitId),
+      missions: [storedMission],
+      events,
+    } satisfies StoredWorkspace);
+  }, [missionLibrary.events, orbitLibrary]);
+
+  const exportWorkspace = useCallback(() => {
+    downloadJson("orbit-mission-workspace.json", buildWorkspace(orbitLibrary, missionLibrary));
+  }, [missionLibrary, orbitLibrary]);
+
+  const importWorkspaceFile = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    try {
+      const text = await file.text();
+      const workspace = validateWorkspaceImport(JSON.parse(text));
+      const nextOrbitLibrary = [
+        ...orbitLibrary.filter((orbit) => !workspace.orbits.some((imported) => imported.orbitId === orbit.orbitId)),
+        ...workspace.orbits,
+      ];
+      const importedMissionIds = new Set(workspace.missions.map((item) => item.missionId));
+      const nextMissionLibrary: MissionLibraryState = {
+        schemaVersion: 1,
+        missions: [
+          ...missionLibrary.missions.filter((item) => !importedMissionIds.has(item.missionId)),
+          ...workspace.missions,
+        ],
+        events: [
+          ...missionLibrary.events.filter((item) => !importedMissionIds.has(item.missionId)),
+          ...workspace.events,
+        ],
+      };
+      saveOrbitLibrary(nextOrbitLibrary);
+      saveMissionLibrary(nextMissionLibrary);
+      writeWorkspace({ ...workspace, orbits: nextOrbitLibrary, missions: nextMissionLibrary.missions, events: nextMissionLibrary.events });
+      toast.success("Workspace JSON imported.");
+    } catch (error) {
+      toast.error(userErrorMessage(error, "Invalid workspace JSON."));
+    }
+  }, [missionLibrary, orbitLibrary, saveMissionLibrary, saveOrbitLibrary]);
 
   const loadTleText = useCallback((raw: string) => {
     const result = parseSatelliteSource(raw);
@@ -1228,6 +1609,7 @@ export function OrbitalDashboard() {
     setMessages([`Creating ${request.type.replaceAll("_", " ").toLowerCase()} orbit...`]);
     const orbit = await createManualOrbit(request);
     const satellite = manualOrbitToSatellite(orbit);
+    rememberOrbit(storedOrbitFromManualOrbit(request, orbit, satellite));
     setSatellites([satellite]);
     setSelectedSatelliteIds([satellite.id]);
     setShowRangeCheck(false);
@@ -1242,11 +1624,12 @@ export function OrbitalDashboard() {
     setServerGroundTrackSnapshots(null);
     setMessages([`Manual orbit "${orbit.name}" created and loaded.`]);
     setActiveSourceModal(null);
-  }, [simTime]);
+  }, [rememberOrbit, simTime]);
 
   const handleLoadImportedTle = useCallback((raw: string, sourceLabel: string) => {
     const result = loadTleText(raw);
     if (result.satellites.length > 0) {
+      storedOrbitsFromImportedTle(result.satellites, raw, sourceLabel).forEach(rememberOrbit);
       setActiveDataSource("endpoint");
       setManualOrbitId(null);
       setActiveSourceModal(null);
@@ -1257,9 +1640,10 @@ export function OrbitalDashboard() {
         : [`Loaded ${result.satellites.length} satellites from ${sourceLabel}.`],
     );
     return result;
-  }, [loadTleText]);
+  }, [loadTleText, rememberOrbit]);
 
   const handleLoadCatalogSatellite = useCallback((satellite: SatelliteObject) => {
+    rememberOrbit(storedOrbitFromCatalogSatellite(satellite, backendCatalogGroup));
     setSatellites([satellite]);
     setSelectedSatelliteIds([satellite.id]);
     setShowRangeCheck(false);
@@ -1273,7 +1657,7 @@ export function OrbitalDashboard() {
     setServerGroundTrackSnapshots(null);
     setMessages([`Loaded ${satellite.name} from backend catalog ${backendCatalogGroup}.`]);
     setActiveSourceModal(null);
-  }, [backendCatalogGroup, simTime]);
+  }, [backendCatalogGroup, rememberOrbit, simTime]);
 
   const updateSelectedAnalysisConfig = useCallback(async (
     action: (noradId: string) => Promise<BackendAnalysisConfigResponse>,
@@ -1319,8 +1703,9 @@ export function OrbitalDashboard() {
     const events = await fetchMissionTimelineEvents(missionId);
     setMissionTimelineEvents(events);
     setSelectedTimelineEventId((current) => events.some((event) => event.id === current) ? current : events[0]?.id ?? null);
+    rememberMissionEvents(missionId, events);
     return events;
-  }, []);
+  }, [rememberMissionEvents]);
 
   const openMissionSetup = useCallback(() => {
     if (!selectedSnapshot?.satellite || (!selectedNoradId && !manualOrbitId)) {
@@ -1358,6 +1743,9 @@ export function OrbitalDashboard() {
         scenarioEnd: endIso,
       });
       setMission(created);
+      if (activeStoredOrbit) {
+        rememberMission(created, activeStoredOrbit.orbitId);
+      }
       await refreshMissionTimeline(created.id);
       setIsMissionSetupOpen(false);
       setTimelineStatus("Mission timeline initialized.");
@@ -1367,7 +1755,7 @@ export function OrbitalDashboard() {
       setTimelineStatus(message);
       toast.error(message);
     }
-  }, [manualOrbitId, missionSetupDraft, refreshMissionTimeline, selectedNoradId, selectedSnapshot]);
+  }, [activeStoredOrbit, manualOrbitId, missionSetupDraft, refreshMissionTimeline, rememberMission, selectedNoradId, selectedSnapshot]);
 
   const openCreateTimelineModal = useCallback((type: TimelineEditorDraft["type"] = "FINITE_BURN") => {
     setTimelineDraft({
@@ -1483,6 +1871,7 @@ export function OrbitalDashboard() {
     try {
       const reordered = await reorderMissionTimelineEvents(mission.id, next.map((event) => event.id));
       setMissionTimelineEvents(reordered);
+      rememberMissionEvents(mission.id, reordered);
       setMissionTrajectoryOverlay(null);
       setTimelineStatus("Timeline reordered.");
     } catch (error) {
@@ -1491,7 +1880,7 @@ export function OrbitalDashboard() {
       setTimelineStatus(message);
       toast.error(message);
     }
-  }, [mission, missionTimelineEvents, refreshMissionTimeline]);
+  }, [mission, missionTimelineEvents, refreshMissionTimeline, rememberMissionEvents]);
 
   const generateMissionTrajectory = useCallback(async () => {
     if (!mission || !selectedSnapshot?.satellite) {
@@ -1596,6 +1985,9 @@ export function OrbitalDashboard() {
           return;
         }
         setMission(selectedMission);
+        if (selectedMission && activeStoredOrbit) {
+          rememberMission(selectedMission, activeStoredOrbit.orbitId);
+        }
         setMissionTrajectoryOverlay(null);
         if (!selectedMission) {
           setMissionTimelineEvents([]);
@@ -1624,7 +2016,7 @@ export function OrbitalDashboard() {
     return () => {
       ignore = true;
     };
-  }, [canUseMissionTimeline, manualOrbitId, selectedNoradId]);
+  }, [activeStoredOrbit, canUseMissionTimeline, manualOrbitId, rememberMission, selectedNoradId]);
 
   useEffect(() => {
     let ignore = false;
@@ -2352,6 +2744,26 @@ export function OrbitalDashboard() {
           onDropEvent={reorderTimelineEvent}
         />
 
+        <WorkspaceLibraryPanel
+          orbitLibrary={orbitLibrary}
+          missionLibrary={missionLibrary}
+          activeOrbitId={activeStoredOrbit?.orbitId ?? activeWorkspaceOrbitId}
+          activeMissionId={activeStoredMission?.missionId ?? activeWorkspaceMissionId}
+          onLoadOrbit={loadStoredOrbit}
+          onRenameOrbit={renameStoredOrbit}
+          onDeleteOrbit={deleteStoredOrbit}
+          onCloneOrbitOnly={(orbit) => cloneStoredOrbit(orbit, false)}
+          onCloneOrbitWithMissions={(orbit) => cloneStoredOrbit(orbit, true)}
+          onExportOrbit={exportStoredOrbit}
+          onOpenMission={openStoredMission}
+          onRenameMission={renameStoredMission}
+          onDeleteMission={deleteStoredMission}
+          onCloneMission={cloneStoredMission}
+          onExportMission={exportStoredMission}
+          onExportWorkspace={exportWorkspace}
+          onImportWorkspace={() => workspaceImportInputRef.current?.click()}
+        />
+
         <ManeuverPanel
           maneuverSnapshots={maneuverSnapshots}
           selectedManeuverId={selectedManeuver?.event.id ?? null}
@@ -2555,6 +2967,13 @@ export function OrbitalDashboard() {
           onTleUrlChange={setTleUrl}
         />
       )}
+      <input
+        ref={workspaceImportInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        onChange={importWorkspaceFile}
+      />
       <ToastContainer
         position="bottom-right"
         theme="dark"
@@ -3462,6 +3881,192 @@ function getConjunctionStatusDescription(status: ConjunctionSnapshot["status"]) 
   }
 
   return "Safe means the closest approach stays outside the configured warning threshold.";
+}
+
+function WorkspaceLibraryPanel({
+  orbitLibrary,
+  missionLibrary,
+  activeOrbitId,
+  activeMissionId,
+  onLoadOrbit,
+  onRenameOrbit,
+  onDeleteOrbit,
+  onCloneOrbitOnly,
+  onCloneOrbitWithMissions,
+  onExportOrbit,
+  onOpenMission,
+  onRenameMission,
+  onDeleteMission,
+  onCloneMission,
+  onExportMission,
+  onExportWorkspace,
+  onImportWorkspace,
+}: {
+  orbitLibrary: StoredOrbit[];
+  missionLibrary: MissionLibraryState;
+  activeOrbitId: string | null;
+  activeMissionId: string | null;
+  onLoadOrbit: (orbit: StoredOrbit) => void;
+  onRenameOrbit: (orbit: StoredOrbit) => void;
+  onDeleteOrbit: (orbit: StoredOrbit) => void;
+  onCloneOrbitOnly: (orbit: StoredOrbit) => void;
+  onCloneOrbitWithMissions: (orbit: StoredOrbit) => void;
+  onExportOrbit: (orbit: StoredOrbit) => void;
+  onOpenMission: (mission: StoredMission) => void;
+  onRenameMission: (mission: StoredMission) => void;
+  onDeleteMission: (mission: StoredMission) => void;
+  onCloneMission: (mission: StoredMission) => void;
+  onExportMission: (mission: StoredMission) => void;
+  onExportWorkspace: () => void;
+  onImportWorkspace: () => void;
+}) {
+  const missionsByOrbit = useMemo(() => {
+    const map = new Map<string, StoredMission[]>();
+    missionLibrary.missions.forEach((mission) => {
+      const current = map.get(mission.orbitId) ?? [];
+      current.push(mission);
+      map.set(mission.orbitId, current);
+    });
+    return map;
+  }, [missionLibrary.missions]);
+  const eventsByMission = useMemo(() => {
+    const map = new Map<string, StoredEvent[]>();
+    missionLibrary.events.forEach((event) => {
+      const current = map.get(event.missionId) ?? [];
+      current.push(event);
+      map.set(event.missionId, current.toSorted((a, b) => a.sequenceIndex - b.sequenceIndex));
+    });
+    return map;
+  }, [missionLibrary.events]);
+
+  return (
+    <HudPanel>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Workspace</p>
+          <p className="mt-1 text-[11px] text-zinc-500">
+            {orbitLibrary.length} orbits / {missionLibrary.missions.length} missions / {missionLibrary.events.length} events
+          </p>
+        </div>
+        <div className="flex gap-1.5">
+          <button type="button" onClick={onImportWorkspace} className="workspace-action">Import</button>
+          <button type="button" onClick={onExportWorkspace} className="workspace-action">Export</button>
+        </div>
+      </div>
+
+      <div className="mt-3 border border-cyan-300/15 bg-black/25 px-3 py-2 text-xs">
+        <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Active Context</p>
+        <p className="mt-1 text-zinc-300">Orbit: <span className="font-mono text-cyan-100">{activeOrbitId ?? "--"}</span></p>
+        <p className="mt-1 text-zinc-300">Mission: <span className="font-mono text-cyan-100">{activeMissionId ?? "--"}</span></p>
+      </div>
+
+      <div className="mt-3">
+        <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Orbit Library</p>
+        <div className="mt-2 max-h-[30vh] space-y-2 overflow-auto pr-1">
+          {orbitLibrary.length === 0 ? (
+            <p className="border border-white/10 bg-black/25 px-3 py-2 font-mono text-[10px] uppercase text-zinc-600">No saved orbits yet</p>
+          ) : (
+            orbitLibrary.map((orbit) => {
+              const missions = missionsByOrbit.get(orbit.orbitId) ?? [];
+              return (
+                <div key={orbit.orbitId} className={`border bg-black/25 p-3 ${activeOrbitId === orbit.orbitId ? "border-cyan-300/60" : "border-white/10"}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-white">{orbit.orbitName}</p>
+                      <p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">{orbit.sourceType.replaceAll("_", " ")}</p>
+                    </div>
+                    <span className="font-mono text-[10px] text-cyan-200">{missions.length} missions</span>
+                  </div>
+                  <div className="mt-3 grid grid-cols-4 gap-1.5">
+                    <button type="button" onClick={() => onLoadOrbit(orbit)} className="workspace-action">Load</button>
+                    <button type="button" onClick={() => onRenameOrbit(orbit)} className="workspace-action">Name</button>
+                    <button type="button" onClick={() => onExportOrbit(orbit)} className="workspace-action">JSON</button>
+                    <button type="button" onClick={() => onDeleteOrbit(orbit)} className="workspace-action danger">Del</button>
+                  </div>
+                  <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+                    <button type="button" onClick={() => onCloneOrbitOnly(orbit)} className="workspace-action">Clone Orbit</button>
+                    <button type="button" onClick={() => onCloneOrbitWithMissions(orbit)} className="workspace-action">Clone + Missions</button>
+                  </div>
+                  {missions.length > 0 && (
+                    <div className="mt-3 space-y-2 border-t border-white/10 pt-2">
+                      {missions.map((item) => (
+                        <MissionLibraryRow
+                          key={item.missionId}
+                          mission={item}
+                          events={eventsByMission.get(item.missionId) ?? []}
+                          active={activeMissionId === item.missionId}
+                          onOpen={() => onOpenMission(item)}
+                          onRename={() => onRenameMission(item)}
+                          onClone={() => onCloneMission(item)}
+                          onExport={() => onExportMission(item)}
+                          onDelete={() => onDeleteMission(item)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 border border-white/10 bg-black/25 px-3 py-2">
+        <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Auth Ready</p>
+        <p className="mt-1 text-[11px] leading-5 text-zinc-500">
+          Anonymous local workspace now. Future login can sync this Orbit / Mission / Event graph without changing propagation.
+        </p>
+      </div>
+    </HudPanel>
+  );
+}
+
+function MissionLibraryRow({
+  mission,
+  events,
+  active,
+  onOpen,
+  onRename,
+  onClone,
+  onExport,
+  onDelete,
+}: {
+  mission: StoredMission;
+  events: StoredEvent[];
+  active: boolean;
+  onOpen: () => void;
+  onRename: () => void;
+  onClone: () => void;
+  onExport: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className={`border px-2 py-2 ${active ? "border-emerald-300/50 bg-emerald-300/[0.04]" : "border-white/10 bg-black/25"}`}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate text-xs font-semibold text-zinc-100">└ {mission.missionName}</p>
+          <p className="mt-1 font-mono text-[10px] text-zinc-500">{compactIsoUtc(mission.startTime)} -&gt; {compactIsoUtc(mission.endTime)}</p>
+        </div>
+        <span className="font-mono text-[10px] text-zinc-500">{events.length} events</span>
+      </div>
+      {events.length > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-1">
+          {events.map((event) => (
+            <span key={event.eventId} className={`border px-1.5 py-0.5 font-mono text-[9px] uppercase ${event.type === "FINITE_BURN" ? "border-rose-300/35 text-rose-100" : "border-sky-300/30 text-sky-100"}`}>
+              {event.type === "FINITE_BURN" ? "Burn" : "Coast"}
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="mt-2 grid grid-cols-5 gap-1">
+        <button type="button" onClick={onOpen} className="workspace-action">Open</button>
+        <button type="button" onClick={onRename} className="workspace-action">Name</button>
+        <button type="button" onClick={onClone} className="workspace-action">Clone</button>
+        <button type="button" onClick={onExport} className="workspace-action">JSON</button>
+        <button type="button" onClick={onDelete} className="workspace-action danger">Del</button>
+      </div>
+    </div>
+  );
 }
 
 function MissionTimelinePanel({
