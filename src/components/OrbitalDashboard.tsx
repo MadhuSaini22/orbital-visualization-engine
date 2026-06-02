@@ -81,6 +81,7 @@ type FrameMode = "earth-fixed" | "inertial";
 type OrbitSourceId = "catalog" | "tle" | "classical" | "cartesian";
 type TleImportMode = "paste" | "upload" | "url";
 type TimelineModalMode = "create" | "edit";
+type MissionDurationPreset = "ONE_ORBIT" | "THREE_HOURS" | "TWELVE_HOURS" | "TWENTY_FOUR_HOURS" | "CUSTOM";
 type TimelineEditorDraft = {
   type: "COAST" | "FINITE_BURN";
   name: string;
@@ -93,6 +94,14 @@ type TimelineEditorDraft = {
   directionX: string;
   directionY: string;
   directionZ: string;
+};
+type MissionSetupDraft = {
+  name: string;
+  startDateUtc: string;
+  startTimeUtc: string;
+  endDateUtc: string;
+  endTimeUtc: string;
+  durationPreset: MissionDurationPreset;
 };
 type MissionTrajectoryOverlay = {
   mission: SatelliteSnapshot | null;
@@ -154,6 +163,13 @@ const defaultTimelineDraft: TimelineEditorDraft = {
   directionY: "0",
   directionZ: "0",
 };
+const missionDurationPresets = [
+  { id: "ONE_ORBIT", label: "1 orbit", seconds: 90 * 60 },
+  { id: "THREE_HOURS", label: "3 hours", seconds: 3 * 60 * 60 },
+  { id: "TWELVE_HOURS", label: "12 hours", seconds: 12 * 60 * 60 },
+  { id: "TWENTY_FOUR_HOURS", label: "24 hours", seconds: 24 * 60 * 60 },
+  { id: "CUSTOM", label: "Custom", seconds: null },
+] satisfies Array<{ id: MissionDurationPreset; label: string; seconds: number | null }>;
 const groundTrackRangeOptions = [
   {
     id: "live",
@@ -559,6 +575,166 @@ function validateTimelineDraft(draft: TimelineEditorDraft) {
   return errors;
 }
 
+function compactIsoUtc(iso: string) {
+  return iso.replace(".000Z", "Z");
+}
+
+function secondsToDurationLabel(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return "--";
+  }
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = Math.floor(seconds % 60);
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${String(remainingSeconds).padStart(2, "0")}s`;
+  }
+  return `${remainingSeconds}s`;
+}
+
+function signedOffsetLabel(fromIso: string, toIso: string) {
+  const from = new Date(fromIso).getTime();
+  const to = new Date(toIso).getTime();
+  if (Number.isNaN(from) || Number.isNaN(to)) {
+    return "--";
+  }
+  const deltaSeconds = Math.round((to - from) / 1000);
+  const sign = deltaSeconds < 0 ? "T-" : "T+";
+  const absolute = Math.abs(deltaSeconds);
+  const hours = Math.floor(absolute / 3600);
+  const minutes = Math.floor((absolute % 3600) / 60);
+  const seconds = absolute % 60;
+  return `${sign}${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function missionWindowFromDraft(draft: MissionSetupDraft) {
+  return {
+    startIso: utcDateAndTimeInputToIso(draft.startDateUtc, draft.startTimeUtc),
+    endIso: utcDateAndTimeInputToIso(draft.endDateUtc, draft.endTimeUtc),
+  };
+}
+
+function missionSetupDraftFor(
+  satellite: SatelliteObject | null | undefined,
+  centerTime: Date,
+  durationPreset: MissionDurationPreset = "THREE_HOURS",
+): MissionSetupDraft {
+  const preset = missionDurationPresets.find((item) => item.id === durationPreset) ?? missionDurationPresets[1];
+  const start = centerTime;
+  const end = new Date(start.getTime() + (preset.seconds ?? 3 * 60 * 60) * 1000);
+  return {
+    name: `${satellite?.name ?? "Orbit"} Mission`,
+    startDateUtc: utcIsoToDateInput(start.toISOString()),
+    startTimeUtc: utcIsoToTimeInput(start.toISOString()),
+    endDateUtc: utcIsoToDateInput(end.toISOString()),
+    endTimeUtc: utcIsoToTimeInput(end.toISOString()),
+    durationPreset: preset.id,
+  };
+}
+
+function applyMissionDurationPreset(draft: MissionSetupDraft, presetId: MissionDurationPreset): MissionSetupDraft {
+  const preset = missionDurationPresets.find((item) => item.id === presetId);
+  if (!preset || preset.seconds === null) {
+    return { ...draft, durationPreset: presetId };
+  }
+  const startIso = utcDateAndTimeInputToIso(draft.startDateUtc, draft.startTimeUtc);
+  const end = new Date(new Date(startIso).getTime() + preset.seconds * 1000);
+  return {
+    ...draft,
+    durationPreset: presetId,
+    endDateUtc: utcIsoToDateInput(end.toISOString()),
+    endTimeUtc: utcIsoToTimeInput(end.toISOString()),
+  };
+}
+
+function validateMissionSetupDraft(draft: MissionSetupDraft) {
+  const errors: Partial<Record<keyof MissionSetupDraft, string>> = {};
+  if (!draft.name.trim()) {
+    errors.name = "Mission name is required";
+  }
+  if (!draft.startDateUtc) {
+    errors.startDateUtc = "Start date required";
+  }
+  if (!draft.startTimeUtc) {
+    errors.startTimeUtc = "Start time required";
+  }
+  if (!draft.endDateUtc) {
+    errors.endDateUtc = "End date required";
+  }
+  if (!draft.endTimeUtc) {
+    errors.endTimeUtc = "End time required";
+  }
+  try {
+    const { startIso, endIso } = missionWindowFromDraft(draft);
+    if (Number.isNaN(new Date(startIso).getTime()) || Number.isNaN(new Date(endIso).getTime())) {
+      errors.endTimeUtc = errors.endTimeUtc ?? "Valid UTC window required";
+    }
+    if (new Date(startIso) >= new Date(endIso)) {
+      errors.endTimeUtc = "Mission end must be after start";
+    }
+  } catch {
+    errors.endTimeUtc = errors.endTimeUtc ?? "Valid UTC window required";
+  }
+  return errors;
+}
+
+function missionDurationSeconds(mission: BackendMission) {
+  return Math.max(0, Math.round((new Date(mission.scenarioEnd).getTime() - new Date(mission.scenarioStart).getTime()) / 1000));
+}
+
+function missionSubjectSummary(
+  source: ActiveDataSource,
+  satellite: SatelliteObject | null | undefined,
+  selectedNoradId: string | number | null,
+  manualOrbitId: string | null,
+) {
+  if (source === "manual") {
+    const type = satellite?.metadata?.mission ? titleCase(String(satellite.metadata.mission)) : "Manual Orbit";
+    return {
+      label: `${type} mission`,
+      detail: manualOrbitId ?? satellite?.id ?? "manual orbit",
+    };
+  }
+  if (source === "backend" && selectedNoradId) {
+    return {
+      label: "Catalog NORAD mission",
+      detail: `NORAD ${selectedNoradId}`,
+    };
+  }
+  return {
+    label: "No backend mission subject",
+    detail: "Select a catalog or manual backend orbit",
+  };
+}
+
+function titleCase(value: string) {
+  return value
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function eventWindowError(mission: BackendMission | null, executionIso: string) {
+  if (!mission) {
+    return null;
+  }
+  const execution = new Date(executionIso);
+  const start = new Date(mission.scenarioStart);
+  const end = new Date(mission.scenarioEnd);
+  if (execution >= start && execution <= end) {
+    return null;
+  }
+  return [
+    `Event time: ${compactIsoUtc(executionIso)}`,
+    `Mission window: ${compactIsoUtc(mission.scenarioStart)} -> ${compactIsoUtc(mission.scenarioEnd)}`,
+    "Event is outside the mission window.",
+  ].join("\n");
+}
+
 function validatePositiveDraftNumber(
   value: string,
   key: keyof TimelineEditorDraft,
@@ -639,6 +815,10 @@ export function OrbitalDashboard() {
   const [selectedTimelineEventId, setSelectedTimelineEventId] = useState<string | null>(null);
   const [timelineModalMode, setTimelineModalMode] = useState<TimelineModalMode | null>(null);
   const [timelineDraft, setTimelineDraft] = useState<TimelineEditorDraft>(defaultTimelineDraft);
+  const [isMissionSetupOpen, setIsMissionSetupOpen] = useState(false);
+  const [missionSetupDraft, setMissionSetupDraft] = useState<MissionSetupDraft>(
+    () => missionSetupDraftFor(null, initialSimulationTime),
+  );
   const [timelineStatus, setTimelineStatus] = useState<string | null>(null);
   const [timelineDragEventId, setTimelineDragEventId] = useState<string | null>(null);
   const [missionTrajectoryOverlay, setMissionTrajectoryOverlay] = useState<MissionTrajectoryOverlay | null>(null);
@@ -1142,6 +1322,17 @@ export function OrbitalDashboard() {
     return events;
   }, []);
 
+  const openMissionSetup = useCallback(() => {
+    if (!selectedSnapshot?.satellite || (!selectedNoradId && !manualOrbitId)) {
+      const message = "Select a catalog or manual backend orbit first.";
+      setTimelineStatus(message);
+      toast.error(message);
+      return;
+    }
+    setMissionSetupDraft(missionSetupDraftFor(selectedSnapshot.satellite, simTimeRef.current));
+    setIsMissionSetupOpen(true);
+  }, [manualOrbitId, selectedNoradId, selectedSnapshot]);
+
   const initializeMissionTimeline = useCallback(async () => {
     if (!selectedSnapshot?.satellite || (!selectedNoradId && !manualOrbitId)) {
       const message = "Select a catalog or manual backend orbit first.";
@@ -1149,20 +1340,26 @@ export function OrbitalDashboard() {
       toast.error(message);
       return;
     }
-
+    const errors = validateMissionSetupDraft(missionSetupDraft);
+    if (Object.keys(errors).length > 0) {
+      const message = Object.values(errors)[0] ?? "Fix mission setup fields.";
+      setTimelineStatus(message);
+      toast.error(message);
+      return;
+    }
     setTimelineStatus("Creating mission timeline...");
     try {
-      const start = addMinutes(simTimeRef.current, -defaultMissionTrajectoryWindowMinutes);
-      const end = addMinutes(simTimeRef.current, defaultMissionTrajectoryWindowMinutes);
+      const { startIso, endIso } = missionWindowFromDraft(missionSetupDraft);
       const created = await createMission({
-        name: `${selectedSnapshot.satellite.name} Mission`,
+        name: missionSetupDraft.name.trim(),
         ...(manualOrbitId ? { subjectOrbitId: manualOrbitId } : { subjectNoradId: Number(selectedNoradId) }),
         propagatorType: "NUMERICAL",
-        scenarioStart: start.toISOString(),
-        scenarioEnd: end.toISOString(),
+        scenarioStart: startIso,
+        scenarioEnd: endIso,
       });
       setMission(created);
       await refreshMissionTimeline(created.id);
+      setIsMissionSetupOpen(false);
       setTimelineStatus("Mission timeline initialized.");
       toast.success("Mission timeline initialized.");
     } catch (error) {
@@ -1170,7 +1367,7 @@ export function OrbitalDashboard() {
       setTimelineStatus(message);
       toast.error(message);
     }
-  }, [manualOrbitId, refreshMissionTimeline, selectedNoradId, selectedSnapshot]);
+  }, [manualOrbitId, missionSetupDraft, refreshMissionTimeline, selectedNoradId, selectedSnapshot]);
 
   const openCreateTimelineModal = useCallback((type: TimelineEditorDraft["type"] = "FINITE_BURN") => {
     setTimelineDraft({
@@ -1202,6 +1399,13 @@ export function OrbitalDashboard() {
       const message = Object.values(errors)[0] ?? "Fix timeline event fields.";
       setTimelineStatus(message);
       toast.error(message);
+      return;
+    }
+    const executionIso = utcDateAndTimeInputToIso(timelineDraft.executionDateUtc, timelineDraft.executionTimeUtc);
+    const windowError = eventWindowError(mission, executionIso);
+    if (windowError) {
+      setTimelineStatus(windowError);
+      toast.error(windowError);
       return;
     }
 
@@ -2130,11 +2334,12 @@ export function OrbitalDashboard() {
           status={timelineStatus}
           canUseMissionTimeline={canUseMissionTimeline}
           unavailableReason={missionTimelineUnavailableReason}
+          subjectSummary={missionSubjectSummary(activeDataSource, selectedSnapshot?.satellite, selectedNoradId, manualOrbitId)}
           isTrajectoryLoading={isMissionTrajectoryLoading}
           showComparison={showMissionComparison}
           trajectoryOverlay={missionTrajectoryOverlay}
           dragEventId={timelineDragEventId}
-          onInitializeMission={initializeMissionTimeline}
+          onInitializeMission={openMissionSetup}
           onOpenCatalog={() => openOrbitSource("catalog")}
           onCreateEvent={openCreateTimelineModal}
           onEditEvent={openEditTimelineModal}
@@ -2301,10 +2506,22 @@ export function OrbitalDashboard() {
       {timelineModalMode && (
         <TimelineEventModal
           mode={timelineModalMode}
+          mission={mission}
+          simulationTimeIso={simTime.toISOString()}
           draft={timelineDraft}
           onDraftChange={setTimelineDraft}
           onSave={saveTimelineEvent}
           onClose={() => setTimelineModalMode(null)}
+        />
+      )}
+
+      {isMissionSetupOpen && (
+        <MissionSetupModal
+          draft={missionSetupDraft}
+          subjectSummary={missionSubjectSummary(activeDataSource, selectedSnapshot?.satellite, selectedNoradId, manualOrbitId)}
+          onDraftChange={setMissionSetupDraft}
+          onCreate={initializeMissionTimeline}
+          onClose={() => setIsMissionSetupOpen(false)}
         />
       )}
 
@@ -3254,6 +3471,7 @@ function MissionTimelinePanel({
   status,
   canUseMissionTimeline,
   unavailableReason,
+  subjectSummary,
   isTrajectoryLoading,
   showComparison,
   trajectoryOverlay,
@@ -3276,6 +3494,7 @@ function MissionTimelinePanel({
   status: string | null;
   canUseMissionTimeline: boolean;
   unavailableReason: string | null;
+  subjectSummary: { label: string; detail: string };
   isTrajectoryLoading: boolean;
   showComparison: boolean;
   trajectoryOverlay: MissionTrajectoryOverlay | null;
@@ -3348,6 +3567,34 @@ function MissionTimelinePanel({
           {canUseMissionTimeline
             ? "Create a mission for this catalog orbit, then add Coast and Finite Burn events."
             : unavailableReason}
+        </div>
+      )}
+
+      {mission && (
+        <div className="mt-3 grid gap-2 border border-cyan-300/15 bg-black/25 px-3 py-2 text-xs">
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Subject</span>
+            <span className="text-right text-zinc-200">{subjectSummary.label}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Identifier</span>
+            <span className="text-right font-mono text-[10px] text-zinc-400">{subjectSummary.detail}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Start UTC</span>
+            <span className="font-mono text-[10px] text-zinc-200">{compactIsoUtc(mission.scenarioStart)}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">End UTC</span>
+            <span className="font-mono text-[10px] text-zinc-200">{compactIsoUtc(mission.scenarioEnd)}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Duration</span>
+            <span className="text-zinc-200">{secondsToDurationLabel(missionDurationSeconds(mission))}</span>
+          </div>
+          <div className="border-t border-white/10 pt-2 text-[11px] leading-5 text-zinc-500">
+            Trajectory generation currently uses a separate preview window centered on the simulation clock.
+          </div>
         </div>
       )}
 
@@ -3510,14 +3757,179 @@ function TimelineEventCard({
   );
 }
 
+function MissionSetupModal({
+  draft,
+  subjectSummary,
+  onDraftChange,
+  onCreate,
+  onClose,
+}: {
+  draft: MissionSetupDraft;
+  subjectSummary: { label: string; detail: string };
+  onDraftChange: (draft: MissionSetupDraft) => void;
+  onCreate: () => void;
+  onClose: () => void;
+}) {
+  const errors = validateMissionSetupDraft(draft);
+  const isValid = Object.keys(errors).length === 0;
+  const update = (patch: Partial<MissionSetupDraft>) => {
+    const next = { ...draft, ...patch };
+    if (
+      next.durationPreset !== "CUSTOM"
+      && (patch.startDateUtc !== undefined || patch.startTimeUtc !== undefined || patch.durationPreset !== undefined)
+    ) {
+      try {
+        onDraftChange(applyMissionDurationPreset(next, next.durationPreset));
+      } catch {
+        onDraftChange(next);
+      }
+      return;
+    }
+    onDraftChange(next);
+  };
+  const windowPreview = useMemo(() => {
+    try {
+      return missionWindowFromDraft(draft);
+    } catch {
+      return null;
+    }
+  }, [draft]);
+  const durationLabel = windowPreview
+    ? secondsToDurationLabel(Math.round((new Date(windowPreview.endIso).getTime() - new Date(windowPreview.startIso).getTime()) / 1000))
+    : "--";
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
+      <div className="flex max-h-[88vh] w-[min(720px,94vw)] flex-col overflow-hidden border border-cyan-300/30 bg-[#071016]/96 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-cyan-300/20 px-5 py-4">
+          <div>
+            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Mission Setup</p>
+            <h2 className="mt-1 text-xl font-semibold text-white">Define Mission Window</h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="grid h-9 w-9 place-items-center border border-white/15 text-zinc-200 transition hover:border-cyan-300 hover:text-white"
+            aria-label="Close mission setup modal"
+            title="Close"
+          >
+            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="min-h-0 overflow-auto p-5">
+          <div className="grid gap-4">
+            <div className="border border-cyan-300/15 bg-black/25 px-3 py-2">
+              <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Subject Summary</p>
+              <p className="mt-1 text-sm font-semibold text-white">{subjectSummary.label}</p>
+              <p className="mt-1 font-mono text-[10px] text-zinc-500">{subjectSummary.detail}</p>
+            </div>
+
+            <TimelineField label="Mission Name" error={errors.name}>
+              <input value={draft.name} onChange={(event) => update({ name: event.target.value })} className="timeline-input" />
+            </TimelineField>
+
+            <div>
+              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Duration Preset</span>
+              <div className="mt-2 grid grid-cols-5 gap-2 max-sm:grid-cols-2">
+                {missionDurationPresets.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => update({ durationPreset: preset.id })}
+                    className={`border px-2 py-2 font-mono text-[10px] uppercase transition ${
+                      draft.durationPreset === preset.id
+                        ? "border-cyan-300 bg-cyan-300 text-slate-950"
+                        : "border-white/10 text-zinc-400 hover:border-cyan-300/50 hover:text-cyan-100"
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 max-sm:grid-cols-1">
+              <div>
+                <span className="flex items-center justify-between gap-3">
+                  <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Mission Start UTC</span>
+                  {(errors.startDateUtc || errors.startTimeUtc) && (
+                    <span className="font-mono text-[10px] uppercase text-rose-200">{errors.startDateUtc ?? errors.startTimeUtc}</span>
+                  )}
+                </span>
+                <div className="mt-1 grid grid-cols-[minmax(0,1fr)_130px] gap-2">
+                  <input type="date" value={draft.startDateUtc} onChange={(event) => update({ startDateUtc: event.target.value })} className="timeline-input" />
+                  <input type="time" step="1" value={draft.startTimeUtc} onChange={(event) => update({ startTimeUtc: event.target.value })} className="timeline-input" />
+                </div>
+              </div>
+              <div>
+                <span className="flex items-center justify-between gap-3">
+                  <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Mission End UTC</span>
+                  {(errors.endDateUtc || errors.endTimeUtc) && (
+                    <span className="font-mono text-[10px] uppercase text-rose-200">{errors.endDateUtc ?? errors.endTimeUtc}</span>
+                  )}
+                </span>
+                <div className="mt-1 grid grid-cols-[minmax(0,1fr)_130px] gap-2">
+                  <input
+                    type="date"
+                    value={draft.endDateUtc}
+                    onChange={(event) => update({ endDateUtc: event.target.value, durationPreset: "CUSTOM" })}
+                    className="timeline-input"
+                  />
+                  <input
+                    type="time"
+                    step="1"
+                    value={draft.endTimeUtc}
+                    onChange={(event) => update({ endTimeUtc: event.target.value, durationPreset: "CUSTOM" })}
+                    className="timeline-input"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="border border-white/10 bg-black/25 px-3 py-2 text-xs leading-5 text-zinc-300">
+              <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Mission Window Preview</p>
+              <p className="mt-1 font-mono text-[11px] text-cyan-100">
+                {windowPreview ? `${compactIsoUtc(windowPreview.startIso)} -> ${compactIsoUtc(windowPreview.endIso)}` : "Invalid UTC window"}
+              </p>
+              <p className="mt-1 text-zinc-500">Duration: {durationLabel}</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-cyan-300/20 px-5 py-4">
+          <button type="button" onClick={onClose} className="border border-white/10 px-4 py-2 font-mono text-xs uppercase text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100">
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onCreate}
+            disabled={!isValid}
+            className="border border-cyan-300 bg-cyan-300 px-4 py-2 font-mono text-xs font-semibold uppercase text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/10 disabled:text-zinc-500"
+          >
+            Create Mission
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 function TimelineEventModal({
   mode,
+  mission,
+  simulationTimeIso,
   draft,
   onDraftChange,
   onSave,
   onClose,
 }: {
   mode: TimelineModalMode;
+  mission: BackendMission | null;
+  simulationTimeIso: string;
   draft: TimelineEditorDraft;
   onDraftChange: (draft: TimelineEditorDraft) => void;
   onSave: () => void;
@@ -3532,6 +3944,11 @@ function TimelineEventModal({
       return "Invalid UTC timestamp";
     }
   }, [draft.executionDateUtc, draft.executionTimeUtc]);
+  const missionWindowError = isoPreview.endsWith("Z") ? eventWindowError(mission, isoPreview) : null;
+  const offsetFromMissionStart = mission && isoPreview.endsWith("Z")
+    ? signedOffsetLabel(mission.scenarioStart, isoPreview)
+    : "--";
+  const canSave = Object.keys(errors).length === 0 && !missionWindowError;
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
@@ -3571,6 +3988,16 @@ function TimelineEventModal({
           </div>
 
           <div className="mt-5 grid gap-4">
+            {mission && (
+              <div className="grid gap-2 border border-cyan-300/15 bg-black/25 px-3 py-2 text-xs leading-5 text-zinc-300">
+                <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Mission Window</p>
+                <p className="font-mono text-[11px] text-cyan-100">{compactIsoUtc(mission.scenarioStart)} -&gt; {compactIsoUtc(mission.scenarioEnd)}</p>
+                <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
+                  <span>Current simulation time: <span className="font-mono text-zinc-100">{compactIsoUtc(simulationTimeIso)}</span></span>
+                  <span>Offset: <span className="font-mono text-zinc-100">{offsetFromMissionStart}</span></span>
+                </div>
+              </div>
+            )}
             <TimelineField label="Name" error={errors.name}>
               <input value={draft.name} onChange={(event) => update({ name: event.target.value })} className="timeline-input" />
             </TimelineField>
@@ -3604,6 +4031,11 @@ function TimelineEventModal({
               <p className="mt-2 border border-white/10 bg-black/25 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-zinc-400">
                 ISO UTC: <span className="text-cyan-100">{isoPreview}</span>
               </p>
+              {missionWindowError && (
+                <p className="mt-2 whitespace-pre-line border border-rose-300/35 bg-rose-300/[0.06] px-3 py-2 text-xs leading-5 text-rose-100">
+                  {missionWindowError}
+                </p>
+              )}
             </div>
 
             {draft.type === "FINITE_BURN" && (
@@ -3647,7 +4079,12 @@ function TimelineEventModal({
           <button type="button" onClick={onClose} className="border border-white/10 px-4 py-2 font-mono text-xs uppercase text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100">
             Cancel
           </button>
-          <button type="button" onClick={onSave} className="border border-cyan-300 bg-cyan-300 px-4 py-2 font-mono text-xs font-semibold uppercase text-slate-950 transition hover:bg-cyan-200">
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={!canSave}
+            className="border border-cyan-300 bg-cyan-300 px-4 py-2 font-mono text-xs font-semibold uppercase text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/10 disabled:text-zinc-500"
+          >
             Save
           </button>
         </div>
