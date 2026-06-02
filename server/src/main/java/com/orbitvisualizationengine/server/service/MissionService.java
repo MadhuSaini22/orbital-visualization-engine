@@ -20,11 +20,17 @@ public class MissionService {
 
   public Mission create(CreateMissionRequest request) {
     validator.validateMissionWindow(request.scenarioStart(), request.scenarioEnd());
+    boolean hasNoradSubject = request.subjectNoradId() != null;
+    boolean hasManualSubject = request.subjectOrbitId() != null && !request.subjectOrbitId().isBlank();
+    if (hasNoradSubject == hasManualSubject) {
+      throw new IllegalArgumentException("Mission must reference exactly one subject: subjectNoradId or subjectOrbitId.");
+    }
     Instant now = Instant.now();
     return missions.save(new Mission(
         "mission-" + UUID.randomUUID(),
         request.name().trim(),
         request.subjectNoradId(),
+        hasManualSubject ? request.subjectOrbitId().trim() : null,
         request.propagatorType(),
         request.scenarioStart(),
         request.scenarioEnd(),

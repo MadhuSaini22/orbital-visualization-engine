@@ -17,6 +17,7 @@ import com.orbitvisualizationengine.server.domain.TimelineEventType;
 import com.orbitvisualizationengine.server.dto.MissionTrajectoryRequest;
 import com.orbitvisualizationengine.server.propagation.NumericalPropagator;
 import com.orbitvisualizationengine.server.propagation.OrbitSeed;
+import com.orbitvisualizationengine.server.propagation.MissionPropagationContextFactory;
 import com.orbitvisualizationengine.server.propagation.OrekitEnvironment;
 import com.orbitvisualizationengine.server.propagation.OrekitStateMapper;
 import com.orbitvisualizationengine.server.propagation.PropagationContext;
@@ -62,7 +63,7 @@ class MissionTrajectoryServiceTest {
     MissionTimelinePropagationService timelinePropagation =
         new FixedTimelinePropagationService(List.of(timelineCommand));
     MissionTrajectoryService service =
-        new MissionTrajectoryService(missions, timelinePropagation, noradId -> baseContext, numericalPropagator);
+        new MissionTrajectoryService(missions, timelinePropagation, fixedContextFactory(baseContext), numericalPropagator);
 
     MissionTrajectoryRequest request = new MissionTrajectoryRequest(
         MISSION_ID,
@@ -96,11 +97,21 @@ class MissionTrajectoryServiceTest {
   }
 
   @Test
+  void cartesianManualOrbitMissionTrajectoryUsesSubjectOrbitId() {
+    manualOrbitMissionTrajectoryUsesSubjectOrbitId("manual-cartesian-orbit");
+  }
+
+  @Test
+  void classicalElementsManualOrbitMissionTrajectoryUsesSubjectOrbitId() {
+    manualOrbitMissionTrajectoryUsesSubjectOrbitId("manual-classical-orbit");
+  }
+
+  @Test
   void missionTrajectoryRequiresMatchingMissionId() {
     MissionTrajectoryService service = new MissionTrajectoryService(
         missionService(mission()),
         new FixedTimelinePropagationService(List.of()),
-        noradId -> context(new OrekitEnvironment(), List.of(), List.of(), config()),
+        fixedContextFactory(context(new OrekitEnvironment(), List.of(), List.of(), config())),
         new NumericalPropagator(new OrekitEnvironment()));
 
     IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () ->
@@ -119,6 +130,7 @@ class MissionTrajectoryServiceTest {
         MISSION_ID,
         "No subject",
         null,
+        null,
         PropagatorType.NUMERICAL,
         EPOCH,
         EPOCH.plusSeconds(3600),
@@ -127,7 +139,7 @@ class MissionTrajectoryServiceTest {
     MissionTrajectoryService service = new MissionTrajectoryService(
         missions,
         new FixedTimelinePropagationService(List.of()),
-        noradId -> context(new OrekitEnvironment(), List.of(), List.of(), config()),
+        unusedContextFactory(),
         new NumericalPropagator(new OrekitEnvironment()));
 
     IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () ->
@@ -137,7 +149,7 @@ class MissionTrajectoryServiceTest {
             EPOCH.plusSeconds(60),
             60)));
 
-    assertEquals("Mission trajectory requires subjectNoradId: " + MISSION_ID, exception.getMessage());
+    assertEquals("Mission trajectory requires subjectNoradId or subjectOrbitId: " + MISSION_ID, exception.getMessage());
   }
 
   private static Mission mission() {
@@ -145,6 +157,7 @@ class MissionTrajectoryServiceTest {
         MISSION_ID,
         "Mission trajectory parity",
         NORAD_ID,
+        null,
         PropagatorType.NUMERICAL,
         EPOCH,
         EPOCH.plusSeconds(3600),
@@ -152,10 +165,87 @@ class MissionTrajectoryServiceTest {
         EPOCH);
   }
 
+  private static Mission manualMission(String orbitId) {
+    return new Mission(
+        MISSION_ID,
+        "Manual orbit mission trajectory",
+        null,
+        orbitId,
+        PropagatorType.NUMERICAL,
+        EPOCH,
+        EPOCH.plusSeconds(3600),
+        EPOCH,
+        EPOCH);
+  }
+
+  private static void manualOrbitMissionTrajectoryUsesSubjectOrbitId(String orbitId) {
+    OrekitTestDataLoader.ensureLoaded();
+    OrekitEnvironment environment = new OrekitEnvironment();
+    NumericalPropagator numericalPropagator = new NumericalPropagator(environment);
+    PropagationContext baseContext = context(environment, List.of(), List.of(), config());
+    MissionService missions = missionService(manualMission(orbitId));
+    MissionTrajectoryService service = new MissionTrajectoryService(
+        missions,
+        new FixedTimelinePropagationService(List.of(timelineCommand())),
+        manualOnlyContextFactory(orbitId, baseContext),
+        numericalPropagator);
+
+    List<EphemerisState> states = service.trajectory(MISSION_ID, new MissionTrajectoryRequest(
+        MISSION_ID,
+        EPOCH,
+        EPOCH.plusSeconds(1800),
+        60));
+
+    assertEquals(31, states.size());
+  }
+
   private static MissionService missionService(Mission mission) {
     InMemoryMissionRepository repository = new InMemoryMissionRepository();
     repository.save(mission);
     return new MissionService(repository, new MissionTimelineValidator());
+  }
+
+  private static MissionPropagationContextFactory fixedContextFactory(PropagationContext context) {
+    return new MissionPropagationContextFactory() {
+      @Override
+      public PropagationContext buildLegacyFreeContext(int noradId) {
+        return context;
+      }
+
+      @Override
+      public PropagationContext buildManualOrbitContext(String orbitId) {
+        return context;
+      }
+    };
+  }
+
+  private static MissionPropagationContextFactory unusedContextFactory() {
+    return new MissionPropagationContextFactory() {
+      @Override
+      public PropagationContext buildLegacyFreeContext(int noradId) {
+        throw new AssertionError("Context factory should not be called.");
+      }
+
+      @Override
+      public PropagationContext buildManualOrbitContext(String orbitId) {
+        throw new AssertionError("Context factory should not be called.");
+      }
+    };
+  }
+
+  private static MissionPropagationContextFactory manualOnlyContextFactory(String expectedOrbitId, PropagationContext context) {
+    return new MissionPropagationContextFactory() {
+      @Override
+      public PropagationContext buildLegacyFreeContext(int noradId) {
+        throw new AssertionError("Manual orbit mission should not use NORAD context.");
+      }
+
+      @Override
+      public PropagationContext buildManualOrbitContext(String orbitId) {
+        assertEquals(expectedOrbitId, orbitId);
+        return context;
+      }
+    };
   }
 
   private static ManeuverEvent legacyManeuver() {
@@ -192,6 +282,10 @@ class MissionTrajectoryServiceTest {
             "source", "phase-c-parity"),
         EPOCH,
         EPOCH);
+  }
+
+  private static PropagationManeuverCommand timelineCommand() {
+    return new TimelineExecutor(new MissionTimelineValidator()).toPropagationCommands(List.of(timelineEvent())).getFirst();
   }
 
   private static PropagationContext context(

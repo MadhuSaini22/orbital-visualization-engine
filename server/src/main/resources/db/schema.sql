@@ -119,6 +119,7 @@ create table if not exists missions (
   id text primary key,
   name text not null,
   subject_norad_id integer references satellites(norad_id) on delete restrict,
+  subject_orbit_id text references manual_orbits(id) on delete restrict,
   propagator_type text not null,
   scenario_start timestamptz not null,
   scenario_end timestamptz not null,
@@ -154,6 +155,9 @@ create index if not exists mission_timeline_events_mission_time_idx
 
 alter table missions
   add column if not exists subject_norad_id integer references satellites(norad_id) on delete restrict;
+
+alter table missions
+  add column if not exists subject_orbit_id text references manual_orbits(id) on delete restrict;
 
 alter table missions
   drop constraint if exists missions_scenario_window_valid;

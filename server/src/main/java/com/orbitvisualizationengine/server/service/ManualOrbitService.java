@@ -83,6 +83,18 @@ public class ManualOrbitService {
     return selectPropagator(orbit, requestedType).trajectory(context(orbit, requestedType), start, end, stepSeconds);
   }
 
+  public PropagationContext missionPropagationContext(String orbitId) {
+    ManualOrbitRecord orbit = get(orbitId);
+    validatePropagatorCompatibility(orbit.type(), PropagatorType.NUMERICAL);
+    SatelliteAnalysisConfig config = manualConfig(PropagatorType.NUMERICAL, orbit.updatedAt(), true);
+    return new PropagationContext(
+        0,
+        orbitFactory.fromManualOrbit(orbit),
+        config,
+        SpacecraftModel.fromConfig(config),
+        List.of());
+  }
+
   public List<String> warnings(ManualOrbitRecord orbit) {
     if (orbit.propagatorType() == PropagatorType.TLE_SGP4 && orbit.type() != OrbitDefinitionType.TLE) {
       return List.of("SGP4 is only available for TLE manual orbits.");
@@ -93,7 +105,7 @@ public class ManualOrbitService {
   private PropagationContext context(ManualOrbitRecord orbit, PropagatorType requestedType) {
     PropagatorType type = requestedType == null ? orbit.propagatorType() : requestedType;
     validatePropagatorCompatibility(orbit.type(), type);
-    SatelliteAnalysisConfig config = manualConfig(type, orbit.updatedAt());
+    SatelliteAnalysisConfig config = manualConfig(type, orbit.updatedAt(), false);
     return new PropagationContext(
         0,
         orbitFactory.fromManualOrbit(orbit),
@@ -125,7 +137,7 @@ public class ManualOrbitService {
     }
   }
 
-  private SatelliteAnalysisConfig manualConfig(PropagatorType type, Instant updatedAt) {
+  private SatelliteAnalysisConfig manualConfig(PropagatorType type, Instant updatedAt, boolean maneuverModelEnabled) {
     return new SatelliteAnalysisConfig(
         0,
         AnalysisPreset.FAST_PREVIEW,
@@ -137,7 +149,7 @@ public class ManualOrbitService {
         false,
         false,
         false,
-        false,
+        maneuverModelEnabled,
         850.0,
         150.0,
         20.0,

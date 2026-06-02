@@ -8,6 +8,7 @@ import java.time.Instant;
 public record CreateMissionRequest(
     @NotBlank String name,
     Integer subjectNoradId,
+    String subjectOrbitId,
     @NotNull PropagatorType propagatorType,
     @NotNull Instant scenarioStart,
     @NotNull Instant scenarioEnd) {

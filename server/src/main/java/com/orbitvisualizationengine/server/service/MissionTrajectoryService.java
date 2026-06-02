@@ -34,8 +34,8 @@ public class MissionTrajectoryService {
       throw new IllegalArgumentException("Request missionId must match path missionId.");
     }
     Mission mission = missions.get(missionId);
-    if (mission.subjectNoradId() == null) {
-      throw new IllegalArgumentException("Mission trajectory requires subjectNoradId: " + missionId);
+    if (mission.subjectNoradId() == null && mission.subjectOrbitId() == null) {
+      throw new IllegalArgumentException("Mission trajectory requires subjectNoradId or subjectOrbitId: " + missionId);
     }
     if (mission.propagatorType() != PropagatorType.NUMERICAL) {
       throw new IllegalArgumentException("Mission trajectory maneuvers require NUMERICAL propagation: " + missionId);
@@ -46,7 +46,10 @@ public class MissionTrajectoryService {
 
     List<PropagationManeuverCommand> commands =
         timelinePropagation.requiredCommandsForMission(missionId);
-    PropagationContext context = contextFactory.buildLegacyFreeContext(mission.subjectNoradId())
+    PropagationContext context = mission.subjectOrbitId() == null
+        ? contextFactory.buildLegacyFreeContext(mission.subjectNoradId())
+        : contextFactory.buildManualOrbitContext(mission.subjectOrbitId());
+    context = context
         .withManeuverCommands(commands);
     return numericalPropagator.trajectory(context, request.startTime(), request.endTime(), request.stepSeconds());
   }

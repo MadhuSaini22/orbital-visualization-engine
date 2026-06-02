@@ -21,11 +21,12 @@ public class MissionRepository {
 
   public Mission save(Mission mission) {
     jdbc.update("""
-        insert into missions(id, name, subject_norad_id, propagator_type, scenario_start, scenario_end, created_at, updated_at)
-        values (?, ?, ?, ?, ?, ?, ?, ?)
+        insert into missions(id, name, subject_norad_id, subject_orbit_id, propagator_type, scenario_start, scenario_end, created_at, updated_at)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?)
         on conflict (id) do update set
           name = excluded.name,
           subject_norad_id = excluded.subject_norad_id,
+          subject_orbit_id = excluded.subject_orbit_id,
           propagator_type = excluded.propagator_type,
           scenario_start = excluded.scenario_start,
           scenario_end = excluded.scenario_end,
@@ -34,6 +35,7 @@ public class MissionRepository {
         mission.id(),
         mission.name(),
         mission.subjectNoradId(),
+        mission.subjectOrbitId(),
         mission.propagatorType().name(),
         Timestamp.from(mission.scenarioStart()),
         Timestamp.from(mission.scenarioEnd()),
@@ -59,6 +61,7 @@ public class MissionRepository {
         rs.getString("id"),
         rs.getString("name"),
         nullableInteger(rs, "subject_norad_id"),
+        nullableString(rs, "subject_orbit_id"),
         PropagatorType.valueOf(rs.getString("propagator_type")),
         rs.getTimestamp("scenario_start").toInstant(),
         rs.getTimestamp("scenario_end").toInstant(),
@@ -69,6 +72,11 @@ public class MissionRepository {
   private Integer nullableInteger(ResultSet rs, String column) throws SQLException {
     int value = rs.getInt(column);
     return rs.wasNull() ? null : value;
+  }
+
+  private String nullableString(ResultSet rs, String column) throws SQLException {
+    String value = rs.getString(column);
+    return value == null || value.isBlank() ? null : value;
   }
 
   private Instant timestampOrNow(ResultSet rs, String column) throws SQLException {

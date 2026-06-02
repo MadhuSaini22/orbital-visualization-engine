@@ -111,13 +111,13 @@ public class MissionController {
       @Valid @RequestBody MissionTrajectoryRequest request) {
     var states = trajectories.trajectory(missionId, request);
     var mission = missions.get(missionId);
-    var config = analysisConfigService.get(mission.subjectNoradId());
+    var config = mission.subjectNoradId() == null ? null : analysisConfigService.get(mission.subjectNoradId());
     return new PropagationResponse(
-        mission.subjectNoradId(),
+        mission.subjectNoradId() == null ? 0 : mission.subjectNoradId(),
         "OREKIT_NUMERICAL",
         "ITRF",
-        config.config(),
-        config.warnings(),
+        config == null ? null : config.config(),
+        config == null ? List.of() : config.warnings(),
         states);
   }
 }

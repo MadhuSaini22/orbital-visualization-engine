@@ -222,7 +222,7 @@ class MissionTimelineServiceTest {
   }
 
   private Mission mission() {
-    return missions.create(new CreateMissionRequest("Phase A Test Mission", null, PropagatorType.NUMERICAL, START, END));
+    return missions.create(new CreateMissionRequest("Phase A Test Mission", 999, null, PropagatorType.NUMERICAL, START, END));
   }
 
   private CreateTimelineEventRequest createRequest(

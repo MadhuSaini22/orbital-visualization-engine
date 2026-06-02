@@ -6,6 +6,7 @@ public record Mission(
     String id,
     String name,
     Integer subjectNoradId,
+    String subjectOrbitId,
     PropagatorType propagatorType,
     Instant scenarioStart,
     Instant scenarioEnd,

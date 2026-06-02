@@ -4,6 +4,8 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, DragEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { ToastContainer, toast } from "react-toastify";
+import "react-toastify/dist/ReactToastify.css";
 import type { OrbitState, SatelliteObject, SatelliteSnapshot, SatelliteVisualSettings } from "@/domain/orbit";
 import { GroundTrackMiniMap } from "@/components/GroundTrackMiniMap";
 import type { GroundTrackRangeId, GroundTrackRangeOption } from "@/components/GroundTrackMiniMap";
@@ -16,9 +18,10 @@ import { MAX_TLE_OBJECTS } from "@/domain/tle";
 import { distanceBetweenOrbitStatesKm } from "@/geometry/distance";
 import { formatNumber, formatUtc } from "@/geometry/format";
 import {
-  dateTimeLocalUtcInputToIso,
-  isValidUtcDateTimeLocalInput,
-  utcIsoToDateTimeLocalInput,
+  isValidUtcDateAndTimeInput,
+  utcDateAndTimeInputToIso,
+  utcIsoToDateInput,
+  utcIsoToTimeInput,
 } from "@/geometry/utcDateTime";
 import { SatelliteJsPropagator } from "@/propagation/SatelliteJsPropagator";
 import {
@@ -81,7 +84,8 @@ type TimelineModalMode = "create" | "edit";
 type TimelineEditorDraft = {
   type: "COAST" | "FINITE_BURN";
   name: string;
-  executionUtc: string;
+  executionDateUtc: string;
+  executionTimeUtc: string;
   durationSeconds: string;
   thrustNewton: string;
   ispSeconds: string;
@@ -140,7 +144,8 @@ type ActiveDataSource = "sample" | "endpoint" | "backend" | "manual";
 const defaultTimelineDraft: TimelineEditorDraft = {
   type: "FINITE_BURN",
   name: "Finite Burn",
-  executionUtc: initialSimulationTime.toISOString().slice(0, 16),
+  executionDateUtc: utcIsoToDateInput(initialSimulationTime.toISOString()),
+  executionTimeUtc: utcIsoToTimeInput(initialSimulationTime.toISOString()),
   durationSeconds: "120",
   thrustNewton: "0.2",
   ispSeconds: "220",
@@ -479,7 +484,8 @@ function timelineDraftFromEvent(event: BackendMissionTimelineEvent): TimelineEdi
   return {
     type: event.type === "COAST" ? "COAST" : "FINITE_BURN",
     name: event.name,
-    executionUtc: utcIsoToDateTimeLocalInput(event.executionTime, initialSimulationTime.toISOString()),
+    executionDateUtc: utcIsoToDateInput(event.executionTime, initialSimulationTime.toISOString()),
+    executionTimeUtc: utcIsoToTimeInput(event.executionTime, initialSimulationTime.toISOString()),
     durationSeconds: String(readNumberParameter(parameters, "durationSeconds", 120)),
     thrustNewton: String(readNumberParameter(parameters, "thrustNewton", 0.2)),
     ispSeconds: String(readNumberParameter(parameters, "ispSeconds", 220)),
@@ -495,7 +501,7 @@ function buildTimelineRequest(
   sequenceIndex: number,
   enabled: boolean,
 ): CreateTimelineEventRequest {
-  const executionTime = dateTimeLocalUtcInputToIso(draft.executionUtc);
+  const executionTime = utcDateAndTimeInputToIso(draft.executionDateUtc, draft.executionTimeUtc);
   if (draft.type === "COAST") {
     return {
       sequenceIndex,
@@ -530,8 +536,14 @@ function validateTimelineDraft(draft: TimelineEditorDraft) {
   if (!draft.name.trim()) {
     errors.name = "Required";
   }
-  if (!draft.executionUtc || !isValidUtcDateTimeLocalInput(draft.executionUtc)) {
-    errors.executionUtc = "UTC required";
+  if (!draft.executionDateUtc) {
+    errors.executionDateUtc = "Date required";
+  }
+  if (!draft.executionTimeUtc) {
+    errors.executionTimeUtc = "Time required";
+  }
+  if (draft.executionDateUtc && draft.executionTimeUtc && !isValidUtcDateAndTimeInput(draft.executionDateUtc, draft.executionTimeUtc)) {
+    errors.executionTimeUtc = "Invalid UTC time";
   }
   if (draft.type === "FINITE_BURN") {
     validatePositiveDraftNumber(draft.durationSeconds, "durationSeconds", errors);
@@ -570,6 +582,10 @@ function readNumberParameter(parameters: Record<string, unknown>, key: string, f
 function readStringParameter(parameters: Record<string, unknown>, key: string, fallback: string) {
   const value = parameters[key];
   return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function userErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error && error.message.trim() ? error.message : fallback;
 }
 
 function getConjunctionStatusFromRisk(event: ConjunctionEvent, missDistanceKm: number) {
@@ -831,10 +847,11 @@ export function OrbitalDashboard() {
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
   const selectedNoradId = activeDataSource === "manual" ? null : selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? null;
   const canUseAnalysisConfig = activeDataSource === "backend" && Boolean(selectedNoradId);
-  const missionTimelineUnavailableReason = canUseAnalysisConfig
+  const canUseMissionTimeline = canUseAnalysisConfig || (activeDataSource === "manual" && Boolean(manualOrbitId));
+  const missionTimelineUnavailableReason = canUseMissionTimeline
     ? null
     : activeDataSource === "manual"
-      ? "Mission planning currently requires a backend catalog orbit. Manual orbit mission binding is not wired yet."
+      ? "Create a manual Cartesian or Classical Elements orbit first, then create a mission."
       : activeDataSource === "endpoint"
         ? "Mission planning currently requires a backend catalog orbit. Imported TLEs run locally in the browser."
         : "Load a backend catalog orbit to create a mission timeline.";
@@ -1126,8 +1143,10 @@ export function OrbitalDashboard() {
   }, []);
 
   const initializeMissionTimeline = useCallback(async () => {
-    if (!selectedNoradId || !selectedSnapshot?.satellite) {
-      setTimelineStatus("Select a backend catalog satellite first.");
+    if (!selectedSnapshot?.satellite || (!selectedNoradId && !manualOrbitId)) {
+      const message = "Select a catalog or manual backend orbit first.";
+      setTimelineStatus(message);
+      toast.error(message);
       return;
     }
 
@@ -1137,7 +1156,7 @@ export function OrbitalDashboard() {
       const end = addMinutes(simTimeRef.current, defaultMissionTrajectoryWindowMinutes);
       const created = await createMission({
         name: `${selectedSnapshot.satellite.name} Mission`,
-        subjectNoradId: Number(selectedNoradId),
+        ...(manualOrbitId ? { subjectOrbitId: manualOrbitId } : { subjectNoradId: Number(selectedNoradId) }),
         propagatorType: "NUMERICAL",
         scenarioStart: start.toISOString(),
         scenarioEnd: end.toISOString(),
@@ -1145,17 +1164,21 @@ export function OrbitalDashboard() {
       setMission(created);
       await refreshMissionTimeline(created.id);
       setTimelineStatus("Mission timeline initialized.");
+      toast.success("Mission timeline initialized.");
     } catch (error) {
-      setTimelineStatus(error instanceof Error ? error.message : "Unable to initialize mission timeline.");
+      const message = userErrorMessage(error, "Unable to initialize mission timeline.");
+      setTimelineStatus(message);
+      toast.error(message);
     }
-  }, [refreshMissionTimeline, selectedNoradId, selectedSnapshot]);
+  }, [manualOrbitId, refreshMissionTimeline, selectedNoradId, selectedSnapshot]);
 
   const openCreateTimelineModal = useCallback((type: TimelineEditorDraft["type"] = "FINITE_BURN") => {
     setTimelineDraft({
       ...defaultTimelineDraft,
       type,
       name: type === "COAST" ? "Coast" : "Finite Burn",
-      executionUtc: simTimeRef.current.toISOString().slice(0, 16),
+      executionDateUtc: utcIsoToDateInput(simTimeRef.current.toISOString()),
+      executionTimeUtc: utcIsoToTimeInput(simTimeRef.current.toISOString()),
     });
     setTimelineModalMode("create");
   }, []);
@@ -1168,13 +1191,17 @@ export function OrbitalDashboard() {
 
   const saveTimelineEvent = useCallback(async () => {
     if (!mission) {
-      setTimelineStatus("Initialize a mission before editing the timeline.");
+      const message = "Initialize a mission before editing the timeline.";
+      setTimelineStatus(message);
+      toast.error(message);
       return;
     }
 
     const errors = validateTimelineDraft(timelineDraft);
     if (Object.keys(errors).length > 0) {
-      setTimelineStatus(Object.values(errors)[0] ?? "Fix timeline event fields.");
+      const message = Object.values(errors)[0] ?? "Fix timeline event fields.";
+      setTimelineStatus(message);
+      toast.error(message);
       return;
     }
 
@@ -1191,8 +1218,11 @@ export function OrbitalDashboard() {
       setTimelineModalMode(null);
       setMissionTrajectoryOverlay(null);
       setTimelineStatus("Timeline saved.");
+      toast.success("Timeline event saved.");
     } catch (error) {
-      setTimelineStatus(error instanceof Error ? error.message : "Unable to save timeline event.");
+      const message = userErrorMessage(error, "Unable to save timeline event.");
+      setTimelineStatus(message);
+      toast.error(message);
     }
   }, [mission, missionTimelineEvents.length, refreshMissionTimeline, selectedTimelineEvent, timelineDraft, timelineModalMode]);
 
@@ -1206,8 +1236,11 @@ export function OrbitalDashboard() {
       await refreshMissionTimeline(mission.id);
       setMissionTrajectoryOverlay(null);
       setTimelineStatus("Timeline event deleted.");
+      toast.success("Timeline event deleted.");
     } catch (error) {
-      setTimelineStatus(error instanceof Error ? error.message : "Unable to delete timeline event.");
+      const message = userErrorMessage(error, "Unable to delete timeline event.");
+      setTimelineStatus(message);
+      toast.error(message);
     }
   }, [mission, refreshMissionTimeline]);
 
@@ -1221,8 +1254,11 @@ export function OrbitalDashboard() {
       await refreshMissionTimeline(mission.id);
       setMissionTrajectoryOverlay(null);
       setTimelineStatus(event.enabled ? "Event disabled." : "Event enabled.");
+      toast.success(event.enabled ? "Event disabled." : "Event enabled.");
     } catch (error) {
-      setTimelineStatus(error instanceof Error ? error.message : "Unable to update event state.");
+      const message = userErrorMessage(error, "Unable to update event state.");
+      setTimelineStatus(message);
+      toast.error(message);
     }
   }, [mission, refreshMissionTimeline]);
 
@@ -1247,17 +1283,23 @@ export function OrbitalDashboard() {
       setTimelineStatus("Timeline reordered.");
     } catch (error) {
       await refreshMissionTimeline(mission.id);
-      setTimelineStatus(error instanceof Error ? error.message : "Unable to reorder timeline.");
+      const message = userErrorMessage(error, "Unable to reorder timeline.");
+      setTimelineStatus(message);
+      toast.error(message);
     }
   }, [mission, missionTimelineEvents, refreshMissionTimeline]);
 
   const generateMissionTrajectory = useCallback(async () => {
     if (!mission || !selectedSnapshot?.satellite) {
-      setTimelineStatus("Initialize a mission before generating a trajectory.");
+      const message = "Initialize a mission before generating a trajectory.";
+      setTimelineStatus(message);
+      toast.error(message);
       return;
     }
-    if (!selectedNoradId) {
-      setTimelineStatus("Mission trajectory preview is available for backend catalog orbits.");
+    if (!selectedNoradId && !manualOrbitId) {
+      const message = "Mission trajectory preview is available for backend catalog or manual backend orbits.";
+      setTimelineStatus(message);
+      toast.error(message);
       return;
     }
 
@@ -1269,7 +1311,9 @@ export function OrbitalDashboard() {
     try {
       const [missionResponse, legacyResponse] = await Promise.all([
         fetchMissionTrajectory(mission.id, start.toISOString(), end.toISOString(), trajectoryWindowOptions.stepSec),
-        fetchOrbitTrajectory(selectedNoradId, start.toISOString(), end.toISOString(), trajectoryWindowOptions.stepSec),
+        manualOrbitId
+          ? fetchManualOrbitTrajectory(manualOrbitId, start.toISOString(), end.toISOString(), trajectoryWindowOptions.stepSec, undefined)
+          : fetchOrbitTrajectory(selectedNoradId as string | number, start.toISOString(), end.toISOString(), trajectoryWindowOptions.stepSec),
       ]);
       const missionSatellite = missionOverlaySatellite(selectedSnapshot.satellite, "mission");
       const legacySatellite = missionOverlaySatellite(selectedSnapshot.satellite, "legacy");
@@ -1281,12 +1325,15 @@ export function OrbitalDashboard() {
       });
       setShowMissionComparison(true);
       setTimelineStatus("Mission trajectory generated.");
+      toast.success("Mission trajectory generated.");
     } catch (error) {
-      setTimelineStatus(error instanceof Error ? error.message : "Unable to generate mission trajectory.");
+      const message = userErrorMessage(error, "Unable to generate mission trajectory.");
+      setTimelineStatus(message);
+      toast.error(message);
     } finally {
       setIsMissionTrajectoryLoading(false);
     }
-  }, [mission, selectedNoradId, selectedSnapshot, trajectoryAnchorTime, trajectoryWindowOptions.stepSec]);
+  }, [manualOrbitId, mission, selectedNoradId, selectedSnapshot, trajectoryAnchorTime, trajectoryWindowOptions.stepSec]);
 
   const syncConjunctionsFromSpaceTrack = useCallback(async () => {
     setDynamicDataMessage("Syncing public CDM conjunctions from Space-Track...");
@@ -1324,7 +1371,7 @@ export function OrbitalDashboard() {
     let ignore = false;
 
     async function loadMission() {
-      if (!selectedNoradId || !canUseAnalysisConfig) {
+      if (!canUseMissionTimeline || (!selectedNoradId && !manualOrbitId)) {
         await Promise.resolve();
         if (!ignore) {
           setMission(null);
@@ -1338,7 +1385,9 @@ export function OrbitalDashboard() {
 
       try {
         const allMissions = await fetchMissions();
-        const selectedMission = allMissions.find((item) => String(item.subjectNoradId) === String(selectedNoradId)) ?? null;
+        const selectedMission = manualOrbitId
+          ? allMissions.find((item) => item.subjectOrbitId === manualOrbitId) ?? null
+          : allMissions.find((item) => String(item.subjectNoradId) === String(selectedNoradId)) ?? null;
         if (ignore) {
           return;
         }
@@ -1371,7 +1420,7 @@ export function OrbitalDashboard() {
     return () => {
       ignore = true;
     };
-  }, [canUseAnalysisConfig, selectedNoradId]);
+  }, [canUseMissionTimeline, manualOrbitId, selectedNoradId]);
 
   useEffect(() => {
     let ignore = false;
@@ -2079,7 +2128,7 @@ export function OrbitalDashboard() {
           events={missionTimelineEvents}
           selectedEventId={selectedTimelineEvent?.id ?? null}
           status={timelineStatus}
-          canUseMissionTimeline={canUseAnalysisConfig}
+          canUseMissionTimeline={canUseMissionTimeline}
           unavailableReason={missionTimelineUnavailableReason}
           isTrajectoryLoading={isMissionTrajectoryLoading}
           showComparison={showMissionComparison}
@@ -2289,6 +2338,15 @@ export function OrbitalDashboard() {
           onTleUrlChange={setTleUrl}
         />
       )}
+      <ToastContainer
+        position="bottom-right"
+        theme="dark"
+        newestOnTop
+        closeOnClick
+        pauseOnFocusLoss={false}
+        toastClassName="!rounded-none !border !border-cyan-300/25 !bg-[#071016] !font-sans !text-sm !text-zinc-100"
+        progressClassName="!bg-cyan-300"
+      />
     </main>
   );
 }
@@ -3467,6 +3525,13 @@ function TimelineEventModal({
 }) {
   const errors = validateTimelineDraft(draft);
   const update = (patch: Partial<TimelineEditorDraft>) => onDraftChange({ ...draft, ...patch });
+  const isoPreview = useMemo(() => {
+    try {
+      return utcDateAndTimeInputToIso(draft.executionDateUtc, draft.executionTimeUtc);
+    } catch {
+      return "Invalid UTC timestamp";
+    }
+  }, [draft.executionDateUtc, draft.executionTimeUtc]);
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
@@ -3509,9 +3574,37 @@ function TimelineEventModal({
             <TimelineField label="Name" error={errors.name}>
               <input value={draft.name} onChange={(event) => update({ name: event.target.value })} className="timeline-input" />
             </TimelineField>
-            <TimelineField label="Execution UTC" error={errors.executionUtc}>
-              <input type="datetime-local" value={draft.executionUtc} onChange={(event) => update({ executionUtc: event.target.value })} className="timeline-input" />
-            </TimelineField>
+            <div>
+              <span className="flex items-center justify-between gap-3">
+                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Execution Time</span>
+                {(errors.executionDateUtc || errors.executionTimeUtc) && (
+                  <span className="font-mono text-[10px] uppercase text-rose-200">{errors.executionDateUtc ?? errors.executionTimeUtc}</span>
+                )}
+              </span>
+              <div className="mt-1 grid grid-cols-[minmax(0,1fr)_150px_auto] gap-2 max-sm:grid-cols-1">
+                <input
+                  type="date"
+                  value={draft.executionDateUtc}
+                  onChange={(event) => update({ executionDateUtc: event.target.value })}
+                  className="timeline-input"
+                  aria-label="Execution UTC date"
+                />
+                <input
+                  type="time"
+                  step="1"
+                  value={draft.executionTimeUtc}
+                  onChange={(event) => update({ executionTimeUtc: event.target.value })}
+                  className="timeline-input"
+                  aria-label="Execution UTC time"
+                />
+                <span className="grid min-h-[42px] place-items-center border border-cyan-300/35 bg-cyan-300/[0.08] px-3 font-mono text-xs font-semibold uppercase text-cyan-100">
+                  UTC
+                </span>
+              </div>
+              <p className="mt-2 border border-white/10 bg-black/25 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-zinc-400">
+                ISO UTC: <span className="text-cyan-100">{isoPreview}</span>
+              </p>
+            </div>
 
             {draft.type === "FINITE_BURN" && (
               <>

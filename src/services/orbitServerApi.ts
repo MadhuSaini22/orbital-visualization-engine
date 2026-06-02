@@ -109,7 +109,7 @@ export type BackendPropagationResponse = {
   noradId: number;
   model: string;
   frame: string;
-  analysisConfig: BackendAnalysisConfig;
+  analysisConfig: BackendAnalysisConfig | null;
   warnings: string[];
   states: BackendEphemerisState[];
 };
@@ -124,6 +124,7 @@ export type BackendMission = {
   id: string;
   name: string;
   subjectNoradId: number | null;
+  subjectOrbitId: string | null;
   propagatorType: PropagatorTypeId;
   scenarioStart: string;
   scenarioEnd: string;
@@ -147,6 +148,7 @@ export type BackendMissionTimelineEvent = {
 export type CreateMissionRequest = {
   name: string;
   subjectNoradId?: number;
+  subjectOrbitId?: string;
   propagatorType: PropagatorTypeId;
   scenarioStart: string;
   scenarioEnd: string;
