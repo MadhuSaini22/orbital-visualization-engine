@@ -107,6 +107,7 @@ type FrameMode = "earth-fixed" | "inertial";
 type OrbitSourceId = "catalog" | "tle" | "classical" | "cartesian";
 type TleImportMode = "paste" | "upload" | "url";
 type TimelineModalMode = "create" | "edit";
+type TimelineTimeMode = "UTC" | "MET";
 type MissionDurationPreset = "ONE_ORBIT" | "THREE_HOURS" | "TWELVE_HOURS" | "TWENTY_FOUR_HOURS" | "CUSTOM";
 type TimelineEditorDraft = {
   type: "COAST" | "FINITE_BURN";
@@ -829,6 +830,84 @@ function validateMissionSetupDraft(draft: MissionSetupDraft) {
 
 function missionDurationSeconds(mission: BackendMission) {
   return Math.max(0, Math.round((new Date(mission.scenarioEnd).getTime() - new Date(mission.scenarioStart).getTime()) / 1000));
+}
+
+function timelineEventDurationSeconds(event: BackendMissionTimelineEvent, nextEvent: BackendMissionTimelineEvent | null, mission: BackendMission | null) {
+  if (event.type === "FINITE_BURN") {
+    return Math.max(0, readNumberParameter(event.parameters ?? {}, "durationSeconds", 0));
+  }
+  const eventMs = new Date(event.executionTime).getTime();
+  const nextMs = nextEvent
+    ? new Date(nextEvent.executionTime).getTime()
+    : mission
+      ? new Date(mission.scenarioEnd).getTime()
+      : Number.NaN;
+  if (!Number.isFinite(eventMs) || !Number.isFinite(nextMs)) {
+    return 0;
+  }
+  return Math.max(0, Math.round((nextMs - eventMs) / 1000));
+}
+
+function displayTimelineTime(mode: TimelineTimeMode, mission: BackendMission | null, iso: string) {
+  return mode === "MET" && mission ? signedOffsetLabel(mission.scenarioStart, iso) : compactIsoUtc(iso);
+}
+
+function timelineAnalysis(mission: BackendMission | null, events: BackendMissionTimelineEvent[]) {
+  const eventsBySequence = events.toSorted((a, b) => a.sequenceIndex - b.sequenceIndex);
+  const executionCounts = new Map<number, BackendMissionTimelineEvent[]>();
+  const warnings: string[] = [];
+  let previousExecutionMs = Number.NEGATIVE_INFINITY;
+  let invalidOrder = false;
+
+  eventsBySequence.forEach((event) => {
+    const executionMs = new Date(event.executionTime).getTime();
+    if (!Number.isFinite(executionMs)) {
+      warnings.push(`${event.name} has an invalid execution time.`);
+      return;
+    }
+    const current = executionCounts.get(executionMs) ?? [];
+    executionCounts.set(executionMs, [...current, event]);
+    if (executionMs < previousExecutionMs) {
+      invalidOrder = true;
+    }
+    previousExecutionMs = executionMs;
+    const windowWarning = eventWindowError(mission, event.executionTime);
+    if (windowWarning) {
+      warnings.push(`${event.name} is outside the mission window.`);
+    }
+  });
+
+  executionCounts.forEach((duplicateEvents) => {
+    if (duplicateEvents.length > 1) {
+      warnings.push(`Duplicate execution time ${compactIsoUtc(duplicateEvents[0].executionTime)} for ${duplicateEvents.map((event) => event.name).join(", ")}.`);
+    }
+  });
+  if (invalidOrder) {
+    warnings.push("Timeline sequence order does not match chronological execution order.");
+  }
+
+  return {
+    missionDuration: mission ? missionDurationSeconds(mission) : 0,
+    eventCount: events.length,
+    burnCount: events.filter((event) => event.type === "FINITE_BURN").length,
+    coastCount: events.filter((event) => event.type === "COAST").length,
+    warnings,
+  };
+}
+
+function visualTimelineBlocks(mission: BackendMission | null, events: BackendMissionTimelineEvent[]) {
+  const ordered = events.toSorted((a, b) => new Date(a.executionTime).getTime() - new Date(b.executionTime).getTime() || a.sequenceIndex - b.sequenceIndex);
+  const missionSeconds = mission ? Math.max(1, missionDurationSeconds(mission)) : 1;
+  return ordered.map((event, index) => {
+    const nextEvent = ordered[index + 1] ?? null;
+    const durationSeconds = timelineEventDurationSeconds(event, nextEvent, mission);
+    const widthPercent = Math.min(100, Math.max(18, (durationSeconds / missionSeconds) * 100));
+    return {
+      event,
+      durationSeconds,
+      widthPercent,
+    };
+  });
 }
 
 function missionSubjectSummary(
@@ -4116,6 +4195,10 @@ function MissionTimelinePanel({
   onDragEvent: (eventId: string | null) => void;
   onDropEvent: (sourceEventId: string, targetEventId: string) => void;
 }) {
+  const [timeMode, setTimeMode] = useState<TimelineTimeMode>("UTC");
+  const analysis = useMemo(() => timelineAnalysis(mission, events), [events, mission]);
+  const timelineBlocks = useMemo(() => visualTimelineBlocks(mission, events), [events, mission]);
+
   return (
     <HudPanel>
       <div className="flex items-start justify-between gap-3">
@@ -4203,22 +4286,58 @@ function MissionTimelinePanel({
         </div>
       )}
 
-      <div className="mt-3 overflow-hidden border border-white/10 bg-black/25">
-        <div className="flex items-center gap-1 overflow-x-auto px-3 py-2">
-          {events.length === 0 ? (
-            <span className="font-mono text-[10px] uppercase text-zinc-600">Empty timeline</span>
-          ) : (
-            events.map((event, index) => (
-              <span key={event.id} className="flex items-center gap-1">
-                <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${event.type === "FINITE_BURN" ? "border-rose-300/45 text-rose-100" : "border-sky-300/35 text-sky-100"}`}>
-                  {event.type === "FINITE_BURN" ? "Burn" : "Coast"}
-                </span>
-                {index < events.length - 1 && <span className="text-zinc-600">→</span>}
-              </span>
-            ))
+      {mission && (
+        <div className="mt-3 border border-cyan-300/15 bg-black/25 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Visual Mission Timeline</p>
+              <p className="mt-1 text-[11px] text-zinc-500">Execution order view. Backend execution remains UTC-based.</p>
+            </div>
+            <div className="grid grid-cols-2 border border-cyan-300/20">
+              {(["UTC", "MET"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setTimeMode(mode)}
+                  className={`px-2 py-1.5 font-mono text-[10px] uppercase transition ${
+                    timeMode === mode
+                      ? "bg-cyan-300 text-slate-950"
+                      : "text-cyan-200 hover:bg-cyan-300/10"
+                  }`}
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <VisualMissionTimeline
+            mission={mission}
+            blocks={timelineBlocks}
+            timeMode={timeMode}
+            selectedEventId={selectedEventId}
+            onSelectEvent={onSelectEvent}
+          />
+
+          <div className="mt-3 grid grid-cols-4 gap-2 max-sm:grid-cols-2">
+            <TimelineMetric label="Duration" value={secondsToDurationLabel(analysis.missionDuration)} />
+            <TimelineMetric label="Events" value={String(analysis.eventCount)} />
+            <TimelineMetric label="Burns" value={String(analysis.burnCount)} />
+            <TimelineMetric label="Coasts" value={String(analysis.coastCount)} />
+          </div>
+
+          {analysis.warnings.length > 0 && (
+            <div className="mt-3 border border-amber-300/25 bg-amber-300/[0.05] px-3 py-2">
+              <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-amber-200">Timeline Warnings</p>
+              <div className="mt-2 space-y-1">
+                {analysis.warnings.map((warning) => (
+                  <p key={warning} className="text-xs leading-5 text-amber-100">{warning}</p>
+                ))}
+              </div>
+            </div>
           )}
         </div>
-      </div>
+      )}
 
       <div className="mt-3 max-h-[34vh] space-y-2 overflow-auto pr-1">
         {events.map((event, index) => (
@@ -4281,6 +4400,83 @@ function MissionTimelinePanel({
         <p className="mt-3 border border-white/10 bg-black/25 px-3 py-2 text-xs leading-5 text-zinc-300">{status}</p>
       )}
     </HudPanel>
+  );
+}
+
+function VisualMissionTimeline({
+  mission,
+  blocks,
+  timeMode,
+  selectedEventId,
+  onSelectEvent,
+}: {
+  mission: BackendMission;
+  blocks: Array<{
+    event: BackendMissionTimelineEvent;
+    durationSeconds: number;
+    widthPercent: number;
+  }>;
+  timeMode: TimelineTimeMode;
+  selectedEventId: string | null;
+  onSelectEvent: (eventId: string) => void;
+}) {
+  if (blocks.length === 0) {
+    return (
+      <div className="mt-3 border border-white/10 bg-black/25 px-3 py-4 text-center font-mono text-[10px] uppercase text-zinc-600">
+        Empty timeline
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 overflow-hidden border border-white/10 bg-black/30">
+      <div className="flex items-stretch gap-1 overflow-x-auto p-2">
+        {blocks.map(({ event, durationSeconds, widthPercent }) => {
+          const isBurn = event.type === "FINITE_BURN";
+          return (
+            <button
+              key={event.id}
+              type="button"
+              onClick={() => onSelectEvent(event.id)}
+              style={{ flexBasis: `${widthPercent}%` }}
+              className={`min-w-[150px] border px-3 py-2 text-left transition ${
+                selectedEventId === event.id
+                  ? "border-cyan-300 bg-cyan-300/10"
+                  : isBurn
+                    ? "border-rose-300/35 bg-rose-300/[0.04] hover:border-rose-300/70"
+                    : "border-sky-300/25 bg-sky-300/[0.03] hover:border-sky-300/60"
+              }`}
+            >
+              <span className="flex items-center justify-between gap-2">
+                <span className="truncate text-xs font-semibold text-white">{event.name}</span>
+                <span className={`border px-1.5 py-0.5 font-mono text-[9px] uppercase ${isBurn ? "border-rose-300/45 text-rose-100" : "border-sky-300/35 text-sky-100"}`}>
+                  {isBurn ? "Burn" : "Coast"}
+                </span>
+              </span>
+              <span className="mt-2 block font-mono text-[10px] text-cyan-100">
+                {displayTimelineTime(timeMode, mission, event.executionTime)}
+              </span>
+              <span className="mt-1 block font-mono text-[10px] text-zinc-500">
+                Duration {secondsToDurationLabel(durationSeconds)}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex items-center justify-between border-t border-white/10 px-3 py-2 font-mono text-[10px] text-zinc-500">
+        <span>{displayTimelineTime(timeMode, mission, mission.scenarioStart)}</span>
+        <span>{timeMode === "MET" ? secondsToDurationLabel(missionDurationSeconds(mission)) : displayTimelineTime(timeMode, mission, mission.scenarioEnd)}</span>
+      </div>
+    </div>
+  );
+}
+
+function TimelineMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="border border-white/10 bg-black/25 px-2 py-2">
+      <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-zinc-500">{label}</p>
+      <p className="mt-1 truncate font-mono text-[11px] font-semibold text-zinc-100">{value}</p>
+    </div>
   );
 }
 
