@@ -9,6 +9,7 @@ import type {
 export const ORBIT_LIBRARY_KEY = "orbit-library-v1";
 export const MISSION_LIBRARY_KEY = "mission-library-v1";
 export const WORKSPACE_LIBRARY_KEY = "workspace-library-v1";
+export const MISSION_TEMPLATE_LIBRARY_KEY = "mission-template-library-v1";
 
 export type StoredOrbitSourceType =
   | "CATALOG_TLE"
@@ -70,6 +71,39 @@ export type MissionLibraryState = {
   events: StoredEvent[];
 };
 
+export type MissionTemplateCategory =
+  | "LEO"
+  | "GTO"
+  | "Station Keeping"
+  | "Transfer"
+  | "Deployment"
+  | "Custom";
+
+export type MissionTemplateEvent = {
+  templateEventId: string;
+  type: string;
+  name: string;
+  enabled: boolean;
+  parameters: Record<string, unknown>;
+  sequenceIndex: number;
+};
+
+export type MissionTemplate = {
+  templateId: string;
+  name: string;
+  description: string;
+  category: MissionTemplateCategory;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+  events: MissionTemplateEvent[];
+};
+
+export type MissionTemplateLibraryState = {
+  schemaVersion: 1;
+  templates: MissionTemplate[];
+};
+
 export type StoredWorkspace = {
   schemaVersion: 1;
   exportedAt: string;
@@ -83,6 +117,11 @@ const emptyMissionLibrary: MissionLibraryState = {
   schemaVersion: 1,
   missions: [],
   events: [],
+};
+
+const emptyTemplateLibrary: MissionTemplateLibraryState = {
+  schemaVersion: 1,
+  templates: [],
 };
 
 function nowIso() {
@@ -141,6 +180,80 @@ export function readMissionLibrary(): MissionLibraryState {
 
 export function writeMissionLibrary(state: MissionLibraryState) {
   writeJson(MISSION_LIBRARY_KEY, state);
+}
+
+export function readMissionTemplateLibrary(): MissionTemplateLibraryState {
+  const raw = readJson<unknown>(MISSION_TEMPLATE_LIBRARY_KEY, emptyTemplateLibrary);
+  if (!isMissionTemplateLibraryState(raw)) {
+    return emptyTemplateLibrary;
+  }
+  return raw;
+}
+
+export function writeMissionTemplateLibrary(state: MissionTemplateLibraryState) {
+  writeJson(MISSION_TEMPLATE_LIBRARY_KEY, state);
+}
+
+export function upsertMissionTemplate(state: MissionTemplateLibraryState, template: MissionTemplate) {
+  const next = {
+    ...template,
+    updatedAt: nowIso(),
+    events: template.events.toSorted((a, b) => a.sequenceIndex - b.sequenceIndex),
+  };
+  return {
+    schemaVersion: 1 as const,
+    templates: [...state.templates.filter((item) => item.templateId !== template.templateId), next]
+      .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+  };
+}
+
+export function deleteMissionTemplate(state: MissionTemplateLibraryState, templateId: string) {
+  return {
+    schemaVersion: 1 as const,
+    templates: state.templates.filter((template) => template.templateId !== templateId),
+  };
+}
+
+export function duplicateMissionTemplate(state: MissionTemplateLibraryState, templateId: string) {
+  const source = state.templates.find((template) => template.templateId === templateId);
+  if (!source) {
+    return { templateState: state, clonedTemplateId: null };
+  }
+  const createdAt = nowIso();
+  const eventIdMap = new Map<string, string>();
+  const events = source.events.map((event) => {
+    const templateEventId = makeWorkspaceId("template-event");
+    eventIdMap.set(event.templateEventId, templateEventId);
+    return {
+      ...structuredClone(event),
+      templateEventId,
+    };
+  });
+  const remappedEvents = events.map((event) => {
+    const dependencyId = event.parameters.scheduleDependencyId;
+    if (typeof dependencyId !== "string") {
+      return event;
+    }
+    return {
+      ...event,
+      parameters: {
+        ...event.parameters,
+        scheduleDependencyId: eventIdMap.get(dependencyId) ?? dependencyId,
+      },
+    };
+  });
+  const template: MissionTemplate = {
+    ...structuredClone(source),
+    templateId: makeWorkspaceId("template"),
+    name: `${source.name} Copy`,
+    createdAt,
+    updatedAt: createdAt,
+    events: remappedEvents,
+  };
+  return {
+    templateState: upsertMissionTemplate(state, template),
+    clonedTemplateId: template.templateId,
+  };
 }
 
 export function buildWorkspace(orbits = readOrbitLibrary(), state = readMissionLibrary()): StoredWorkspace {
@@ -361,6 +474,16 @@ export function validateWorkspaceImport(value: unknown): StoredWorkspace {
   throw new Error("Invalid workspace JSON schema.");
 }
 
+export function validateMissionTemplateImport(value: unknown): MissionTemplate | MissionTemplateLibraryState {
+  if (isMissionTemplate(value)) {
+    return value;
+  }
+  if (isMissionTemplateLibraryState(value)) {
+    return value;
+  }
+  throw new Error("Invalid mission template JSON schema.");
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -399,6 +522,34 @@ function isStoredEvent(value: unknown): value is StoredEvent {
     && typeof value.sequenceIndex === "number";
 }
 
+function isMissionTemplateCategory(value: unknown): value is MissionTemplateCategory {
+  return typeof value === "string" && ["LEO", "GTO", "Station Keeping", "Transfer", "Deployment", "Custom"].includes(value);
+}
+
+function isMissionTemplateEvent(value: unknown): value is MissionTemplateEvent {
+  return isRecord(value)
+    && typeof value.templateEventId === "string"
+    && typeof value.type === "string"
+    && typeof value.name === "string"
+    && typeof value.enabled === "boolean"
+    && isRecord(value.parameters)
+    && typeof value.sequenceIndex === "number";
+}
+
+function isMissionTemplate(value: unknown): value is MissionTemplate {
+  return isRecord(value)
+    && typeof value.templateId === "string"
+    && typeof value.name === "string"
+    && typeof value.description === "string"
+    && isMissionTemplateCategory(value.category)
+    && Array.isArray(value.tags)
+    && value.tags.every((tag) => typeof tag === "string")
+    && typeof value.createdAt === "string"
+    && typeof value.updatedAt === "string"
+    && Array.isArray(value.events)
+    && value.events.every(isMissionTemplateEvent);
+}
+
 function isMissionLibraryState(value: unknown): value is MissionLibraryState {
   return isRecord(value)
     && value.schemaVersion === 1
@@ -406,6 +557,13 @@ function isMissionLibraryState(value: unknown): value is MissionLibraryState {
     && value.missions.every(isStoredMission)
     && Array.isArray(value.events)
     && value.events.every(isStoredEvent);
+}
+
+function isMissionTemplateLibraryState(value: unknown): value is MissionTemplateLibraryState {
+  return isRecord(value)
+    && value.schemaVersion === 1
+    && Array.isArray(value.templates)
+    && value.templates.every(isMissionTemplate);
 }
 
 function isStoredWorkspace(value: unknown): value is StoredWorkspace {

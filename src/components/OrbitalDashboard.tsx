@@ -50,18 +50,25 @@ import {
 import {
   buildWorkspace,
   deleteMission,
+  deleteMissionTemplate,
   deleteOrbit,
   duplicateMission,
+  duplicateMissionTemplate,
   duplicateOrbit,
+  makeWorkspaceId,
   readMissionLibrary,
+  readMissionTemplateLibrary,
   readOrbitLibrary,
   storedEventFromBackend,
   storedMissionFromBackend,
   upsertMission,
   upsertMissionEvents,
+  upsertMissionTemplate,
+  validateMissionTemplateImport,
   upsertOrbit,
   validateWorkspaceImport,
   writeMissionLibrary,
+  writeMissionTemplateLibrary,
   writeOrbitLibrary,
   writeWorkspace,
 } from "@/services/workspaceStorage";
@@ -81,6 +88,10 @@ import type {
 } from "@/services/orbitServerApi";
 import type {
   MissionLibraryState,
+  MissionTemplate,
+  MissionTemplateCategory,
+  MissionTemplateEvent,
+  MissionTemplateLibraryState,
   StoredEvent,
   StoredMission,
   StoredOrbit,
@@ -135,6 +146,7 @@ type MissionSetupDraft = {
   endDateUtc: string;
   endTimeUtc: string;
   durationPreset: MissionDurationPreset;
+  templateId: string;
 };
 type MissionTrajectoryOverlay = {
   mission: SatelliteSnapshot | null;
@@ -208,6 +220,14 @@ const missionDurationPresets = [
   { id: "TWENTY_FOUR_HOURS", label: "24 hours", seconds: 24 * 60 * 60 },
   { id: "CUSTOM", label: "Custom", seconds: null },
 ] satisfies Array<{ id: MissionDurationPreset; label: string; seconds: number | null }>;
+const missionTemplateCategories = [
+  "LEO",
+  "GTO",
+  "Station Keeping",
+  "Transfer",
+  "Deployment",
+  "Custom",
+] satisfies MissionTemplateCategory[];
 const groundTrackRangeOptions = [
   {
     id: "live",
@@ -853,6 +873,122 @@ function proposedEventsForDraft(
   return [...events.filter((event) => event.id !== proposedId), proposed];
 }
 
+function templateWarnings(template: MissionTemplate) {
+  const warnings: string[] = [];
+  const ids = new Set<string>();
+  const idCounts = new Map<string, number>();
+  template.events.forEach((event) => {
+    idCounts.set(event.templateEventId, (idCounts.get(event.templateEventId) ?? 0) + 1);
+    ids.add(event.templateEventId);
+  });
+  idCounts.forEach((count, id) => {
+    if (count > 1) {
+      warnings.push(`Duplicate template event id ${id}.`);
+    }
+  });
+
+  const eventById = new Map(template.events.map((event) => [event.templateEventId, event]));
+  const visit = (event: MissionTemplateEvent, path: string[]) => {
+    if (path.includes(event.templateEventId)) {
+      warnings.push(`Template dependency cycle: ${[...path, event.templateEventId].join(" -> ")}.`);
+      return;
+    }
+    const mode = readStringParameter(event.parameters, "scheduleMode", "MET");
+    if (mode !== "AFTER_EVENT") {
+      return;
+    }
+    const dependencyId = readStringParameter(event.parameters, "scheduleDependencyId", "");
+    if (!dependencyId) {
+      warnings.push(`${event.name} is missing a dependency source.`);
+      return;
+    }
+    const dependency = eventById.get(dependencyId);
+    if (!dependency) {
+      warnings.push(`${event.name} references missing template event ${dependencyId}.`);
+      return;
+    }
+    if (dependency.sequenceIndex >= event.sequenceIndex) {
+      warnings.push(`${event.name} depends on an event that is not earlier in the template sequence.`);
+    }
+    visit(dependency, [...path, event.templateEventId]);
+  };
+  template.events.forEach((event) => visit(event, []));
+  return warnings;
+}
+
+function templateFromMission(mission: BackendMission, events: BackendMissionTimelineEvent[], name: string, category: MissionTemplateCategory): MissionTemplate {
+  const now = new Date().toISOString();
+  const eventIdMap = new Map<string, string>();
+  events.forEach((event) => eventIdMap.set(event.id, makeWorkspaceId("template-event")));
+  return {
+    templateId: makeWorkspaceId("template"),
+    name,
+    description: `Template saved from ${mission.name}.`,
+    category,
+    tags: [category.toLowerCase().replaceAll(/\s+/g, "-")],
+    createdAt: now,
+    updatedAt: now,
+    events: events.toSorted((a, b) => a.sequenceIndex - b.sequenceIndex).map((event) => {
+      const parameters = { ...(event.parameters ?? {}) };
+      const mode = readStringParameter(parameters, "scheduleMode", "MET");
+      if (mode === "UTC" || !mode) {
+        const offsetSeconds = eventMetOffsetSeconds(mission, event) ?? 0;
+        parameters.scheduleMode = "MET";
+        parameters.scheduleValue = metOffsetLabelFromSeconds(offsetSeconds);
+        parameters.scheduleOffsetSeconds = offsetSeconds;
+      }
+      const dependencyId = parameters.scheduleDependencyId;
+      if (typeof dependencyId === "string") {
+        parameters.scheduleDependencyId = eventIdMap.get(dependencyId) ?? dependencyId;
+      }
+      return {
+        templateEventId: eventIdMap.get(event.id)!,
+        type: event.type,
+        name: event.name,
+        enabled: event.enabled,
+        parameters,
+        sequenceIndex: event.sequenceIndex,
+      };
+    }),
+  };
+}
+
+function resolveTemplateOffsets(template: MissionTemplate) {
+  const offsets = new Map<string, number>();
+  const warnings = templateWarnings(template);
+  const eventById = new Map(template.events.map((event) => [event.templateEventId, event]));
+
+  const visit = (event: MissionTemplateEvent, path: string[]): number | null => {
+    if (offsets.has(event.templateEventId)) {
+      return offsets.get(event.templateEventId)!;
+    }
+    if (path.includes(event.templateEventId)) {
+      return null;
+    }
+    const mode = readStringParameter(event.parameters, "scheduleMode", "MET");
+    if (mode === "AFTER_EVENT") {
+      const dependencyId = readStringParameter(event.parameters, "scheduleDependencyId", "");
+      const dependency = eventById.get(dependencyId);
+      if (!dependency) {
+        return null;
+      }
+      const dependencyOffset = visit(dependency, [...path, event.templateEventId]);
+      if (dependencyOffset === null) {
+        return null;
+      }
+      const offset = dependencyOffset + readNumberParameter(event.parameters, "scheduleOffsetSeconds", 0);
+      offsets.set(event.templateEventId, offset);
+      return offset;
+    }
+    const offset = readNumberParameter(event.parameters, "scheduleOffsetSeconds", 0);
+    offsets.set(event.templateEventId, offset);
+    return offset;
+  };
+
+  template.events.forEach((event) => visit(event, []));
+  return { offsets, warnings };
+}
+
 function timelineDraftFromEvent(event: BackendMissionTimelineEvent, mission: BackendMission | null): TimelineEditorDraft {
   const parameters = event.parameters ?? {};
   const scheduleMode = eventScheduleMode(event);
@@ -1023,6 +1159,7 @@ function missionSetupDraftFor(
     endDateUtc: utcIsoToDateInput(end.toISOString()),
     endTimeUtc: utcIsoToTimeInput(end.toISOString()),
     durationPreset: preset.id,
+    templateId: "",
   };
 }
 
@@ -1316,9 +1453,11 @@ export function OrbitalDashboard() {
   const [missionTimelineEvents, setMissionTimelineEvents] = useState<BackendMissionTimelineEvent[]>([]);
   const [orbitLibrary, setOrbitLibrary] = useState<StoredOrbit[]>(() => readOrbitLibrary());
   const [missionLibrary, setMissionLibrary] = useState<MissionLibraryState>(() => readMissionLibrary());
+  const [templateLibrary, setTemplateLibrary] = useState<MissionTemplateLibraryState>(() => readMissionTemplateLibrary());
   const [activeWorkspaceOrbitId, setActiveWorkspaceOrbitId] = useState<string | null>(null);
   const [activeWorkspaceMissionId, setActiveWorkspaceMissionId] = useState<string | null>(null);
   const workspaceImportInputRef = useRef<HTMLInputElement | null>(null);
+  const templateImportInputRef = useRef<HTMLInputElement | null>(null);
   const [selectedTimelineEventId, setSelectedTimelineEventId] = useState<string | null>(null);
   const [timelineModalMode, setTimelineModalMode] = useState<TimelineModalMode | null>(null);
   const [timelineDraft, setTimelineDraft] = useState<TimelineEditorDraft>(defaultTimelineDraft);
@@ -1649,6 +1788,11 @@ export function OrbitalDashboard() {
     writeMissionLibrary(next);
   }, []);
 
+  const saveTemplateLibrary = useCallback((next: MissionTemplateLibraryState) => {
+    setTemplateLibrary(next);
+    writeMissionTemplateLibrary(next);
+  }, []);
+
   const rememberOrbit = useCallback((orbit: StoredOrbit) => {
     setActiveWorkspaceOrbitId(orbit.orbitId);
     setOrbitLibrary((current) => {
@@ -1813,6 +1957,107 @@ export function OrbitalDashboard() {
   const exportWorkspace = useCallback(() => {
     downloadJson("orbit-mission-workspace.json", buildWorkspace(orbitLibrary, missionLibrary));
   }, [missionLibrary, orbitLibrary]);
+
+  const saveCurrentMissionAsTemplate = useCallback(() => {
+    if (!mission || missionTimelineEvents.length === 0) {
+      toast.error("Create a mission timeline before saving a template.");
+      return;
+    }
+    const name = window.prompt("Template name", `${mission.name} Template`)?.trim();
+    if (!name) {
+      return;
+    }
+    const categoryInput = window.prompt(`Category (${missionTemplateCategories.join(", ")})`, "Custom")?.trim() as MissionTemplateCategory | undefined;
+    const category = missionTemplateCategories.includes(categoryInput as MissionTemplateCategory)
+      ? categoryInput as MissionTemplateCategory
+      : "Custom";
+    const template = templateFromMission(mission, missionTimelineEvents, name, category);
+    const warnings = templateWarnings(template);
+    if (warnings.length > 0) {
+      toast.error(warnings[0]);
+      return;
+    }
+    saveTemplateLibrary(upsertMissionTemplate(templateLibrary, template));
+    toast.success("Mission template saved.");
+  }, [mission, missionTimelineEvents, saveTemplateLibrary, templateLibrary]);
+
+  const renameTemplate = useCallback((template: MissionTemplate) => {
+    const name = window.prompt("Rename template", template.name)?.trim();
+    if (!name) {
+      return;
+    }
+    saveTemplateLibrary(upsertMissionTemplate(templateLibrary, { ...template, name }));
+  }, [saveTemplateLibrary, templateLibrary]);
+
+  const editTemplateMetadata = useCallback((template: MissionTemplate) => {
+    const description = window.prompt("Template description", template.description)?.trim();
+    const tagsInput = window.prompt("Tags, comma separated", template.tags.join(", "))?.trim();
+    const categoryInput = window.prompt(`Category (${missionTemplateCategories.join(", ")})`, template.category)?.trim();
+    const category = missionTemplateCategories.includes(categoryInput as MissionTemplateCategory)
+      ? categoryInput as MissionTemplateCategory
+      : template.category;
+    saveTemplateLibrary(upsertMissionTemplate(templateLibrary, {
+      ...template,
+      description: description ?? template.description,
+      category,
+      tags: tagsInput ? tagsInput.split(",").map((tag) => tag.trim()).filter(Boolean) : template.tags,
+    }));
+  }, [saveTemplateLibrary, templateLibrary]);
+
+  const cloneTemplate = useCallback((template: MissionTemplate) => {
+    const result = duplicateMissionTemplate(templateLibrary, template.templateId);
+    saveTemplateLibrary(result.templateState);
+    if (result.clonedTemplateId) {
+      toast.success("Template duplicated.");
+    }
+  }, [saveTemplateLibrary, templateLibrary]);
+
+  const deleteTemplate = useCallback((template: MissionTemplate) => {
+    if (!window.confirm(`Delete template "${template.name}"?`)) {
+      return;
+    }
+    saveTemplateLibrary(deleteMissionTemplate(templateLibrary, template.templateId));
+  }, [saveTemplateLibrary, templateLibrary]);
+
+  const exportTemplate = useCallback((template: MissionTemplate) => {
+    downloadJson(`${template.name.replaceAll(/\s+/g, "-").toLowerCase()}-template.json`, template);
+  }, []);
+
+  const importTemplateFile = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    try {
+      const parsed = validateMissionTemplateImport(JSON.parse(await file.text()));
+      const importedTemplates = "templates" in parsed ? parsed.templates : [parsed];
+      const importedIds = new Set<string>();
+      for (const template of importedTemplates) {
+        if (importedIds.has(template.templateId)) {
+          throw new Error(`Duplicate template id in import: ${template.templateId}`);
+        }
+        importedIds.add(template.templateId);
+      }
+      const duplicateIds = importedTemplates.filter((template) => templateLibrary.templates.some((item) => item.templateId === template.templateId));
+      if (duplicateIds.length > 0) {
+        throw new Error(`Template id already exists: ${duplicateIds[0].templateId}`);
+      }
+      for (const template of importedTemplates) {
+        const warnings = templateWarnings(template);
+        if (warnings.length > 0) {
+          throw new Error(warnings[0]);
+        }
+      }
+      saveTemplateLibrary({
+        schemaVersion: 1,
+        templates: [...templateLibrary.templates, ...importedTemplates],
+      });
+      toast.success("Template JSON imported.");
+    } catch (error) {
+      toast.error(userErrorMessage(error, "Invalid template JSON."));
+    }
+  }, [saveTemplateLibrary, templateLibrary]);
 
   const importWorkspaceFile = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -2074,6 +2319,46 @@ export function OrbitalDashboard() {
     setIsMissionSetupOpen(true);
   }, [manualOrbitId, selectedNoradId, selectedSnapshot]);
 
+  const instantiateTemplateEvents = useCallback(async (createdMission: BackendMission, template: MissionTemplate) => {
+    const resolved = resolveTemplateOffsets(template);
+    if (resolved.warnings.length > 0) {
+      throw new Error(resolved.warnings[0]);
+    }
+    const backendIdByTemplateId = new Map<string, string>();
+    const orderedEvents = template.events.toSorted((a, b) => a.sequenceIndex - b.sequenceIndex);
+    for (const templateEvent of orderedEvents) {
+      const offsetSeconds = resolved.offsets.get(templateEvent.templateEventId);
+      if (offsetSeconds === undefined) {
+        throw new Error(`Template event "${templateEvent.name}" could not be resolved.`);
+      }
+      const parameters = { ...templateEvent.parameters };
+      const dependencyId = parameters.scheduleDependencyId;
+      if (typeof dependencyId === "string") {
+        const backendDependencyId = backendIdByTemplateId.get(dependencyId);
+        if (!backendDependencyId) {
+          throw new Error(`Template event "${templateEvent.name}" depends on an event that has not been created.`);
+        }
+        parameters.scheduleDependencyId = backendDependencyId;
+      }
+      if (readStringParameter(parameters, "scheduleMode", "MET") === "AFTER_EVENT") {
+        parameters.scheduleValue = `after:${String(parameters.scheduleDependencyId)}+${metOffsetLabelFromSeconds(readNumberParameter(parameters, "scheduleOffsetSeconds", 0))}`;
+      } else {
+        parameters.scheduleMode = "MET";
+        parameters.scheduleValue = metOffsetLabelFromSeconds(offsetSeconds);
+        parameters.scheduleOffsetSeconds = offsetSeconds;
+      }
+      const createdEvent = await createMissionTimelineEvent(createdMission.id, {
+        sequenceIndex: templateEvent.sequenceIndex,
+        type: templateEvent.type === "COAST" ? "COAST" : "FINITE_BURN",
+        name: templateEvent.name,
+        enabled: templateEvent.enabled,
+        executionTime: new Date(new Date(createdMission.scenarioStart).getTime() + offsetSeconds * 1000).toISOString(),
+        parameters,
+      });
+      backendIdByTemplateId.set(templateEvent.templateEventId, createdEvent.id);
+    }
+  }, []);
+
   const initializeMissionTimeline = useCallback(async () => {
     if (!selectedSnapshot?.satellite || (!selectedNoradId && !manualOrbitId)) {
       const message = "Select a catalog or manual backend orbit first.";
@@ -2091,6 +2376,9 @@ export function OrbitalDashboard() {
     setTimelineStatus("Creating mission timeline...");
     try {
       const { startIso, endIso } = missionWindowFromDraft(missionSetupDraft);
+      const selectedTemplate = missionSetupDraft.templateId
+        ? templateLibrary.templates.find((template) => template.templateId === missionSetupDraft.templateId) ?? null
+        : null;
       const created = await createMission({
         name: missionSetupDraft.name.trim(),
         ...(manualOrbitId ? { subjectOrbitId: manualOrbitId } : { subjectNoradId: Number(selectedNoradId) }),
@@ -2102,16 +2390,19 @@ export function OrbitalDashboard() {
       if (activeStoredOrbit) {
         rememberMission(created, activeStoredOrbit.orbitId);
       }
+      if (selectedTemplate) {
+        await instantiateTemplateEvents(created, selectedTemplate);
+      }
       await refreshMissionTimeline(created.id);
       setIsMissionSetupOpen(false);
-      setTimelineStatus("Mission timeline initialized.");
-      toast.success("Mission timeline initialized.");
+      setTimelineStatus(selectedTemplate ? `Mission created from template "${selectedTemplate.name}".` : "Mission timeline initialized.");
+      toast.success(selectedTemplate ? "Mission created from template." : "Mission timeline initialized.");
     } catch (error) {
       const message = userErrorMessage(error, "Unable to initialize mission timeline.");
       setTimelineStatus(message);
       toast.error(message);
     }
-  }, [activeStoredOrbit, manualOrbitId, missionSetupDraft, refreshMissionTimeline, rememberMission, selectedNoradId, selectedSnapshot]);
+  }, [activeStoredOrbit, instantiateTemplateEvents, manualOrbitId, missionSetupDraft, refreshMissionTimeline, rememberMission, selectedNoradId, selectedSnapshot, templateLibrary.templates]);
 
   const openCreateTimelineModal = useCallback((type: TimelineEditorDraft["type"] = "FINITE_BURN") => {
     const offsetSeconds = mission
@@ -3129,6 +3420,7 @@ export function OrbitalDashboard() {
         <WorkspaceLibraryPanel
           orbitLibrary={orbitLibrary}
           missionLibrary={missionLibrary}
+          templateLibrary={templateLibrary}
           activeOrbitId={activeStoredOrbit?.orbitId ?? activeWorkspaceOrbitId}
           activeMissionId={activeStoredMission?.missionId ?? activeWorkspaceMissionId}
           onLoadOrbit={loadStoredOrbit}
@@ -3142,8 +3434,15 @@ export function OrbitalDashboard() {
           onDeleteMission={deleteStoredMission}
           onCloneMission={cloneStoredMission}
           onExportMission={exportStoredMission}
+          onSaveCurrentMissionAsTemplate={saveCurrentMissionAsTemplate}
+          onRenameTemplate={renameTemplate}
+          onEditTemplate={editTemplateMetadata}
+          onCloneTemplate={cloneTemplate}
+          onDeleteTemplate={deleteTemplate}
+          onExportTemplate={exportTemplate}
           onExportWorkspace={exportWorkspace}
           onImportWorkspace={() => workspaceImportInputRef.current?.click()}
+          onImportTemplate={() => templateImportInputRef.current?.click()}
         />
 
         <ManeuverPanel
@@ -3315,6 +3614,7 @@ export function OrbitalDashboard() {
         <MissionSetupModal
           draft={missionSetupDraft}
           subjectSummary={missionSubjectSummary(activeDataSource, selectedSnapshot?.satellite, selectedNoradId, manualOrbitId)}
+          templates={templateLibrary.templates}
           onDraftChange={setMissionSetupDraft}
           onCreate={initializeMissionTimeline}
           onClose={() => setIsMissionSetupOpen(false)}
@@ -3357,6 +3657,13 @@ export function OrbitalDashboard() {
         accept="application/json,.json"
         className="hidden"
         onChange={importWorkspaceFile}
+      />
+      <input
+        ref={templateImportInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        onChange={importTemplateFile}
       />
       <ToastContainer
         position="bottom-right"
@@ -4270,6 +4577,7 @@ function getConjunctionStatusDescription(status: ConjunctionSnapshot["status"]) 
 function WorkspaceLibraryPanel({
   orbitLibrary,
   missionLibrary,
+  templateLibrary,
   activeOrbitId,
   activeMissionId,
   onLoadOrbit,
@@ -4283,11 +4591,19 @@ function WorkspaceLibraryPanel({
   onDeleteMission,
   onCloneMission,
   onExportMission,
+  onSaveCurrentMissionAsTemplate,
+  onRenameTemplate,
+  onEditTemplate,
+  onCloneTemplate,
+  onDeleteTemplate,
+  onExportTemplate,
   onExportWorkspace,
   onImportWorkspace,
+  onImportTemplate,
 }: {
   orbitLibrary: StoredOrbit[];
   missionLibrary: MissionLibraryState;
+  templateLibrary: MissionTemplateLibraryState;
   activeOrbitId: string | null;
   activeMissionId: string | null;
   onLoadOrbit: (orbit: StoredOrbit) => void;
@@ -4301,8 +4617,15 @@ function WorkspaceLibraryPanel({
   onDeleteMission: (mission: StoredMission) => void;
   onCloneMission: (mission: StoredMission) => void;
   onExportMission: (mission: StoredMission) => void;
+  onSaveCurrentMissionAsTemplate: () => void;
+  onRenameTemplate: (template: MissionTemplate) => void;
+  onEditTemplate: (template: MissionTemplate) => void;
+  onCloneTemplate: (template: MissionTemplate) => void;
+  onDeleteTemplate: (template: MissionTemplate) => void;
+  onExportTemplate: (template: MissionTemplate) => void;
   onExportWorkspace: () => void;
   onImportWorkspace: () => void;
+  onImportTemplate: () => void;
 }) {
   const missionsByOrbit = useMemo(() => {
     const map = new Map<string, StoredMission[]>();
@@ -4329,7 +4652,7 @@ function WorkspaceLibraryPanel({
         <div>
           <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Workspace</p>
           <p className="mt-1 text-[11px] text-zinc-500">
-            {orbitLibrary.length} orbits / {missionLibrary.missions.length} missions / {missionLibrary.events.length} events
+            {orbitLibrary.length} orbits / {missionLibrary.missions.length} missions / {templateLibrary.templates.length} templates
           </p>
         </div>
         <div className="flex gap-1.5">
@@ -4391,6 +4714,41 @@ function WorkspaceLibraryPanel({
                 </div>
               );
             })
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3">
+        <div className="flex items-center justify-between gap-3">
+          <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Template Library</p>
+          <div className="flex gap-1.5">
+            <button type="button" onClick={onSaveCurrentMissionAsTemplate} className="workspace-action">Save</button>
+            <button type="button" onClick={onImportTemplate} className="workspace-action">Import</button>
+          </div>
+        </div>
+        <div className="mt-2 max-h-[24vh] space-y-2 overflow-auto pr-1">
+          {templateLibrary.templates.length === 0 ? (
+            <p className="border border-white/10 bg-black/25 px-3 py-2 font-mono text-[10px] uppercase text-zinc-600">No templates yet</p>
+          ) : (
+            templateLibrary.templates.map((template) => (
+              <div key={template.templateId} className="border border-white/10 bg-black/25 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-white">{template.name}</p>
+                    <p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">{template.category} / {template.events.length} events</p>
+                  </div>
+                  <span className="font-mono text-[10px] text-cyan-200">{template.tags.slice(0, 2).join(", ") || "template"}</span>
+                </div>
+                {template.description && <p className="mt-2 line-clamp-2 text-[11px] leading-5 text-zinc-500">{template.description}</p>}
+                <div className="mt-3 grid grid-cols-5 gap-1">
+                  <button type="button" onClick={() => onRenameTemplate(template)} className="workspace-action">Name</button>
+                  <button type="button" onClick={() => onEditTemplate(template)} className="workspace-action">Edit</button>
+                  <button type="button" onClick={() => onCloneTemplate(template)} className="workspace-action">Clone</button>
+                  <button type="button" onClick={() => onExportTemplate(template)} className="workspace-action">JSON</button>
+                  <button type="button" onClick={() => onDeleteTemplate(template)} className="workspace-action danger">Del</button>
+                </div>
+              </div>
+            ))
           )}
         </div>
       </div>
@@ -4884,12 +5242,14 @@ function TimelineEventCard({
 function MissionSetupModal({
   draft,
   subjectSummary,
+  templates,
   onDraftChange,
   onCreate,
   onClose,
 }: {
   draft: MissionSetupDraft;
   subjectSummary: { label: string; detail: string };
+  templates: MissionTemplate[];
   onDraftChange: (draft: MissionSetupDraft) => void;
   onCreate: () => void;
   onClose: () => void;
@@ -4921,6 +5281,7 @@ function MissionSetupModal({
   const durationLabel = windowPreview
     ? secondsToDurationLabel(Math.round((new Date(windowPreview.endIso).getTime() - new Date(windowPreview.startIso).getTime()) / 1000))
     : "--";
+  const selectedTemplate = templates.find((template) => template.templateId === draft.templateId) ?? null;
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
@@ -4954,6 +5315,52 @@ function MissionSetupModal({
             <TimelineField label="Mission Name" error={errors.name}>
               <input value={draft.name} onChange={(event) => update({ name: event.target.value })} className="timeline-input" />
             </TimelineField>
+
+            <div className="border border-cyan-300/15 bg-black/25 px-3 py-2">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Timeline Source</p>
+                  <p className="mt-1 text-xs text-zinc-500">Create a blank mission or seed it from a reusable template.</p>
+                </div>
+                <div className="grid grid-cols-2 border border-cyan-300/20">
+                  <button
+                    type="button"
+                    onClick={() => update({ templateId: "" })}
+                    className={`px-3 py-2 font-mono text-[10px] uppercase transition ${!draft.templateId ? "bg-cyan-300 text-slate-950" : "text-cyan-200 hover:bg-cyan-300/10"}`}
+                  >
+                    Blank
+                  </button>
+                  <button
+                    type="button"
+                    disabled={templates.length === 0}
+                    onClick={() => update({ templateId: draft.templateId || templates[0]?.templateId || "" })}
+                    className={`px-3 py-2 font-mono text-[10px] uppercase transition ${draft.templateId ? "bg-cyan-300 text-slate-950" : "text-cyan-200 hover:bg-cyan-300/10 disabled:cursor-not-allowed disabled:text-zinc-600"}`}
+                  >
+                    Template
+                  </button>
+                </div>
+              </div>
+              {draft.templateId && (
+                <div className="mt-3 grid gap-2">
+                  <select
+                    value={draft.templateId}
+                    onChange={(event) => update({ templateId: event.target.value })}
+                    className="timeline-input"
+                  >
+                    {templates.map((template) => (
+                      <option key={template.templateId} value={template.templateId}>
+                        {template.name} / {template.category} / {template.events.length} events
+                      </option>
+                    ))}
+                  </select>
+                  {selectedTemplate && (
+                    <p className="text-xs leading-5 text-zinc-500">
+                      {selectedTemplate.description || "Template events will be copied with new backend event IDs."}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
 
             <div>
               <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Duration Preset</span>
