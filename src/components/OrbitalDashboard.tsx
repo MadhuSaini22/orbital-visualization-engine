@@ -41,7 +41,6 @@ import {
   fetchManualOrbitTrajectory,
   fetchManeuvers,
   fetchOrbitTrajectory,
-  refreshConjunctions,
   reorderMissionTimelineEvents,
   setAnalysisMode,
   setMissionTimelineEventEnabled,
@@ -2567,21 +2566,34 @@ export function OrbitalDashboard() {
     }
   }, [handleCreateManualOrbit]);
 
-  const handleLoadImportedTle = useCallback((raw: string, sourceLabel: string) => {
+  const handleLoadImportedTle = useCallback(async (raw: string, sourceLabel: string) => {
     const result = loadTleText(raw);
     if (result.satellites.length > 0) {
-      storedOrbitsFromImportedTle(result.satellites, raw, sourceLabel).forEach(rememberOrbit);
-      setActiveDataSource("endpoint");
-      setManualOrbitId(null);
-      setActiveSourceModal(null);
+      const first = result.satellites[0];
+      if (first.tle) {
+        await handleCreateManualOrbit({
+          name: first.name,
+          type: "TLE",
+          tle: first.tle,
+          propagatorType: "TLE_SGP4",
+        });
+        if (result.satellites.length > 1) {
+          storedOrbitsFromImportedTle(result.satellites.slice(1), raw, sourceLabel).forEach(rememberOrbit);
+        }
+      } else {
+        storedOrbitsFromImportedTle(result.satellites, raw, sourceLabel).forEach(rememberOrbit);
+        setActiveDataSource("endpoint");
+        setManualOrbitId(null);
+        setActiveSourceModal(null);
+      }
     }
     setMessages(
       result.errors.length > 0
         ? result.errors
-        : [`Loaded ${result.satellites.length} satellites from ${sourceLabel}.`],
+        : [`Loaded ${result.satellites.length} satellites from ${sourceLabel}. ${result.satellites[0]?.tle ? "Active imported TLE persisted for mission planning." : ""}`],
     );
     return result;
-  }, [loadTleText, rememberOrbit]);
+  }, [handleCreateManualOrbit, loadTleText, rememberOrbit]);
 
   const handleLoadCatalogSatellite = useCallback((satellite: SatelliteObject) => {
     rememberOrbit(storedOrbitFromCatalogSatellite(satellite, backendCatalogGroup));
@@ -2970,6 +2982,7 @@ export function OrbitalDashboard() {
       setShowMissionComparison(true);
       setTimelineStatus("Mission trajectory generated.");
       toast.success("Mission trajectory generated.");
+      setActiveCommandModal((current) => current === "mission" ? null : current);
     } catch (error) {
       const message = userErrorMessage(error, "Unable to generate mission trajectory.");
       setTimelineStatus(message);
@@ -2978,22 +2991,6 @@ export function OrbitalDashboard() {
       setIsMissionTrajectoryLoading(false);
     }
   }, [manualOrbitId, mission, selectedNoradId, selectedSnapshot, trajectoryAnchorTime, trajectoryWindowOptions.stepSec]);
-
-  const syncConjunctionsFromSpaceTrack = useCallback(async () => {
-    setDynamicDataMessage("Syncing public CDM conjunctions from Space-Track...");
-
-    try {
-      const response = await refreshConjunctions();
-      const loadedIdSet = new Set(loadedNoradIds);
-      const parsed = normalizeBackendConjunctions(response.conjunctions)
-        .filter((event) => loadedIdSet.has(event.primarySatelliteId) || loadedIdSet.has(event.secondarySatelliteId));
-      setConjunctionEvents(parsed);
-      setSelectedConjunctionId((current) => parsed.some((event) => event.id === current) ? current : parsed[0]?.id ?? null);
-      setDynamicDataMessage(`Synced ${response.conjunctions.length} Space-Track CDM records. ${parsed.length} match loaded satellites.`);
-    } catch (error) {
-      setDynamicDataMessage(error instanceof Error ? error.message : "Unable to sync Space-Track conjunctions.");
-    }
-  }, [loadedNoradIds]);
 
   const handleCesiumClockTick = useCallback((timeIso: string) => {
     viewerClockAvailableRef.current = true;
@@ -3677,6 +3674,13 @@ export function OrbitalDashboard() {
           </div>
         </HudPanel>
 
+        <CommandStatusBadges
+          missionReady={Boolean(mission)}
+          trajectoryReady={Boolean(missionTrajectoryOverlay)}
+          warningCount={missionSummaryAnalysis.warnings.length}
+          conjunctionReady={canShowConjunctions && conjunctionSnapshots.length > 0}
+        />
+
         <CommandSummaryCard
           title="Mission Summary"
           cta="Plan Mission"
@@ -3876,7 +3880,7 @@ export function OrbitalDashboard() {
       )}
 
       {activeCommandModal === "mission" && (
-        <CommandModal title="Mission Planner" onClose={() => setActiveCommandModal(null)} size="wide">
+        <CommandModal title="Mission Planner" onClose={() => setActiveCommandModal(null)} size="mission">
           <MissionTimelinePanel
             mission={mission}
             events={missionTimelineEvents}
@@ -3892,6 +3896,8 @@ export function OrbitalDashboard() {
             simulationTimeIso={simTime.toISOString()}
             onInitializeMission={openMissionSetup}
             onOpenCatalog={() => openOrbitSource("catalog")}
+            onOpenWorkspace={() => setActiveCommandModal("workspace")}
+            onOpenTemplates={() => setActiveCommandModal("templates")}
             onCreateEvent={openCreateTimelineModal}
             onEditEvent={openEditTimelineModal}
             onDeleteEvent={deleteTimelineEvent}
@@ -3968,6 +3974,7 @@ export function OrbitalDashboard() {
             effectiveShowRangeCheck={effectiveShowRangeCheck}
             rangeMeasurement={rangeMeasurement}
             maneuverSnapshots={maneuverSnapshots}
+            missionEvents={missionTimelineEvents}
             selectedManeuverId={selectedManeuver?.event.id ?? null}
             showManeuvers={effectiveShowManeuvers}
             canShowManeuvers={canShowManeuvers}
@@ -3987,7 +3994,6 @@ export function OrbitalDashboard() {
             onOpenManeuverModal={() => setIsManeuverModalOpen(true)}
             onSelectConjunction={setSelectedConjunctionId}
             onToggleConjunctions={() => setShowConjunctions((value) => !value)}
-            onRefreshConjunctions={syncConjunctionsFromSpaceTrack}
             onToggleComparison={() => setShowMissionComparison((value) => !value)}
           />
         </CommandModal>
@@ -4076,6 +4082,44 @@ function HudMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function CommandStatusBadges({
+  missionReady,
+  trajectoryReady,
+  warningCount,
+  conjunctionReady,
+}: {
+  missionReady: boolean;
+  trajectoryReady: boolean;
+  warningCount: number;
+  conjunctionReady: boolean;
+}) {
+  const badges = [
+    { label: missionReady ? "Mission Active" : "No Mission", tone: missionReady ? "ok" : "idle" },
+    { label: trajectoryReady ? "Trajectory Ready" : "Trajectory Pending", tone: trajectoryReady ? "ok" : "idle" },
+    { label: warningCount > 0 ? `${warningCount} Warnings` : "No Warnings", tone: warningCount > 0 ? "warn" : "ok" },
+    { label: conjunctionReady ? "Conjunction Ready" : "Conjunction Offline", tone: conjunctionReady ? "ok" : "idle" },
+  ] as const;
+
+  return (
+    <div className="grid grid-cols-2 gap-1.5">
+      {badges.map((badge) => (
+        <span
+          key={badge.label}
+          className={`border px-2 py-1 text-center font-mono text-[9px] uppercase tracking-[0.08em] ${
+            badge.tone === "ok"
+              ? "border-emerald-300/35 bg-emerald-300/[0.05] text-emerald-100"
+              : badge.tone === "warn"
+                ? "border-amber-300/35 bg-amber-300/[0.05] text-amber-100"
+                : "border-white/10 bg-black/25 text-zinc-500"
+          }`}
+        >
+          {badge.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function CommandSummaryCard({
   title,
   rows,
@@ -4125,11 +4169,17 @@ function CommandModal({
   title: string;
   children: ReactNode;
   onClose: () => void;
-  size?: "normal" | "wide";
+  size?: "normal" | "wide" | "mission";
 }) {
+  const sizeClass = size === "mission"
+    ? "max-h-[94vh] w-[min(1400px,95vw)]"
+    : size === "wide"
+      ? "max-h-[90vh] w-[min(1180px,90vw)]"
+      : "max-h-[88vh] w-[min(760px,94vw)]";
+
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
-      <div className={`flex max-h-[90vh] flex-col overflow-hidden border border-cyan-300/30 bg-[#071016]/96 shadow-2xl ${size === "wide" ? "w-[min(1180px,96vw)]" : "w-[min(760px,94vw)]"}`}>
+      <div className={`flex flex-col overflow-hidden border border-cyan-300/30 bg-[#071016]/96 shadow-2xl ${sizeClass}`}>
         <div className="flex items-center justify-between border-b border-cyan-300/20 px-5 py-4">
           <div>
             <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Command Center</p>
@@ -4300,7 +4350,7 @@ function OrbitSourceModal({
   onClose: () => void;
   onCreateManualOrbit: (request: CreateManualOrbitRequest) => Promise<void>;
   onCreateOrbitFromTemplate: (template: OrbitTemplate) => Promise<void>;
-  onLoadImportedTle: (raw: string, sourceLabel: string) => { satellites: SatelliteObject[]; errors: string[] };
+  onLoadImportedTle: (raw: string, sourceLabel: string) => Promise<{ satellites: SatelliteObject[]; errors: string[] }>;
   onLoadCatalogSatellite: (satellite: SatelliteObject) => void;
   orbitTemplates: OrbitTemplate[];
   backendCatalogGroup: CatalogGroupId;
@@ -4474,7 +4524,7 @@ function TleImportFlow({
 }: {
   tleUrl: string;
   onTleUrlChange: (value: string) => void;
-  onLoadImportedTle: (raw: string, sourceLabel: string) => { satellites: SatelliteObject[]; errors: string[] };
+  onLoadImportedTle: (raw: string, sourceLabel: string) => Promise<{ satellites: SatelliteObject[]; errors: string[] }>;
 }) {
   const [mode, setMode] = useState<TleImportMode>("paste");
   const [raw, setRaw] = useState("");
@@ -4510,10 +4560,17 @@ function TleImportFlow({
     }
   };
 
-  const importTle = () => {
-    const result = onLoadImportedTle(raw, mode === "url" ? "URL import" : mode === "upload" ? "uploaded file" : "pasted TLE");
-    if (result.satellites.length === 0) {
-      setStatus(result.errors[0] ?? "No valid TLE objects found.");
+  const importTle = async () => {
+    setIsLoading(true);
+    try {
+      const result = await onLoadImportedTle(raw, mode === "url" ? "URL import" : mode === "upload" ? "uploaded file" : "pasted TLE");
+      if (result.satellites.length === 0) {
+        setStatus(result.errors[0] ?? "No valid TLE objects found.");
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unable to import TLE.");
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -4576,10 +4633,10 @@ function TleImportFlow({
             <button
               type="button"
               onClick={importTle}
-              disabled={preview.satellites.length === 0}
+              disabled={preview.satellites.length === 0 || isLoading}
               className="border border-cyan-300 bg-cyan-300 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/10 disabled:text-zinc-500"
             >
-              Import
+              {isLoading ? "Importing" : "Import"}
             </button>
           </div>
           {preview.errors.length > 0 && (
@@ -5145,6 +5202,7 @@ function AnalysisModalContent({
   effectiveShowRangeCheck,
   rangeMeasurement,
   maneuverSnapshots,
+  missionEvents,
   selectedManeuverId,
   showManeuvers,
   canShowManeuvers,
@@ -5164,7 +5222,6 @@ function AnalysisModalContent({
   onOpenManeuverModal,
   onSelectConjunction,
   onToggleConjunctions,
-  onRefreshConjunctions,
   onToggleComparison,
 }: {
   selectedNoradId: string | number | null;
@@ -5178,6 +5235,7 @@ function AnalysisModalContent({
   effectiveShowRangeCheck: boolean;
   rangeMeasurement: { primary: SatelliteSnapshot; secondary: SatelliteSnapshot; distanceKm: number } | null;
   maneuverSnapshots: ManeuverSnapshot[];
+  missionEvents: BackendMissionTimelineEvent[];
   selectedManeuverId: string | null;
   showManeuvers: boolean;
   canShowManeuvers: boolean;
@@ -5197,10 +5255,11 @@ function AnalysisModalContent({
   onOpenManeuverModal: () => void;
   onSelectConjunction: (eventId: string) => void;
   onToggleConjunctions: () => void;
-  onRefreshConjunctions: () => void;
   onToggleComparison: () => void;
 }) {
-  const [tab, setTab] = useState<"trajectory" | "range" | "conjunction" | "maneuver">("trajectory");
+  const [tab, setTab] = useState<"trajectory" | "range" | "conjunction" | "maneuver" | "propagation">("trajectory");
+  const missionBurnEvents = useMemo(() => missionEvents.filter((event) => event.type === "FINITE_BURN"), [missionEvents]);
+  const totalBurnDuration = missionBurnEvents.reduce((sum, event) => sum + readNumberParameter(event.parameters ?? {}, "durationSeconds", 0), 0);
 
   return (
     <div>
@@ -5210,6 +5269,7 @@ function AnalysisModalContent({
           { id: "range" as const, label: "Range" },
           { id: "conjunction" as const, label: "Conjunction" },
           { id: "maneuver" as const, label: "Maneuver" },
+          { id: "propagation" as const, label: "Propagation" },
         ].map((item) => (
           <button
             key={item.id}
@@ -5318,20 +5378,76 @@ function AnalysisModalContent({
             disabled={!canShowConjunctions}
             onSelectConjunction={onSelectConjunction}
             onToggleConjunctions={onToggleConjunctions}
-            onRefreshConjunctions={onRefreshConjunctions}
           />
         )}
 
         {tab === "maneuver" && (
-          <ManeuverPanel
-            maneuverSnapshots={maneuverSnapshots}
-            selectedManeuverId={selectedManeuverId}
-            showManeuvers={showManeuvers}
-            disabled={!canShowManeuvers}
-            onSelectManeuver={onSelectManeuver}
-            onToggleManeuvers={onToggleManeuvers}
-            onOpenManeuverModal={onOpenManeuverModal}
-          />
+          <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
+            <HudPanel>
+              <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Mission Burn Summary</p>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <DetailMetric label="Burn Count" value={String(missionBurnEvents.length)} />
+                <DetailMetric label="Duration" value={secondsToDurationLabel(totalBurnDuration)} />
+                <DetailMetric label="Delta-V" value="Not computed" />
+                <DetailMetric label="Timeline" value={missionBurnEvents.length > 0 ? "Available" : "--"} />
+              </div>
+              <div className="mt-3 max-h-[42vh] space-y-2 overflow-auto pr-1">
+                {missionBurnEvents.length === 0 ? (
+                  <p className="border border-white/10 bg-black/25 px-3 py-2 text-xs text-zinc-500">No finite-burn mission events found.</p>
+                ) : (
+                  missionBurnEvents.toSorted((a, b) => a.sequenceIndex - b.sequenceIndex).map((event) => (
+                    <div key={event.id} className="border border-rose-300/25 bg-rose-300/[0.04] p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-white">{event.name}</p>
+                          <p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">{compactIsoUtc(event.executionTime)}</p>
+                        </div>
+                        <span className="border border-rose-300/40 px-2 py-0.5 font-mono text-[10px] uppercase text-rose-100">Burn</span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-3 gap-2">
+                        <DetailMetric label="Duration" value={`${readNumberParameter(event.parameters ?? {}, "durationSeconds", 0)}s`} />
+                        <DetailMetric label="Thrust" value={`${readNumberParameter(event.parameters ?? {}, "thrustNewton", 0)} N`} />
+                        <DetailMetric label="Frame" value={readStringParameter(event.parameters ?? {}, "directionFrame", "TNW")} />
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </HudPanel>
+            <ManeuverPanel
+              maneuverSnapshots={maneuverSnapshots}
+              selectedManeuverId={selectedManeuverId}
+              showManeuvers={showManeuvers}
+              disabled={!canShowManeuvers}
+              onSelectManeuver={onSelectManeuver}
+              onToggleManeuvers={onToggleManeuvers}
+              onOpenManeuverModal={onOpenManeuverModal}
+            />
+          </div>
+        )}
+
+        {tab === "propagation" && (
+          <HudPanel>
+            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Propagation Configuration</p>
+            <p className="mt-2 text-xs leading-5 text-zinc-500">Read-only visibility for currently enabled propagator forces.</p>
+            <div className="mt-4 grid gap-2 md:grid-cols-2">
+              {[
+                ["Propagator", analysisConfig?.config.propagatorType.replaceAll("_", " ") ?? "Manual/default"],
+                ["Gravity", analysisConfig?.config.gravityEnabled ? `ON ${analysisConfig.config.gravityDegree}x${analysisConfig.config.gravityOrder}` : "OFF"],
+                ["Atmospheric Drag", analysisConfig?.config.dragEnabled ? "ON" : "OFF"],
+                ["Solar Radiation", analysisConfig?.config.solarRadiationPressureEnabled ? "ON" : "OFF"],
+                ["Third Body Sun", analysisConfig?.config.thirdBodySunEnabled ? "ON" : "OFF"],
+                ["Third Body Moon", analysisConfig?.config.thirdBodyMoonEnabled ? "ON" : "OFF"],
+                ["Maneuver Model", analysisConfig?.config.maneuverModelEnabled ? "ON" : "OFF"],
+                ["Relativity / Tides", "Not configured"],
+              ].map(([label, value]) => (
+                <div key={label} className="flex items-center justify-between gap-3 border border-white/10 bg-black/25 px-3 py-2 text-xs">
+                  <span className="font-mono uppercase tracking-[0.12em] text-zinc-500">{label}</span>
+                  <span className={String(value).startsWith("ON") ? "font-mono text-lime-100" : "font-mono text-zinc-300"}>{value}</span>
+                </div>
+              ))}
+            </div>
+          </HudPanel>
         )}
       </div>
     </div>
@@ -5658,6 +5774,8 @@ function MissionTimelinePanel({
   simulationTimeIso,
   onInitializeMission,
   onOpenCatalog,
+  onOpenWorkspace,
+  onOpenTemplates,
   onCreateEvent,
   onEditEvent,
   onDeleteEvent,
@@ -5683,6 +5801,8 @@ function MissionTimelinePanel({
   simulationTimeIso: string;
   onInitializeMission: () => void;
   onOpenCatalog: () => void;
+  onOpenWorkspace: () => void;
+  onOpenTemplates: () => void;
   onCreateEvent: (type?: TimelineEditorDraft["type"]) => void;
   onEditEvent: (event: BackendMissionTimelineEvent) => void;
   onDeleteEvent: (event: BackendMissionTimelineEvent) => void;
@@ -5756,14 +5876,52 @@ function MissionTimelinePanel({
       </div>
 
       {!mission && (
-        <div className={`mt-3 border px-3 py-2 text-xs leading-5 ${
+        <div className={`mt-3 border p-3 text-xs leading-5 ${
           canUseMissionTimeline
             ? "border-emerald-300/20 bg-emerald-300/[0.04] text-emerald-100"
             : "border-amber-300/20 bg-amber-300/[0.04] text-amber-100"
         }`}>
-          {canUseMissionTimeline
-            ? "Create a mission for this catalog orbit, then add Coast and Finite Burn events."
-            : unavailableReason}
+          {canUseMissionTimeline ? (
+            <div className="space-y-3">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-emerald-200">Mission Planning Setup</p>
+                <p className="mt-1 text-emerald-100/85">Create a mission window first, then add Coast and Finite Burn events inside that scenario.</p>
+              </div>
+              <div className="grid gap-2 border border-emerald-300/15 bg-black/20 p-2 text-[11px]">
+                <div className="flex justify-between gap-3">
+                  <span className="font-mono uppercase text-emerald-200/70">Subject</span>
+                  <span className="text-right">{subjectSummary.label}</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="font-mono uppercase text-emerald-200/70">Next Step</span>
+                  <span className="text-right">Define mission name and UTC window</span>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-2 max-sm:grid-cols-1">
+                <button type="button" onClick={onInitializeMission} className="border border-emerald-300/50 px-3 py-2 font-mono text-[10px] uppercase text-emerald-100 transition hover:border-emerald-300 hover:bg-emerald-300/10">
+                  Create Mission
+                </button>
+                <button type="button" onClick={onOpenTemplates} className="border border-cyan-300/40 px-3 py-2 font-mono text-[10px] uppercase text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-300/10">
+                  From Template
+                </button>
+                <button type="button" onClick={onOpenWorkspace} className="border border-white/15 px-3 py-2 font-mono text-[10px] uppercase text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100">
+                  Import/Open
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <p>{unavailableReason}</p>
+              <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
+                <button type="button" onClick={onOpenCatalog} className="border border-cyan-300/45 px-3 py-2 font-mono text-[10px] uppercase text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-300/10">
+                  Load Catalog
+                </button>
+                <button type="button" onClick={onOpenWorkspace} className="border border-white/15 px-3 py-2 font-mono text-[10px] uppercase text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100">
+                  Workspace
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -6969,7 +7127,6 @@ function ConjunctionPanel({
   disabled,
   onSelectConjunction,
   onToggleConjunctions,
-  onRefreshConjunctions,
 }: {
   conjunctionSnapshots: ConjunctionSnapshot[];
   selectedConjunctionId: string | null;
@@ -6977,7 +7134,6 @@ function ConjunctionPanel({
   disabled: boolean;
   onSelectConjunction: (conjunctionId: string) => void;
   onToggleConjunctions: () => void;
-  onRefreshConjunctions: () => void;
 }) {
   const selectedConjunction = conjunctionSnapshots.find((snapshot) => snapshot.event.id === selectedConjunctionId) ?? conjunctionSnapshots[0] ?? null;
 
@@ -6988,10 +7144,11 @@ function ConjunctionPanel({
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={onRefreshConjunctions}
-            className="border border-amber-300/35 px-2 py-1 font-mono text-[10px] uppercase text-amber-100 transition hover:border-amber-300 hover:bg-amber-300/10"
+            disabled
+            title="Conjunction sync is not yet implemented."
+            className="cursor-not-allowed border border-white/10 px-2 py-1 font-mono text-[10px] uppercase text-zinc-600 opacity-70"
           >
-            Sync
+            Coming Soon
           </button>
           <button
             type="button"
