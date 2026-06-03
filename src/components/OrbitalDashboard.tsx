@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, DragEvent, ReactNode } from "react";
+import type { ChangeEvent, DragEvent, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ToastContainer, toast } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
@@ -129,6 +129,8 @@ type TleImportMode = "paste" | "upload" | "url";
 type TimelineModalMode = "create" | "edit";
 type TimelineTimeMode = "UTC" | "MET";
 type TimelineScheduleMode = "UTC" | "MET" | "AFTER_EVENT";
+type TimelineZoomPreset = "THIRTY_MIN" | "ONE_HOUR" | "THREE_HOURS" | "SIX_HOURS" | "TWELVE_HOURS" | "TWENTY_FOUR_HOURS" | "CUSTOM";
+type TimelineSnapMode = "FREE" | "ONE_MIN" | "FIVE_MIN" | "TEN_MIN" | "THIRTY_MIN" | "ONE_HOUR";
 type MissionDurationPreset = "ONE_ORBIT" | "THREE_HOURS" | "TWELVE_HOURS" | "TWENTY_FOUR_HOURS" | "CUSTOM";
 type TimelineEditorDraft = {
   type: "COAST" | "FINITE_BURN";
@@ -162,6 +164,36 @@ type MissionTrajectoryOverlay = {
   legacy: SatelliteSnapshot | null;
   generatedAt: string;
   message: string;
+};
+type TimelineLayoutBlock = {
+  event: BackendMissionTimelineEvent;
+  offsetSeconds: number;
+  durationSeconds: number;
+  widthPercent: number;
+  startPercent: number;
+};
+type TimelineLayoutModel = {
+  missionDurationSeconds: number;
+  visibleSeconds: number;
+  trackWidthPercent: number;
+  blocks: TimelineLayoutBlock[];
+  cursors: {
+    missionStart: number;
+    missionEnd: number;
+    currentSimTime: number | null;
+    selectedEvent: number | null;
+  };
+};
+type TimelineInteractionModel = {
+  snapMode: TimelineSnapMode;
+  zoomPreset: TimelineZoomPreset;
+  customVisibleSeconds: number;
+};
+type SchedulingUpdateCommand = {
+  eventId: string;
+  targetMetSeconds: number;
+  executionTime: string;
+  request: CreateTimelineEventRequest;
 };
 
 const catalogGroupOptions = [
@@ -229,6 +261,23 @@ const missionDurationPresets = [
   { id: "TWENTY_FOUR_HOURS", label: "24 hours", seconds: 24 * 60 * 60 },
   { id: "CUSTOM", label: "Custom", seconds: null },
 ] satisfies Array<{ id: MissionDurationPreset; label: string; seconds: number | null }>;
+const timelineZoomOptions = [
+  { id: "THIRTY_MIN", label: "30 min", seconds: 30 * 60 },
+  { id: "ONE_HOUR", label: "1 hr", seconds: 60 * 60 },
+  { id: "THREE_HOURS", label: "3 hr", seconds: 3 * 60 * 60 },
+  { id: "SIX_HOURS", label: "6 hr", seconds: 6 * 60 * 60 },
+  { id: "TWELVE_HOURS", label: "12 hr", seconds: 12 * 60 * 60 },
+  { id: "TWENTY_FOUR_HOURS", label: "24 hr", seconds: 24 * 60 * 60 },
+  { id: "CUSTOM", label: "Custom", seconds: null },
+] satisfies Array<{ id: TimelineZoomPreset; label: string; seconds: number | null }>;
+const timelineSnapOptions = [
+  { id: "FREE", label: "Free", seconds: 1 },
+  { id: "ONE_MIN", label: "1 min", seconds: 60 },
+  { id: "FIVE_MIN", label: "5 min", seconds: 5 * 60 },
+  { id: "TEN_MIN", label: "10 min", seconds: 10 * 60 },
+  { id: "THIRTY_MIN", label: "30 min", seconds: 30 * 60 },
+  { id: "ONE_HOUR", label: "1 hr", seconds: 60 * 60 },
+] satisfies Array<{ id: TimelineSnapMode; label: string; seconds: number }>;
 const missionTemplateCategories = [
   "LEO",
   "GTO",
@@ -1383,6 +1432,96 @@ function visualTimelineBlocks(mission: BackendMission | null, events: BackendMis
       startPercent,
     };
   });
+}
+
+function timelineVisibleSeconds(interaction: TimelineInteractionModel, mission: BackendMission | null) {
+  const option = timelineZoomOptions.find((item) => item.id === interaction.zoomPreset);
+  const fallback = mission ? missionDurationSeconds(mission) : 3 * 60 * 60;
+  return Math.max(60, option?.seconds ?? (interaction.customVisibleSeconds || fallback));
+}
+
+function buildTimelineLayoutModel(
+  mission: BackendMission,
+  events: BackendMissionTimelineEvent[],
+  interaction: TimelineInteractionModel,
+  selectedEventId: string | null,
+  simulationTimeIso: string,
+): TimelineLayoutModel {
+  const missionSeconds = Math.max(1, missionDurationSeconds(mission));
+  const visibleSeconds = timelineVisibleSeconds(interaction, mission);
+  const blocks = visualTimelineBlocks(mission, events);
+  const selectedBlock = selectedEventId ? blocks.find((block) => block.event.id === selectedEventId) ?? null : null;
+  const simOffset = Math.round((new Date(simulationTimeIso).getTime() - new Date(mission.scenarioStart).getTime()) / 1000);
+  return {
+    missionDurationSeconds: missionSeconds,
+    visibleSeconds,
+    trackWidthPercent: Math.max(100, (missionSeconds / visibleSeconds) * 100),
+    blocks,
+    cursors: {
+      missionStart: 0,
+      missionEnd: 100,
+      currentSimTime: Number.isFinite(simOffset) ? Math.min(100, Math.max(0, (simOffset / missionSeconds) * 100)) : null,
+      selectedEvent: selectedBlock ? selectedBlock.startPercent : null,
+    },
+  };
+}
+
+function snapTimelineOffset(seconds: number, snapMode: TimelineSnapMode) {
+  const snapSeconds = timelineSnapOptions.find((item) => item.id === snapMode)?.seconds ?? 1;
+  if (snapMode === "FREE" || snapSeconds <= 1) {
+    return Math.round(seconds);
+  }
+  return Math.round(seconds / snapSeconds) * snapSeconds;
+}
+
+function buildSchedulingUpdateCommand(
+  mission: BackendMission,
+  events: BackendMissionTimelineEvent[],
+  event: BackendMissionTimelineEvent,
+  targetMetSeconds: number,
+  snapMode: TimelineSnapMode,
+): SchedulingUpdateCommand {
+  const clampedMet = Math.min(missionDurationSeconds(mission), Math.max(0, snapTimelineOffset(targetMetSeconds, snapMode)));
+  const executionTime = new Date(new Date(mission.scenarioStart).getTime() + clampedMet * 1000).toISOString();
+  const parameters = { ...(event.parameters ?? {}) };
+  const mode = eventScheduleMode(event);
+
+  if (mode === "AFTER_EVENT") {
+    const dependencyId = readStringParameter(parameters, "scheduleDependencyId", "");
+    const dependencyMet = resolveEventMetOffsets(mission, events).offsets.get(dependencyId);
+    if (!dependencyId || dependencyMet === undefined) {
+      throw new Error(`${event.name} dependency source could not be resolved.`);
+    }
+    const dependencyOffsetSeconds = Math.max(0, clampedMet - dependencyMet);
+    parameters.scheduleMode = "AFTER_EVENT";
+    parameters.scheduleDependencyId = dependencyId;
+    parameters.scheduleOffsetSeconds = dependencyOffsetSeconds;
+    parameters.scheduleValue = `after:${dependencyId}+${metOffsetLabelFromSeconds(dependencyOffsetSeconds)}`;
+  } else if (mode === "UTC") {
+    parameters.scheduleMode = "UTC";
+    parameters.scheduleValue = executionTime;
+    delete parameters.scheduleOffsetSeconds;
+    delete parameters.scheduleDependencyId;
+  } else {
+    parameters.scheduleMode = "MET";
+    parameters.scheduleValue = metOffsetLabelFromSeconds(clampedMet);
+    parameters.scheduleOffsetSeconds = clampedMet;
+    delete parameters.scheduleDependencyId;
+  }
+
+  return {
+    eventId: event.id,
+    targetMetSeconds: clampedMet,
+    executionTime,
+    request: {
+      sequenceIndex: event.sequenceIndex,
+      type: event.type === "COAST" ? "COAST" : "FINITE_BURN",
+      name: event.name,
+      enabled: event.enabled,
+      executionTime,
+      parameters,
+    },
+  };
 }
 
 function missionSubjectSummary(
@@ -2746,6 +2885,44 @@ export function OrbitalDashboard() {
     }
   }, [mission, missionTimelineEvents, refreshMissionTimeline, rememberMissionEvents]);
 
+  const updateTimelineEventSchedule = useCallback(async (
+    event: BackendMissionTimelineEvent,
+    targetMetSeconds: number,
+    snapMode: TimelineSnapMode,
+  ) => {
+    if (!mission) {
+      return;
+    }
+    let command: SchedulingUpdateCommand;
+    try {
+      command = buildSchedulingUpdateCommand(mission, missionTimelineEvents, event, targetMetSeconds, snapMode);
+      const proposedEvents = missionTimelineEvents.map((item) => item.id === event.id
+        ? { ...item, executionTime: command.executionTime, parameters: command.request.parameters }
+        : item);
+      const dependencyWarnings = resolveEventMetOffsets(mission, proposedEvents).warnings;
+      if (dependencyWarnings.length > 0) {
+        throw new Error(dependencyWarnings[0]);
+      }
+      const windowError = eventWindowError(mission, command.executionTime);
+      if (windowError) {
+        throw new Error(windowError);
+      }
+      setMissionTimelineEvents(proposedEvents);
+      setTimelineStatus(`Saving ${event.name} at ${metOffsetLabelFromSeconds(command.targetMetSeconds)}...`);
+      await updateMissionTimelineEvent(mission.id, event.id, command.request);
+      const refreshed = await refreshMissionTimeline(mission.id);
+      setMissionTrajectoryOverlay(null);
+      const saved = refreshed.find((item) => item.id === event.id);
+      setTimelineStatus(saved ? `${saved.name} scheduled at ${signedOffsetLabel(mission.scenarioStart, saved.executionTime)}.` : "Timeline schedule updated.");
+      toast.success("Timeline schedule updated.");
+    } catch (error) {
+      await refreshMissionTimeline(mission.id);
+      const message = userErrorMessage(error, "Unable to update event schedule.");
+      setTimelineStatus(message);
+      toast.error(message);
+    }
+  }, [mission, missionTimelineEvents, refreshMissionTimeline]);
+
   const generateMissionTrajectory = useCallback(async () => {
     if (!mission || !selectedSnapshot?.satellite) {
       const message = "Initialize a mission before generating a trajectory.";
@@ -3595,6 +3772,7 @@ export function OrbitalDashboard() {
           showComparison={showMissionComparison}
           trajectoryOverlay={missionTrajectoryOverlay}
           dragEventId={timelineDragEventId}
+          simulationTimeIso={simTime.toISOString()}
           onInitializeMission={openMissionSetup}
           onOpenCatalog={() => openOrbitSource("catalog")}
           onCreateEvent={openCreateTimelineModal}
@@ -3606,6 +3784,7 @@ export function OrbitalDashboard() {
           onToggleComparison={() => setShowMissionComparison((value) => !value)}
           onDragEvent={setTimelineDragEventId}
           onDropEvent={reorderTimelineEvent}
+          onScheduleEvent={updateTimelineEventSchedule}
         />
 
         <WorkspaceLibraryPanel
@@ -5192,6 +5371,7 @@ function MissionTimelinePanel({
   showComparison,
   trajectoryOverlay,
   dragEventId,
+  simulationTimeIso,
   onInitializeMission,
   onOpenCatalog,
   onCreateEvent,
@@ -5203,6 +5383,7 @@ function MissionTimelinePanel({
   onToggleComparison,
   onDragEvent,
   onDropEvent,
+  onScheduleEvent,
 }: {
   mission: BackendMission | null;
   events: BackendMissionTimelineEvent[];
@@ -5215,6 +5396,7 @@ function MissionTimelinePanel({
   showComparison: boolean;
   trajectoryOverlay: MissionTrajectoryOverlay | null;
   dragEventId: string | null;
+  simulationTimeIso: string;
   onInitializeMission: () => void;
   onOpenCatalog: () => void;
   onCreateEvent: (type?: TimelineEditorDraft["type"]) => void;
@@ -5226,10 +5408,21 @@ function MissionTimelinePanel({
   onToggleComparison: () => void;
   onDragEvent: (eventId: string | null) => void;
   onDropEvent: (sourceEventId: string, targetEventId: string) => void;
+  onScheduleEvent: (event: BackendMissionTimelineEvent, targetMetSeconds: number, snapMode: TimelineSnapMode) => void;
 }) {
   const [timeMode, setTimeMode] = useState<TimelineTimeMode>("UTC");
+  const [zoomPreset, setZoomPreset] = useState<TimelineZoomPreset>("THREE_HOURS");
+  const [customZoomHours, setCustomZoomHours] = useState("3");
+  const [snapMode, setSnapMode] = useState<TimelineSnapMode>("FIVE_MIN");
+  const interactionModel = useMemo<TimelineInteractionModel>(() => ({
+    zoomPreset,
+    snapMode,
+    customVisibleSeconds: Math.max(60, Number(customZoomHours) * 3600 || 3 * 3600),
+  }), [customZoomHours, snapMode, zoomPreset]);
   const analysis = useMemo(() => timelineAnalysis(mission, events), [events, mission]);
-  const timelineBlocks = useMemo(() => visualTimelineBlocks(mission, events), [events, mission]);
+  const layoutModel = useMemo(() => mission
+    ? buildTimelineLayoutModel(mission, events, interactionModel, selectedEventId, simulationTimeIso)
+    : null, [events, interactionModel, mission, selectedEventId, simulationTimeIso]);
 
   return (
     <HudPanel>
@@ -5323,33 +5516,55 @@ function MissionTimelinePanel({
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Visual Mission Timeline</p>
-              <p className="mt-1 text-[11px] text-zinc-500">Execution order view. Backend execution remains UTC-based.</p>
+              <p className="mt-1 text-[11px] text-zinc-500">Drag blocks left/right to reschedule. Backend execution remains UTC-based.</p>
             </div>
-            <div className="grid grid-cols-2 border border-cyan-300/20">
-              {(["UTC", "MET"] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => setTimeMode(mode)}
-                  className={`px-2 py-1.5 font-mono text-[10px] uppercase transition ${
-                    timeMode === mode
-                      ? "bg-cyan-300 text-slate-950"
-                      : "text-cyan-200 hover:bg-cyan-300/10"
-                  }`}
-                >
-                  {mode}
-                </button>
-              ))}
+            <div className="flex flex-wrap justify-end gap-1.5">
+              <div className="grid grid-cols-2 border border-cyan-300/20">
+                {(["UTC", "MET"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setTimeMode(mode)}
+                    className={`px-2 py-1.5 font-mono text-[10px] uppercase transition ${
+                      timeMode === mode
+                        ? "bg-cyan-300 text-slate-950"
+                        : "text-cyan-200 hover:bg-cyan-300/10"
+                    }`}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+              <select value={zoomPreset} onChange={(event) => setZoomPreset(event.target.value as TimelineZoomPreset)} className="border border-cyan-300/20 bg-black/45 px-2 py-1.5 font-mono text-[10px] uppercase text-cyan-100 outline-none">
+                {timelineZoomOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select>
+              <select value={snapMode} onChange={(event) => setSnapMode(event.target.value as TimelineSnapMode)} className="border border-cyan-300/20 bg-black/45 px-2 py-1.5 font-mono text-[10px] uppercase text-cyan-100 outline-none">
+                {timelineSnapOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select>
             </div>
           </div>
+          {zoomPreset === "CUSTOM" && (
+            <label className="mt-2 flex items-center justify-end gap-2 font-mono text-[10px] uppercase text-zinc-500">
+              Visible hours
+              <input
+                value={customZoomHours}
+                onChange={(event) => setCustomZoomHours(event.target.value)}
+                inputMode="decimal"
+                className="w-20 border border-cyan-300/20 bg-black/45 px-2 py-1.5 text-cyan-100 outline-none"
+              />
+            </label>
+          )}
 
+          {layoutModel && (
           <VisualMissionTimeline
             mission={mission}
-            blocks={timelineBlocks}
+            layout={layoutModel}
             timeMode={timeMode}
             selectedEventId={selectedEventId}
             onSelectEvent={onSelectEvent}
+            onScheduleEvent={(event, targetMetSeconds) => onScheduleEvent(event, targetMetSeconds, snapMode)}
           />
+          )}
 
           <div className="mt-3 grid grid-cols-4 gap-2 max-sm:grid-cols-2">
             <TimelineMetric label="Duration" value={secondsToDurationLabel(analysis.missionDuration)} />
@@ -5437,27 +5652,59 @@ function MissionTimelinePanel({
 
 function VisualMissionTimeline({
   mission,
-  blocks,
+  layout,
   timeMode,
   selectedEventId,
   onSelectEvent,
+  onScheduleEvent,
 }: {
   mission: BackendMission;
-  blocks: Array<{
-    event: BackendMissionTimelineEvent;
-    offsetSeconds: number;
-    durationSeconds: number;
-    widthPercent: number;
-    startPercent: number;
-  }>;
+  layout: TimelineLayoutModel;
   timeMode: TimelineTimeMode;
   selectedEventId: string | null;
   onSelectEvent: (eventId: string) => void;
+  onScheduleEvent: (event: BackendMissionTimelineEvent, targetMetSeconds: number) => void;
 }) {
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const [dragState, setDragState] = useState<{
+    eventId: string;
+    startClientX: number;
+    startMetSeconds: number;
+    previewMetSeconds: number;
+  } | null>(null);
   const eventNameById = useMemo(() => {
-    return new Map(blocks.map(({ event }) => [event.id, event.name]));
-  }, [blocks]);
-  if (blocks.length === 0) {
+    return new Map(layout.blocks.map(({ event }) => [event.id, event.name]));
+  }, [layout.blocks]);
+
+  const previewByEventId = dragState ? new Map([[dragState.eventId, dragState.previewMetSeconds]]) : new Map<string, number>();
+
+  const updateDragPreview = (pointerEvent: ReactPointerEvent<HTMLDivElement>) => {
+    if (!dragState || !trackRef.current) {
+      return;
+    }
+    const width = trackRef.current.getBoundingClientRect().width;
+    if (width <= 0) {
+      return;
+    }
+    const deltaSeconds = ((pointerEvent.clientX - dragState.startClientX) / width) * layout.missionDurationSeconds;
+    setDragState({
+      ...dragState,
+      previewMetSeconds: Math.min(layout.missionDurationSeconds, Math.max(0, dragState.startMetSeconds + deltaSeconds)),
+    });
+  };
+
+  const endDrag = () => {
+    if (!dragState) {
+      return;
+    }
+    const block = layout.blocks.find((item) => item.event.id === dragState.eventId);
+    setDragState(null);
+    if (block) {
+      onScheduleEvent(block.event, dragState.previewMetSeconds);
+    }
+  };
+
+  if (layout.blocks.length === 0) {
     return (
       <div className="mt-3 border border-white/10 bg-black/25 px-3 py-4 text-center font-mono text-[10px] uppercase text-zinc-600">
         Empty timeline
@@ -5467,27 +5714,63 @@ function VisualMissionTimeline({
 
   return (
     <div className="mt-3 overflow-hidden border border-white/10 bg-black/30">
-      <div className="flex items-stretch gap-1 overflow-x-auto p-2">
-        {blocks.map(({ event, offsetSeconds, durationSeconds, widthPercent, startPercent }) => {
+      <div className="overflow-x-auto">
+        <div
+          ref={trackRef}
+          onPointerMove={updateDragPreview}
+          onPointerUp={endDrag}
+          onPointerCancel={() => setDragState(null)}
+          className="relative h-52 min-w-full border-b border-white/10 bg-[linear-gradient(90deg,rgba(103,232,249,0.12)_1px,transparent_1px)] bg-[length:80px_100%]"
+          style={{ width: `${layout.trackWidthPercent}%` }}
+        >
+          <TimelineCursor positionPercent={layout.cursors.missionStart} label="Start" tone="cyan" />
+          <TimelineCursor positionPercent={layout.cursors.missionEnd} label="End" tone="cyan" />
+          {layout.cursors.currentSimTime !== null && <TimelineCursor positionPercent={layout.cursors.currentSimTime} label="Sim" tone="lime" />}
+          {layout.cursors.selectedEvent !== null && <TimelineCursor positionPercent={layout.cursors.selectedEvent} label="Selected" tone="rose" />}
+          {layout.blocks.map(({ event, offsetSeconds, durationSeconds, widthPercent }) => {
           const isBurn = event.type === "FINITE_BURN";
           const scheduleMode = eventScheduleMode(event);
           const dependencyId = readStringParameter(event.parameters ?? {}, "scheduleDependencyId", "");
           const dependencyName = dependencyId ? eventNameById.get(dependencyId) ?? dependencyId : "";
           const dependencyOffset = readNumberParameter(event.parameters ?? {}, "scheduleOffsetSeconds", 0);
+          const displayOffsetSeconds = previewByEventId.get(event.id) ?? offsetSeconds;
+          const displayStartPercent = Math.min(100, Math.max(0, (displayOffsetSeconds / layout.missionDurationSeconds) * 100));
+          const displayExecutionTime = previewByEventId.has(event.id)
+            ? new Date(new Date(mission.scenarioStart).getTime() + displayOffsetSeconds * 1000).toISOString()
+            : event.executionTime;
           return (
-            <button
+            <div
               key={event.id}
-              type="button"
+              role="button"
+              tabIndex={0}
               onClick={() => onSelectEvent(event.id)}
-              style={{ flexBasis: `${widthPercent}%` }}
-              title={`Mission-relative position ${metOffsetLabelFromSeconds(offsetSeconds)} (${formatNumber(startPercent, 1)}%)`}
-              className={`min-w-[150px] border px-3 py-2 text-left transition ${
+              onKeyDown={(keyEvent) => {
+                if (keyEvent.key === "Enter" || keyEvent.key === " ") {
+                  onSelectEvent(event.id);
+                }
+              }}
+              onPointerDown={(pointerEvent) => {
+                pointerEvent.currentTarget.setPointerCapture(pointerEvent.pointerId);
+                onSelectEvent(event.id);
+                setDragState({
+                  eventId: event.id,
+                  startClientX: pointerEvent.clientX,
+                  startMetSeconds: offsetSeconds,
+                  previewMetSeconds: offsetSeconds,
+                });
+              }}
+              style={{
+                left: `${displayStartPercent}%`,
+                width: `${Math.max(7, Math.min(widthPercent, 34))}%`,
+              }}
+              title={`Mission-relative position ${metOffsetLabelFromSeconds(displayOffsetSeconds)} (${formatNumber(displayStartPercent, 1)}%)`}
+              className={`absolute top-14 min-h-28 min-w-[150px] cursor-grab touch-none border px-3 py-2 text-left transition active:cursor-grabbing ${
                 selectedEventId === event.id
                   ? "border-cyan-300 bg-cyan-300/10"
                   : isBurn
                     ? "border-rose-300/35 bg-rose-300/[0.04] hover:border-rose-300/70"
                     : "border-sky-300/25 bg-sky-300/[0.03] hover:border-sky-300/60"
-              }`}
+              } ${dragState?.eventId === event.id ? "z-20 shadow-[0_0_28px_rgba(103,232,249,0.20)]" : "z-10"}`}
             >
               <span className="flex items-center justify-between gap-2">
                 <span className="truncate text-xs font-semibold text-white">{event.name}</span>
@@ -5496,10 +5779,10 @@ function VisualMissionTimeline({
                 </span>
               </span>
               <span className="mt-2 block font-mono text-[10px] text-cyan-100">
-                {displayTimelineTime(timeMode, mission, event.executionTime)}
+                {displayTimelineTime(timeMode, mission, displayExecutionTime)}
               </span>
               <span className="mt-1 block font-mono text-[10px] text-zinc-400">
-                MET {metOffsetLabelFromSeconds(offsetSeconds)}
+                MET {metOffsetLabelFromSeconds(displayOffsetSeconds)}
               </span>
               {scheduleMode === "AFTER_EVENT" && (
                 <span className="mt-1 block truncate font-mono text-[10px] text-amber-100">
@@ -5509,14 +5792,42 @@ function VisualMissionTimeline({
               <span className="mt-1 block font-mono text-[10px] text-zinc-500">
                 Duration {secondsToDurationLabel(durationSeconds)}
               </span>
-            </button>
+              {dragState?.eventId === event.id && (
+                <span className="mt-1 block font-mono text-[10px] text-lime-100">
+                  Preview {metOffsetLabelFromSeconds(displayOffsetSeconds)}
+                </span>
+              )}
+            </div>
           );
         })}
+        </div>
       </div>
       <div className="flex items-center justify-between border-t border-white/10 px-3 py-2 font-mono text-[10px] text-zinc-500">
         <span>{displayTimelineTime(timeMode, mission, mission.scenarioStart)}</span>
         <span>{timeMode === "MET" ? secondsToDurationLabel(missionDurationSeconds(mission)) : displayTimelineTime(timeMode, mission, mission.scenarioEnd)}</span>
       </div>
+    </div>
+  );
+}
+
+function TimelineCursor({
+  positionPercent,
+  label,
+  tone,
+}: {
+  positionPercent: number;
+  label: string;
+  tone: "cyan" | "lime" | "rose";
+}) {
+  const color = tone === "lime" ? "border-lime-300 text-lime-100" : tone === "rose" ? "border-rose-300 text-rose-100" : "border-cyan-300 text-cyan-100";
+  return (
+    <div
+      className={`pointer-events-none absolute top-0 h-full border-l ${color}`}
+      style={{ left: `${Math.min(100, Math.max(0, positionPercent))}%` }}
+    >
+      <span className={`absolute top-2 -translate-x-1/2 border bg-black/75 px-1.5 py-0.5 font-mono text-[9px] uppercase ${color}`}>
+        {label}
+      </span>
     </div>
   );
 }
