@@ -10,6 +10,7 @@ export const ORBIT_LIBRARY_KEY = "orbit-library-v1";
 export const MISSION_LIBRARY_KEY = "mission-library-v1";
 export const WORKSPACE_LIBRARY_KEY = "workspace-library-v1";
 export const MISSION_TEMPLATE_LIBRARY_KEY = "mission-template-library-v1";
+export const ORBIT_TEMPLATE_LIBRARY_KEY = "orbit-template-library-v1";
 
 export type StoredOrbitSourceType =
   | "CATALOG_TLE"
@@ -104,6 +105,31 @@ export type MissionTemplateLibraryState = {
   templates: MissionTemplate[];
 };
 
+export type OrbitTemplateCategory =
+  | "LEO"
+  | "MEO"
+  | "GEO"
+  | "GTO"
+  | "Polar"
+  | "Sun Sync"
+  | "Custom";
+
+export type OrbitTemplate = {
+  templateId: string;
+  name: string;
+  description: string;
+  category: OrbitTemplateCategory;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+  orbitDefinition: CreateManualOrbitRequest;
+};
+
+export type OrbitTemplateLibraryState = {
+  schemaVersion: 1;
+  templates: OrbitTemplate[];
+};
+
 export type StoredWorkspace = {
   schemaVersion: 1;
   exportedAt: string;
@@ -120,6 +146,11 @@ const emptyMissionLibrary: MissionLibraryState = {
 };
 
 const emptyTemplateLibrary: MissionTemplateLibraryState = {
+  schemaVersion: 1,
+  templates: [],
+};
+
+const emptyOrbitTemplateLibrary: OrbitTemplateLibraryState = {
   schemaVersion: 1,
   templates: [],
 };
@@ -192,6 +223,60 @@ export function readMissionTemplateLibrary(): MissionTemplateLibraryState {
 
 export function writeMissionTemplateLibrary(state: MissionTemplateLibraryState) {
   writeJson(MISSION_TEMPLATE_LIBRARY_KEY, state);
+}
+
+export function readOrbitTemplateLibrary(): OrbitTemplateLibraryState {
+  const raw = readJson<unknown>(ORBIT_TEMPLATE_LIBRARY_KEY, emptyOrbitTemplateLibrary);
+  if (!isOrbitTemplateLibraryState(raw)) {
+    return emptyOrbitTemplateLibrary;
+  }
+  return raw;
+}
+
+export function writeOrbitTemplateLibrary(state: OrbitTemplateLibraryState) {
+  writeJson(ORBIT_TEMPLATE_LIBRARY_KEY, state);
+}
+
+export function upsertOrbitTemplate(state: OrbitTemplateLibraryState, template: OrbitTemplate) {
+  const next = {
+    ...template,
+    updatedAt: nowIso(),
+  };
+  return {
+    schemaVersion: 1 as const,
+    templates: [...state.templates.filter((item) => item.templateId !== template.templateId), next]
+      .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+  };
+}
+
+export function deleteOrbitTemplate(state: OrbitTemplateLibraryState, templateId: string) {
+  return {
+    schemaVersion: 1 as const,
+    templates: state.templates.filter((template) => template.templateId !== templateId),
+  };
+}
+
+export function duplicateOrbitTemplate(state: OrbitTemplateLibraryState, templateId: string) {
+  const source = state.templates.find((template) => template.templateId === templateId);
+  if (!source) {
+    return { templateState: state, clonedTemplateId: null };
+  }
+  const createdAt = nowIso();
+  const template: OrbitTemplate = {
+    ...structuredClone(source),
+    templateId: makeWorkspaceId("orbit-template"),
+    name: `${source.name} Copy`,
+    createdAt,
+    updatedAt: createdAt,
+    orbitDefinition: {
+      ...structuredClone(source.orbitDefinition),
+      name: `${source.orbitDefinition.name} Copy`,
+    },
+  };
+  return {
+    templateState: upsertOrbitTemplate(state, template),
+    clonedTemplateId: template.templateId,
+  };
 }
 
 export function upsertMissionTemplate(state: MissionTemplateLibraryState, template: MissionTemplate) {
@@ -484,6 +569,16 @@ export function validateMissionTemplateImport(value: unknown): MissionTemplate |
   throw new Error("Invalid mission template JSON schema.");
 }
 
+export function validateOrbitTemplateImport(value: unknown): OrbitTemplate | OrbitTemplateLibraryState {
+  if (isOrbitTemplate(value)) {
+    return value;
+  }
+  if (isOrbitTemplateLibraryState(value)) {
+    return value;
+  }
+  throw new Error("Invalid orbit template JSON schema.");
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -526,6 +621,23 @@ function isMissionTemplateCategory(value: unknown): value is MissionTemplateCate
   return typeof value === "string" && ["LEO", "GTO", "Station Keeping", "Transfer", "Deployment", "Custom"].includes(value);
 }
 
+function isOrbitTemplateCategory(value: unknown): value is OrbitTemplateCategory {
+  return typeof value === "string" && ["LEO", "MEO", "GEO", "GTO", "Polar", "Sun Sync", "Custom"].includes(value);
+}
+
+function isManualOrbitTemplateDefinition(value: unknown): value is CreateManualOrbitRequest {
+  if (!isRecord(value) || typeof value.name !== "string" || typeof value.type !== "string") {
+    return false;
+  }
+  if (value.type === "CLASSICAL_ELEMENTS") {
+    return isRecord(value.classicalElements);
+  }
+  if (value.type === "CARTESIAN_STATE") {
+    return isRecord(value.cartesianState);
+  }
+  return false;
+}
+
 function isMissionTemplateEvent(value: unknown): value is MissionTemplateEvent {
   return isRecord(value)
     && typeof value.templateEventId === "string"
@@ -550,6 +662,19 @@ function isMissionTemplate(value: unknown): value is MissionTemplate {
     && value.events.every(isMissionTemplateEvent);
 }
 
+function isOrbitTemplate(value: unknown): value is OrbitTemplate {
+  return isRecord(value)
+    && typeof value.templateId === "string"
+    && typeof value.name === "string"
+    && typeof value.description === "string"
+    && isOrbitTemplateCategory(value.category)
+    && Array.isArray(value.tags)
+    && value.tags.every((tag) => typeof tag === "string")
+    && typeof value.createdAt === "string"
+    && typeof value.updatedAt === "string"
+    && isManualOrbitTemplateDefinition(value.orbitDefinition);
+}
+
 function isMissionLibraryState(value: unknown): value is MissionLibraryState {
   return isRecord(value)
     && value.schemaVersion === 1
@@ -564,6 +689,13 @@ function isMissionTemplateLibraryState(value: unknown): value is MissionTemplate
     && value.schemaVersion === 1
     && Array.isArray(value.templates)
     && value.templates.every(isMissionTemplate);
+}
+
+function isOrbitTemplateLibraryState(value: unknown): value is OrbitTemplateLibraryState {
+  return isRecord(value)
+    && value.schemaVersion === 1
+    && Array.isArray(value.templates)
+    && value.templates.every(isOrbitTemplate);
 }
 
 function isStoredWorkspace(value: unknown): value is StoredWorkspace {

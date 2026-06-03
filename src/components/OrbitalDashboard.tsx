@@ -52,23 +52,29 @@ import {
   deleteMission,
   deleteMissionTemplate,
   deleteOrbit,
+  deleteOrbitTemplate,
   duplicateMission,
   duplicateMissionTemplate,
   duplicateOrbit,
+  duplicateOrbitTemplate,
   makeWorkspaceId,
   readMissionLibrary,
   readMissionTemplateLibrary,
+  readOrbitTemplateLibrary,
   readOrbitLibrary,
   storedEventFromBackend,
   storedMissionFromBackend,
   upsertMission,
   upsertMissionEvents,
   upsertMissionTemplate,
+  upsertOrbitTemplate,
   validateMissionTemplateImport,
+  validateOrbitTemplateImport,
   upsertOrbit,
   validateWorkspaceImport,
   writeMissionLibrary,
   writeMissionTemplateLibrary,
+  writeOrbitTemplateLibrary,
   writeOrbitLibrary,
   writeWorkspace,
 } from "@/services/workspaceStorage";
@@ -92,6 +98,9 @@ import type {
   MissionTemplateCategory,
   MissionTemplateEvent,
   MissionTemplateLibraryState,
+  OrbitTemplate,
+  OrbitTemplateCategory,
+  OrbitTemplateLibraryState,
   StoredEvent,
   StoredMission,
   StoredOrbit,
@@ -115,7 +124,7 @@ type ManeuverFocusRequest = {
   sequence: number;
 };
 type FrameMode = "earth-fixed" | "inertial";
-type OrbitSourceId = "catalog" | "tle" | "classical" | "cartesian";
+type OrbitSourceId = "catalog" | "tle" | "classical" | "cartesian" | "template";
 type TleImportMode = "paste" | "upload" | "url";
 type TimelineModalMode = "create" | "edit";
 type TimelineTimeMode = "UTC" | "MET";
@@ -228,6 +237,15 @@ const missionTemplateCategories = [
   "Deployment",
   "Custom",
 ] satisfies MissionTemplateCategory[];
+const orbitTemplateCategories = [
+  "LEO",
+  "MEO",
+  "GEO",
+  "GTO",
+  "Polar",
+  "Sun Sync",
+  "Custom",
+] satisfies OrbitTemplateCategory[];
 const groundTrackRangeOptions = [
   {
     id: "live",
@@ -916,6 +934,49 @@ function templateWarnings(template: MissionTemplate) {
   return warnings;
 }
 
+function orbitTemplateWarnings(template: OrbitTemplate) {
+  const request = template.orbitDefinition;
+  const warnings: string[] = [];
+  if (request.type !== "CLASSICAL_ELEMENTS" && request.type !== "CARTESIAN_STATE") {
+    warnings.push("Orbit templates support Classical Elements and Cartesian State only.");
+  }
+  if (request.type === "CLASSICAL_ELEMENTS" && !request.classicalElements) {
+    warnings.push("Classical Elements template is missing orbital elements.");
+  }
+  if (request.type === "CARTESIAN_STATE" && !request.cartesianState) {
+    warnings.push("Cartesian State template is missing position/velocity.");
+  }
+  if (!request.name.trim()) {
+    warnings.push("Orbit template definition requires a name.");
+  }
+  return warnings;
+}
+
+function orbitTemplateFromStoredOrbit(orbit: StoredOrbit, name: string, category: OrbitTemplateCategory): OrbitTemplate {
+  const request = orbit.orbitDefinition.manualRequest;
+  if (!request || (request.type !== "CLASSICAL_ELEMENTS" && request.type !== "CARTESIAN_STATE")) {
+    throw new Error("Only manual Classical Elements and Cartesian State orbits can be saved as orbit templates.");
+  }
+  const now = new Date().toISOString();
+  return {
+    templateId: makeWorkspaceId("orbit-template"),
+    name,
+    description: `Orbit template saved from ${orbit.orbitName}.`,
+    category,
+    tags: [category.toLowerCase().replaceAll(/\s+/g, "-")],
+    createdAt: now,
+    updatedAt: now,
+    orbitDefinition: {
+      ...structuredClone(request),
+      name,
+    },
+  };
+}
+
+function orbitTemplateTypeLabel(template: OrbitTemplate) {
+  return template.orbitDefinition.type === "CLASSICAL_ELEMENTS" ? "Classical Elements" : "Cartesian State";
+}
+
 function templateFromMission(mission: BackendMission, events: BackendMissionTimelineEvent[], name: string, category: MissionTemplateCategory): MissionTemplate {
   const now = new Date().toISOString();
   const eventIdMap = new Map<string, string>();
@@ -1454,10 +1515,12 @@ export function OrbitalDashboard() {
   const [orbitLibrary, setOrbitLibrary] = useState<StoredOrbit[]>(() => readOrbitLibrary());
   const [missionLibrary, setMissionLibrary] = useState<MissionLibraryState>(() => readMissionLibrary());
   const [templateLibrary, setTemplateLibrary] = useState<MissionTemplateLibraryState>(() => readMissionTemplateLibrary());
+  const [orbitTemplateLibrary, setOrbitTemplateLibrary] = useState<OrbitTemplateLibraryState>(() => readOrbitTemplateLibrary());
   const [activeWorkspaceOrbitId, setActiveWorkspaceOrbitId] = useState<string | null>(null);
   const [activeWorkspaceMissionId, setActiveWorkspaceMissionId] = useState<string | null>(null);
   const workspaceImportInputRef = useRef<HTMLInputElement | null>(null);
   const templateImportInputRef = useRef<HTMLInputElement | null>(null);
+  const orbitTemplateImportInputRef = useRef<HTMLInputElement | null>(null);
   const [selectedTimelineEventId, setSelectedTimelineEventId] = useState<string | null>(null);
   const [timelineModalMode, setTimelineModalMode] = useState<TimelineModalMode | null>(null);
   const [timelineDraft, setTimelineDraft] = useState<TimelineEditorDraft>(defaultTimelineDraft);
@@ -1793,6 +1856,11 @@ export function OrbitalDashboard() {
     writeMissionTemplateLibrary(next);
   }, []);
 
+  const saveOrbitTemplateLibrary = useCallback((next: OrbitTemplateLibraryState) => {
+    setOrbitTemplateLibrary(next);
+    writeOrbitTemplateLibrary(next);
+  }, []);
+
   const rememberOrbit = useCallback((orbit: StoredOrbit) => {
     setActiveWorkspaceOrbitId(orbit.orbitId);
     setOrbitLibrary((current) => {
@@ -2059,6 +2127,112 @@ export function OrbitalDashboard() {
     }
   }, [saveTemplateLibrary, templateLibrary]);
 
+  const saveCurrentOrbitAsTemplate = useCallback(() => {
+    if (!activeStoredOrbit) {
+      toast.error("Load a manual Classical Elements or Cartesian orbit before saving an orbit template.");
+      return;
+    }
+    const name = window.prompt("Orbit template name", `${activeStoredOrbit.orbitName} Template`)?.trim();
+    if (!name) {
+      return;
+    }
+    const categoryInput = window.prompt(`Category (${orbitTemplateCategories.join(", ")})`, "Custom")?.trim();
+    const category = orbitTemplateCategories.includes(categoryInput as OrbitTemplateCategory)
+      ? categoryInput as OrbitTemplateCategory
+      : "Custom";
+    try {
+      const template = orbitTemplateFromStoredOrbit(activeStoredOrbit, name, category);
+      const warnings = orbitTemplateWarnings(template);
+      if (warnings.length > 0) {
+        throw new Error(warnings[0]);
+      }
+      saveOrbitTemplateLibrary(upsertOrbitTemplate(orbitTemplateLibrary, template));
+      toast.success("Orbit template saved.");
+    } catch (error) {
+      toast.error(userErrorMessage(error, "Unable to save orbit template."));
+    }
+  }, [activeStoredOrbit, orbitTemplateLibrary, saveOrbitTemplateLibrary]);
+
+  const renameOrbitTemplate = useCallback((template: OrbitTemplate) => {
+    const name = window.prompt("Rename orbit template", template.name)?.trim();
+    if (!name) {
+      return;
+    }
+    saveOrbitTemplateLibrary(upsertOrbitTemplate(orbitTemplateLibrary, {
+      ...template,
+      name,
+      orbitDefinition: { ...template.orbitDefinition, name },
+    }));
+  }, [orbitTemplateLibrary, saveOrbitTemplateLibrary]);
+
+  const editOrbitTemplateMetadata = useCallback((template: OrbitTemplate) => {
+    const description = window.prompt("Orbit template description", template.description)?.trim();
+    const tagsInput = window.prompt("Tags, comma separated", template.tags.join(", "))?.trim();
+    const categoryInput = window.prompt(`Category (${orbitTemplateCategories.join(", ")})`, template.category)?.trim();
+    const category = orbitTemplateCategories.includes(categoryInput as OrbitTemplateCategory)
+      ? categoryInput as OrbitTemplateCategory
+      : template.category;
+    saveOrbitTemplateLibrary(upsertOrbitTemplate(orbitTemplateLibrary, {
+      ...template,
+      description: description ?? template.description,
+      category,
+      tags: tagsInput ? tagsInput.split(",").map((tag) => tag.trim()).filter(Boolean) : template.tags,
+    }));
+  }, [orbitTemplateLibrary, saveOrbitTemplateLibrary]);
+
+  const cloneOrbitTemplate = useCallback((template: OrbitTemplate) => {
+    const result = duplicateOrbitTemplate(orbitTemplateLibrary, template.templateId);
+    saveOrbitTemplateLibrary(result.templateState);
+    if (result.clonedTemplateId) {
+      toast.success("Orbit template duplicated.");
+    }
+  }, [orbitTemplateLibrary, saveOrbitTemplateLibrary]);
+
+  const deleteOrbitTemplateAction = useCallback((template: OrbitTemplate) => {
+    if (!window.confirm(`Delete orbit template "${template.name}"?`)) {
+      return;
+    }
+    saveOrbitTemplateLibrary(deleteOrbitTemplate(orbitTemplateLibrary, template.templateId));
+  }, [orbitTemplateLibrary, saveOrbitTemplateLibrary]);
+
+  const exportOrbitTemplate = useCallback((template: OrbitTemplate) => {
+    downloadJson(`${template.name.replaceAll(/\s+/g, "-").toLowerCase()}-orbit-template.json`, template);
+  }, []);
+
+  const importOrbitTemplateFile = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    try {
+      const parsed = validateOrbitTemplateImport(JSON.parse(await file.text()));
+      const importedTemplates = "templates" in parsed ? parsed.templates : [parsed];
+      const importedIds = new Set<string>();
+      for (const template of importedTemplates) {
+        if (importedIds.has(template.templateId)) {
+          throw new Error(`Duplicate orbit template id in import: ${template.templateId}`);
+        }
+        importedIds.add(template.templateId);
+        const warnings = orbitTemplateWarnings(template);
+        if (warnings.length > 0) {
+          throw new Error(warnings[0]);
+        }
+      }
+      const duplicateIds = importedTemplates.filter((template) => orbitTemplateLibrary.templates.some((item) => item.templateId === template.templateId));
+      if (duplicateIds.length > 0) {
+        throw new Error(`Orbit template id already exists: ${duplicateIds[0].templateId}`);
+      }
+      saveOrbitTemplateLibrary({
+        schemaVersion: 1,
+        templates: [...orbitTemplateLibrary.templates, ...importedTemplates],
+      });
+      toast.success("Orbit template JSON imported.");
+    } catch (error) {
+      toast.error(userErrorMessage(error, "Invalid orbit template JSON."));
+    }
+  }, [orbitTemplateLibrary, saveOrbitTemplateLibrary]);
+
   const importWorkspaceFile = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -2226,6 +2400,23 @@ export function OrbitalDashboard() {
     setMessages([`Manual orbit "${orbit.name}" created and loaded.`]);
     setActiveSourceModal(null);
   }, [rememberOrbit, simTime]);
+
+  const createOrbitFromTemplate = useCallback(async (template: OrbitTemplate) => {
+    const warnings = orbitTemplateWarnings(template);
+    if (warnings.length > 0) {
+      toast.error(warnings[0]);
+      return;
+    }
+    try {
+      await handleCreateManualOrbit({
+        ...structuredClone(template.orbitDefinition),
+        name: `${template.name} Orbit`,
+      });
+      toast.success("Orbit created from template.");
+    } catch (error) {
+      toast.error(userErrorMessage(error, "Unable to create orbit from template."));
+    }
+  }, [handleCreateManualOrbit]);
 
   const handleLoadImportedTle = useCallback((raw: string, sourceLabel: string) => {
     const result = loadTleText(raw);
@@ -3421,6 +3612,7 @@ export function OrbitalDashboard() {
           orbitLibrary={orbitLibrary}
           missionLibrary={missionLibrary}
           templateLibrary={templateLibrary}
+          orbitTemplateLibrary={orbitTemplateLibrary}
           activeOrbitId={activeStoredOrbit?.orbitId ?? activeWorkspaceOrbitId}
           activeMissionId={activeStoredMission?.missionId ?? activeWorkspaceMissionId}
           onLoadOrbit={loadStoredOrbit}
@@ -3440,9 +3632,17 @@ export function OrbitalDashboard() {
           onCloneTemplate={cloneTemplate}
           onDeleteTemplate={deleteTemplate}
           onExportTemplate={exportTemplate}
+          onSaveCurrentOrbitAsTemplate={saveCurrentOrbitAsTemplate}
+          onCreateOrbitFromTemplate={createOrbitFromTemplate}
+          onRenameOrbitTemplate={renameOrbitTemplate}
+          onEditOrbitTemplate={editOrbitTemplateMetadata}
+          onCloneOrbitTemplate={cloneOrbitTemplate}
+          onDeleteOrbitTemplate={deleteOrbitTemplateAction}
+          onExportOrbitTemplate={exportOrbitTemplate}
           onExportWorkspace={exportWorkspace}
           onImportWorkspace={() => workspaceImportInputRef.current?.click()}
           onImportTemplate={() => templateImportInputRef.current?.click()}
+          onImportOrbitTemplate={() => orbitTemplateImportInputRef.current?.click()}
         />
 
         <ManeuverPanel
@@ -3643,8 +3843,10 @@ export function OrbitalDashboard() {
           source={activeSourceModal}
           onClose={() => setActiveSourceModal(null)}
           onCreateManualOrbit={handleCreateManualOrbit}
+          onCreateOrbitFromTemplate={createOrbitFromTemplate}
           onLoadImportedTle={handleLoadImportedTle}
           onLoadCatalogSatellite={handleLoadCatalogSatellite}
+          orbitTemplates={orbitTemplateLibrary.templates}
           backendCatalogGroup={backendCatalogGroup}
           onBackendCatalogGroupChange={setBackendCatalogGroup}
           tleUrl={tleUrl}
@@ -3664,6 +3866,13 @@ export function OrbitalDashboard() {
         accept="application/json,.json"
         className="hidden"
         onChange={importTemplateFile}
+      />
+      <input
+        ref={orbitTemplateImportInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        onChange={importOrbitTemplateFile}
       />
       <ToastContainer
         position="bottom-right"
@@ -3760,6 +3969,12 @@ const sourceCards = [
     subtitle: "Position velocity",
     icon: "cartesian",
   },
+  {
+    id: "template",
+    title: "Orbit Template",
+    subtitle: "Reusable states",
+    icon: "template",
+  },
 ] satisfies Array<{ id: OrbitSourceId; title: string; subtitle: string; icon: string }>;
 
 function OrbitSourceSelection({
@@ -3818,6 +4033,7 @@ function SourceIcon({ id }: { id: string }) {
         {id === "tle" && <path d="M6 4h9l3 3v13H6zM9 10h6M9 14h6M9 18h4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square" />}
         {id === "classical" && <path d="M4 13c4-8 12-8 16 0M4 11c4 8 12 8 16 0M12 4v16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square" />}
         {id === "cartesian" && <path d="M4 18h16M6 16V5M6 16l5-5M6 16l8-2" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square" />}
+        {id === "template" && <path d="M5 5h14v6H5zM5 15h6v4H5zM15 15h4v4h-4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square" />}
       </svg>
     </span>
   );
@@ -3827,8 +4043,10 @@ function OrbitSourceModal({
   source,
   onClose,
   onCreateManualOrbit,
+  onCreateOrbitFromTemplate,
   onLoadImportedTle,
   onLoadCatalogSatellite,
+  orbitTemplates,
   backendCatalogGroup,
   onBackendCatalogGroupChange,
   tleUrl,
@@ -3837,8 +4055,10 @@ function OrbitSourceModal({
   source: OrbitSourceId;
   onClose: () => void;
   onCreateManualOrbit: (request: CreateManualOrbitRequest) => Promise<void>;
+  onCreateOrbitFromTemplate: (template: OrbitTemplate) => Promise<void>;
   onLoadImportedTle: (raw: string, sourceLabel: string) => { satellites: SatelliteObject[]; errors: string[] };
   onLoadCatalogSatellite: (satellite: SatelliteObject) => void;
+  orbitTemplates: OrbitTemplate[];
   backendCatalogGroup: CatalogGroupId;
   onBackendCatalogGroupChange: (group: CatalogGroupId) => void;
   tleUrl: string;
@@ -3850,7 +4070,9 @@ function OrbitSourceModal({
       ? "Import TLE"
       : source === "classical"
         ? "Classical Elements"
-        : "Cartesian State";
+        : source === "cartesian"
+          ? "Cartesian State"
+          : "Orbit Template";
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
@@ -3901,10 +4123,103 @@ function OrbitSourceModal({
               onClose={onClose}
             />
           )}
+          {source === "template" && (
+            <OrbitTemplateFlow
+              templates={orbitTemplates}
+              onCreateOrbitFromTemplate={onCreateOrbitFromTemplate}
+            />
+          )}
         </div>
       </div>
     </div>,
     document.body,
+  );
+}
+
+function OrbitTemplateFlow({
+  templates,
+  onCreateOrbitFromTemplate,
+}: {
+  templates: OrbitTemplate[];
+  onCreateOrbitFromTemplate: (template: OrbitTemplate) => Promise<void>;
+}) {
+  const [selectedId, setSelectedId] = useState(templates[0]?.templateId ?? "");
+  const selected = templates.find((template) => template.templateId === selectedId) ?? templates[0] ?? null;
+
+  return (
+    <div className="grid gap-5 lg:grid-cols-[300px_1fr]">
+      <div className="min-h-[360px] border border-white/10 bg-black/25">
+        {templates.length === 0 ? (
+          <div className="grid h-full min-h-[360px] place-items-center p-8 text-center">
+            <div>
+              <p className="text-sm font-semibold text-zinc-200">No orbit templates saved</p>
+              <p className="mt-2 text-xs leading-5 text-zinc-500">Create a manual Classical Elements or Cartesian orbit, then save it as a reusable orbit template from the Workspace panel.</p>
+            </div>
+          </div>
+        ) : (
+          <div className="max-h-[430px] overflow-auto p-3">
+            <div className="space-y-2">
+              {templates.map((template) => (
+                <button
+                  key={template.templateId}
+                  type="button"
+                  onClick={() => setSelectedId(template.templateId)}
+                  className={`w-full border p-3 text-left transition ${selected?.templateId === template.templateId ? "border-cyan-300 bg-cyan-300/10" : "border-white/10 bg-black/25 hover:border-cyan-300/45"}`}
+                >
+                  <span className="flex items-center justify-between gap-3">
+                    <span className="min-w-0">
+                      <span className="block truncate font-semibold text-white">{template.name}</span>
+                      <span className="mt-1 block font-mono text-[10px] uppercase text-zinc-500">{template.category} / {orbitTemplateTypeLabel(template)}</span>
+                    </span>
+                    <span className="font-mono text-[10px] text-cyan-200">{template.tags.slice(0, 1).join("") || "template"}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="border border-white/10 bg-black/25 p-4">
+        {selected ? (
+          <div className="flex h-full min-h-[320px] flex-col">
+            <div>
+              <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Selected Template</p>
+              <h3 className="mt-2 text-xl font-semibold text-white">{selected.name}</h3>
+              <p className="mt-2 text-sm leading-6 text-zinc-400">{selected.description || "No description."}</p>
+            </div>
+            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+              <div className="border border-cyan-300/15 bg-black/25 px-3 py-2">
+                <p className="font-mono text-[10px] uppercase text-zinc-500">Type</p>
+                <p className="mt-1 text-sm text-cyan-100">{orbitTemplateTypeLabel(selected)}</p>
+              </div>
+              <div className="border border-cyan-300/15 bg-black/25 px-3 py-2">
+                <p className="font-mono text-[10px] uppercase text-zinc-500">Category</p>
+                <p className="mt-1 text-sm text-cyan-100">{selected.category}</p>
+              </div>
+              <div className="border border-cyan-300/15 bg-black/25 px-3 py-2">
+                <p className="font-mono text-[10px] uppercase text-zinc-500">Propagator</p>
+                <p className="mt-1 text-sm text-cyan-100">{selected.orbitDefinition.propagatorType ?? "KEPLERIAN"}</p>
+              </div>
+              <div className="border border-cyan-300/15 bg-black/25 px-3 py-2">
+                <p className="font-mono text-[10px] uppercase text-zinc-500">Updated</p>
+                <p className="mt-1 font-mono text-xs text-cyan-100">{compactIsoUtc(selected.updatedAt)}</p>
+              </div>
+            </div>
+            <div className="mt-auto flex justify-end border-t border-white/10 pt-4">
+              <button
+                type="button"
+                onClick={() => onCreateOrbitFromTemplate(selected)}
+                className="border border-cyan-300 bg-cyan-300 px-5 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-950 transition hover:bg-cyan-200"
+              >
+                Create Orbit
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="grid h-full min-h-[320px] place-items-center text-sm text-zinc-500">Save or import an orbit template to create reusable manual orbits.</div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -4578,6 +4893,7 @@ function WorkspaceLibraryPanel({
   orbitLibrary,
   missionLibrary,
   templateLibrary,
+  orbitTemplateLibrary,
   activeOrbitId,
   activeMissionId,
   onLoadOrbit,
@@ -4597,13 +4913,22 @@ function WorkspaceLibraryPanel({
   onCloneTemplate,
   onDeleteTemplate,
   onExportTemplate,
+  onSaveCurrentOrbitAsTemplate,
+  onCreateOrbitFromTemplate,
+  onRenameOrbitTemplate,
+  onEditOrbitTemplate,
+  onCloneOrbitTemplate,
+  onDeleteOrbitTemplate,
+  onExportOrbitTemplate,
   onExportWorkspace,
   onImportWorkspace,
   onImportTemplate,
+  onImportOrbitTemplate,
 }: {
   orbitLibrary: StoredOrbit[];
   missionLibrary: MissionLibraryState;
   templateLibrary: MissionTemplateLibraryState;
+  orbitTemplateLibrary: OrbitTemplateLibraryState;
   activeOrbitId: string | null;
   activeMissionId: string | null;
   onLoadOrbit: (orbit: StoredOrbit) => void;
@@ -4623,9 +4948,17 @@ function WorkspaceLibraryPanel({
   onCloneTemplate: (template: MissionTemplate) => void;
   onDeleteTemplate: (template: MissionTemplate) => void;
   onExportTemplate: (template: MissionTemplate) => void;
+  onSaveCurrentOrbitAsTemplate: () => void;
+  onCreateOrbitFromTemplate: (template: OrbitTemplate) => void;
+  onRenameOrbitTemplate: (template: OrbitTemplate) => void;
+  onEditOrbitTemplate: (template: OrbitTemplate) => void;
+  onCloneOrbitTemplate: (template: OrbitTemplate) => void;
+  onDeleteOrbitTemplate: (template: OrbitTemplate) => void;
+  onExportOrbitTemplate: (template: OrbitTemplate) => void;
   onExportWorkspace: () => void;
   onImportWorkspace: () => void;
   onImportTemplate: () => void;
+  onImportOrbitTemplate: () => void;
 }) {
   const missionsByOrbit = useMemo(() => {
     const map = new Map<string, StoredMission[]>();
@@ -4652,7 +4985,7 @@ function WorkspaceLibraryPanel({
         <div>
           <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Workspace</p>
           <p className="mt-1 text-[11px] text-zinc-500">
-            {orbitLibrary.length} orbits / {missionLibrary.missions.length} missions / {templateLibrary.templates.length} templates
+            {orbitLibrary.length} orbits / {missionLibrary.missions.length} missions / {templateLibrary.templates.length + orbitTemplateLibrary.templates.length} templates
           </p>
         </div>
         <div className="flex gap-1.5">
@@ -4665,6 +4998,42 @@ function WorkspaceLibraryPanel({
         <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Active Context</p>
         <p className="mt-1 text-zinc-300">Orbit: <span className="font-mono text-cyan-100">{activeOrbitId ?? "--"}</span></p>
         <p className="mt-1 text-zinc-300">Mission: <span className="font-mono text-cyan-100">{activeMissionId ?? "--"}</span></p>
+      </div>
+
+      <div className="mt-3">
+        <div className="flex items-center justify-between gap-3">
+          <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Orbit Template Library</p>
+          <div className="flex gap-1.5">
+            <button type="button" onClick={onSaveCurrentOrbitAsTemplate} className="workspace-action">Save</button>
+            <button type="button" onClick={onImportOrbitTemplate} className="workspace-action">Import</button>
+          </div>
+        </div>
+        <div className="mt-2 max-h-[24vh] space-y-2 overflow-auto pr-1">
+          {orbitTemplateLibrary.templates.length === 0 ? (
+            <p className="border border-white/10 bg-black/25 px-3 py-2 font-mono text-[10px] uppercase text-zinc-600">No orbit templates yet</p>
+          ) : (
+            orbitTemplateLibrary.templates.map((template) => (
+              <div key={template.templateId} className="border border-white/10 bg-black/25 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-white">{template.name}</p>
+                    <p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">{template.category} / {orbitTemplateTypeLabel(template)}</p>
+                  </div>
+                  <span className="font-mono text-[10px] text-cyan-200">{template.tags.slice(0, 2).join(", ") || "orbit"}</span>
+                </div>
+                {template.description && <p className="mt-2 line-clamp-2 text-[11px] leading-5 text-zinc-500">{template.description}</p>}
+                <div className="mt-3 grid grid-cols-6 gap-1">
+                  <button type="button" onClick={() => onCreateOrbitFromTemplate(template)} className="workspace-action">Create</button>
+                  <button type="button" onClick={() => onRenameOrbitTemplate(template)} className="workspace-action">Name</button>
+                  <button type="button" onClick={() => onEditOrbitTemplate(template)} className="workspace-action">Edit</button>
+                  <button type="button" onClick={() => onCloneOrbitTemplate(template)} className="workspace-action">Clone</button>
+                  <button type="button" onClick={() => onExportOrbitTemplate(template)} className="workspace-action">JSON</button>
+                  <button type="button" onClick={() => onDeleteOrbitTemplate(template)} className="workspace-action danger">Del</button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
       </div>
 
       <div className="mt-3">
