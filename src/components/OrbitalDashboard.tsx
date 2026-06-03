@@ -108,12 +108,17 @@ type OrbitSourceId = "catalog" | "tle" | "classical" | "cartesian";
 type TleImportMode = "paste" | "upload" | "url";
 type TimelineModalMode = "create" | "edit";
 type TimelineTimeMode = "UTC" | "MET";
+type TimelineScheduleMode = "UTC" | "MET";
 type MissionDurationPreset = "ONE_ORBIT" | "THREE_HOURS" | "TWELVE_HOURS" | "TWENTY_FOUR_HOURS" | "CUSTOM";
 type TimelineEditorDraft = {
   type: "COAST" | "FINITE_BURN";
   name: string;
+  scheduleMode: TimelineScheduleMode;
   executionDateUtc: string;
   executionTimeUtc: string;
+  metHours: string;
+  metMinutes: string;
+  metSeconds: string;
   durationSeconds: string;
   thrustNewton: string;
   ispSeconds: string;
@@ -180,8 +185,12 @@ type ActiveDataSource = "sample" | "endpoint" | "backend" | "manual";
 const defaultTimelineDraft: TimelineEditorDraft = {
   type: "FINITE_BURN",
   name: "Finite Burn",
+  scheduleMode: "MET",
   executionDateUtc: utcIsoToDateInput(initialSimulationTime.toISOString()),
   executionTimeUtc: utcIsoToTimeInput(initialSimulationTime.toISOString()),
+  metHours: "0",
+  metMinutes: "0",
+  metSeconds: "0",
   durationSeconds: "120",
   thrustNewton: "0.2",
   ispSeconds: "220",
@@ -642,13 +651,94 @@ function buildTrajectorySnapshot(satellite: SatelliteObject, states: BackendEphe
   };
 }
 
-function timelineDraftFromEvent(event: BackendMissionTimelineEvent): TimelineEditorDraft {
+function metOffsetPartsFromSeconds(totalSeconds: number) {
+  const safeSeconds = Math.max(0, Math.round(totalSeconds));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const seconds = safeSeconds % 60;
+  return {
+    metHours: String(hours),
+    metMinutes: String(minutes).padStart(2, "0"),
+    metSeconds: String(seconds).padStart(2, "0"),
+  };
+}
+
+function metOffsetSeconds(draft: TimelineEditorDraft) {
+  const hours = Number(draft.metHours);
+  const minutes = Number(draft.metMinutes);
+  const seconds = Number(draft.metSeconds);
+  if (![hours, minutes, seconds].every(Number.isFinite)) {
+    return null;
+  }
+  return hours * 3600 + minutes * 60 + seconds;
+}
+
+function metOffsetLabelFromSeconds(totalSeconds: number) {
+  const sign = totalSeconds < 0 ? "T-" : "T+";
+  const absolute = Math.abs(Math.round(totalSeconds));
+  const hours = Math.floor(absolute / 3600);
+  const minutes = Math.floor((absolute % 3600) / 60);
+  const seconds = absolute % 60;
+  return `${sign}${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function eventMetOffsetSeconds(mission: BackendMission | null, event: BackendMissionTimelineEvent) {
+  if (!mission) {
+    return null;
+  }
+  const startMs = new Date(mission.scenarioStart).getTime();
+  const eventMs = new Date(event.executionTime).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(eventMs)) {
+    return null;
+  }
+  return Math.round((eventMs - startMs) / 1000);
+}
+
+function executionIsoFromTimelineDraft(draft: TimelineEditorDraft, mission: BackendMission | null) {
+  if (draft.scheduleMode === "UTC") {
+    return utcDateAndTimeInputToIso(draft.executionDateUtc, draft.executionTimeUtc);
+  }
+  if (!mission) {
+    throw new Error("Mission is required for MET scheduling.");
+  }
+  const offsetSeconds = metOffsetSeconds(draft);
+  if (offsetSeconds === null) {
+    throw new Error("Valid MET offset required.");
+  }
+  return new Date(new Date(mission.scenarioStart).getTime() + offsetSeconds * 1000).toISOString();
+}
+
+function schedulingMetadata(draft: TimelineEditorDraft, executionTime: string) {
+  if (draft.scheduleMode === "UTC") {
+    return {
+      scheduleMode: "UTC",
+      scheduleValue: executionTime,
+    };
+  }
+  const offsetSeconds = metOffsetSeconds(draft) ?? 0;
+  return {
+    scheduleMode: "MET",
+    scheduleValue: metOffsetLabelFromSeconds(offsetSeconds),
+    scheduleOffsetSeconds: offsetSeconds,
+  };
+}
+
+function timelineDraftFromEvent(event: BackendMissionTimelineEvent, mission: BackendMission | null): TimelineEditorDraft {
   const parameters = event.parameters ?? {};
+  const scheduleMode = readStringParameter(parameters, "scheduleMode", "MET") === "UTC" ? "UTC" : "MET";
+  const storedOffsetSeconds = readNumberParameter(
+    parameters,
+    "scheduleOffsetSeconds",
+    eventMetOffsetSeconds(mission, event) ?? 0,
+  );
+  const offsetParts = metOffsetPartsFromSeconds(storedOffsetSeconds);
   return {
     type: event.type === "COAST" ? "COAST" : "FINITE_BURN",
     name: event.name,
+    scheduleMode,
     executionDateUtc: utcIsoToDateInput(event.executionTime, initialSimulationTime.toISOString()),
     executionTimeUtc: utcIsoToTimeInput(event.executionTime, initialSimulationTime.toISOString()),
+    ...offsetParts,
     durationSeconds: String(readNumberParameter(parameters, "durationSeconds", 120)),
     thrustNewton: String(readNumberParameter(parameters, "thrustNewton", 0.2)),
     ispSeconds: String(readNumberParameter(parameters, "ispSeconds", 220)),
@@ -661,10 +751,12 @@ function timelineDraftFromEvent(event: BackendMissionTimelineEvent): TimelineEdi
 
 function buildTimelineRequest(
   draft: TimelineEditorDraft,
+  mission: BackendMission | null,
   sequenceIndex: number,
   enabled: boolean,
 ): CreateTimelineEventRequest {
-  const executionTime = utcDateAndTimeInputToIso(draft.executionDateUtc, draft.executionTimeUtc);
+  const executionTime = executionIsoFromTimelineDraft(draft, mission);
+  const schedule = schedulingMetadata(draft, executionTime);
   if (draft.type === "COAST") {
     return {
       sequenceIndex,
@@ -672,7 +764,7 @@ function buildTimelineRequest(
       name: draft.name.trim() || "Coast",
       enabled,
       executionTime,
-      parameters: {},
+      parameters: schedule,
     };
   }
 
@@ -683,6 +775,7 @@ function buildTimelineRequest(
     enabled,
     executionTime,
     parameters: {
+      ...schedule,
       durationSeconds: Number(draft.durationSeconds),
       thrustNewton: Number(draft.thrustNewton),
       ispSeconds: Number(draft.ispSeconds),
@@ -699,14 +792,29 @@ function validateTimelineDraft(draft: TimelineEditorDraft) {
   if (!draft.name.trim()) {
     errors.name = "Required";
   }
-  if (!draft.executionDateUtc) {
-    errors.executionDateUtc = "Date required";
-  }
-  if (!draft.executionTimeUtc) {
-    errors.executionTimeUtc = "Time required";
-  }
-  if (draft.executionDateUtc && draft.executionTimeUtc && !isValidUtcDateAndTimeInput(draft.executionDateUtc, draft.executionTimeUtc)) {
-    errors.executionTimeUtc = "Invalid UTC time";
+  if (draft.scheduleMode === "UTC") {
+    if (!draft.executionDateUtc) {
+      errors.executionDateUtc = "Date required";
+    }
+    if (!draft.executionTimeUtc) {
+      errors.executionTimeUtc = "Time required";
+    }
+    if (draft.executionDateUtc && draft.executionTimeUtc && !isValidUtcDateAndTimeInput(draft.executionDateUtc, draft.executionTimeUtc)) {
+      errors.executionTimeUtc = "Invalid UTC time";
+    }
+  } else {
+    const hours = Number(draft.metHours);
+    const minutes = Number(draft.metMinutes);
+    const seconds = Number(draft.metSeconds);
+    if (!Number.isFinite(hours) || hours < 0) {
+      errors.metHours = "Hours >= 0";
+    }
+    if (!Number.isFinite(minutes) || minutes < 0 || minutes > 59) {
+      errors.metMinutes = "0-59";
+    }
+    if (!Number.isFinite(seconds) || seconds < 0 || seconds > 59) {
+      errors.metSeconds = "0-59";
+    }
   }
   if (draft.type === "FINITE_BURN") {
     validatePositiveDraftNumber(draft.durationSeconds, "durationSeconds", errors);
@@ -854,10 +962,11 @@ function displayTimelineTime(mode: TimelineTimeMode, mission: BackendMission | n
 
 function timelineAnalysis(mission: BackendMission | null, events: BackendMissionTimelineEvent[]) {
   const eventsBySequence = events.toSorted((a, b) => a.sequenceIndex - b.sequenceIndex);
-  const executionCounts = new Map<number, BackendMissionTimelineEvent[]>();
+  const metCounts = new Map<number, BackendMissionTimelineEvent[]>();
   const warnings: string[] = [];
   let previousExecutionMs = Number.NEGATIVE_INFINITY;
   let invalidOrder = false;
+  const missionDuration = mission ? missionDurationSeconds(mission) : 0;
 
   eventsBySequence.forEach((event) => {
     const executionMs = new Date(event.executionTime).getTime();
@@ -865,8 +974,27 @@ function timelineAnalysis(mission: BackendMission | null, events: BackendMission
       warnings.push(`${event.name} has an invalid execution time.`);
       return;
     }
-    const current = executionCounts.get(executionMs) ?? [];
-    executionCounts.set(executionMs, [...current, event]);
+    const metOffset = eventMetOffsetSeconds(mission, event);
+    if (metOffset === null) {
+      warnings.push(`${event.name} has an invalid MET offset.`);
+    } else {
+      const current = metCounts.get(metOffset) ?? [];
+      metCounts.set(metOffset, [...current, event]);
+      if (metOffset < 0) {
+        warnings.push(`${event.name} has negative MET ${metOffsetLabelFromSeconds(metOffset)}.`);
+      }
+      if (mission && metOffset > missionDuration) {
+        warnings.push(`${event.name} MET ${metOffsetLabelFromSeconds(metOffset)} is beyond mission end.`);
+      }
+    }
+    const scheduleMode = readStringParameter(event.parameters ?? {}, "scheduleMode", "");
+    if (scheduleMode && !["UTC", "MET"].includes(scheduleMode)) {
+      warnings.push(`${event.name} has invalid schedule mode metadata.`);
+    }
+    const scheduleOffset = event.parameters?.scheduleOffsetSeconds;
+    if (scheduleMode === "MET" && typeof scheduleOffset !== "number") {
+      warnings.push(`${event.name} is missing MET offset metadata.`);
+    }
     if (executionMs < previousExecutionMs) {
       invalidOrder = true;
     }
@@ -877,9 +1005,9 @@ function timelineAnalysis(mission: BackendMission | null, events: BackendMission
     }
   });
 
-  executionCounts.forEach((duplicateEvents) => {
+  metCounts.forEach((duplicateEvents, metOffset) => {
     if (duplicateEvents.length > 1) {
-      warnings.push(`Duplicate execution time ${compactIsoUtc(duplicateEvents[0].executionTime)} for ${duplicateEvents.map((event) => event.name).join(", ")}.`);
+      warnings.push(`Duplicate MET ${metOffsetLabelFromSeconds(metOffset)} for ${duplicateEvents.map((event) => event.name).join(", ")}.`);
     }
   });
   if (invalidOrder) {
@@ -887,7 +1015,7 @@ function timelineAnalysis(mission: BackendMission | null, events: BackendMission
   }
 
   return {
-    missionDuration: mission ? missionDurationSeconds(mission) : 0,
+    missionDuration,
     eventCount: events.length,
     burnCount: events.filter((event) => event.type === "FINITE_BURN").length,
     coastCount: events.filter((event) => event.type === "COAST").length,
@@ -896,16 +1024,24 @@ function timelineAnalysis(mission: BackendMission | null, events: BackendMission
 }
 
 function visualTimelineBlocks(mission: BackendMission | null, events: BackendMissionTimelineEvent[]) {
-  const ordered = events.toSorted((a, b) => new Date(a.executionTime).getTime() - new Date(b.executionTime).getTime() || a.sequenceIndex - b.sequenceIndex);
+  const ordered = events.toSorted((a, b) => {
+    const aOffset = eventMetOffsetSeconds(mission, a);
+    const bOffset = eventMetOffsetSeconds(mission, b);
+    return (aOffset ?? Number.POSITIVE_INFINITY) - (bOffset ?? Number.POSITIVE_INFINITY) || a.sequenceIndex - b.sequenceIndex;
+  });
   const missionSeconds = mission ? Math.max(1, missionDurationSeconds(mission)) : 1;
   return ordered.map((event, index) => {
     const nextEvent = ordered[index + 1] ?? null;
     const durationSeconds = timelineEventDurationSeconds(event, nextEvent, mission);
+    const offsetSeconds = eventMetOffsetSeconds(mission, event) ?? 0;
     const widthPercent = Math.min(100, Math.max(18, (durationSeconds / missionSeconds) * 100));
+    const startPercent = Math.min(100, Math.max(0, (offsetSeconds / missionSeconds) * 100));
     return {
       event,
+      offsetSeconds,
       durationSeconds,
       widthPercent,
+      startPercent,
     };
   });
 }
@@ -1837,21 +1973,26 @@ export function OrbitalDashboard() {
   }, [activeStoredOrbit, manualOrbitId, missionSetupDraft, refreshMissionTimeline, rememberMission, selectedNoradId, selectedSnapshot]);
 
   const openCreateTimelineModal = useCallback((type: TimelineEditorDraft["type"] = "FINITE_BURN") => {
+    const offsetSeconds = mission
+      ? Math.max(0, Math.round((simTimeRef.current.getTime() - new Date(mission.scenarioStart).getTime()) / 1000))
+      : 0;
     setTimelineDraft({
       ...defaultTimelineDraft,
       type,
       name: type === "COAST" ? "Coast" : "Finite Burn",
+      scheduleMode: "MET",
       executionDateUtc: utcIsoToDateInput(simTimeRef.current.toISOString()),
       executionTimeUtc: utcIsoToTimeInput(simTimeRef.current.toISOString()),
+      ...metOffsetPartsFromSeconds(offsetSeconds),
     });
     setTimelineModalMode("create");
-  }, []);
+  }, [mission]);
 
   const openEditTimelineModal = useCallback((event: BackendMissionTimelineEvent) => {
-    setTimelineDraft(timelineDraftFromEvent(event));
+    setTimelineDraft(timelineDraftFromEvent(event, mission));
     setSelectedTimelineEventId(event.id);
     setTimelineModalMode("edit");
-  }, []);
+  }, [mission]);
 
   const saveTimelineEvent = useCallback(async () => {
     if (!mission) {
@@ -1868,7 +2009,7 @@ export function OrbitalDashboard() {
       toast.error(message);
       return;
     }
-    const executionIso = utcDateAndTimeInputToIso(timelineDraft.executionDateUtc, timelineDraft.executionTimeUtc);
+    const executionIso = executionIsoFromTimelineDraft(timelineDraft, mission);
     const windowError = eventWindowError(mission, executionIso);
     if (windowError) {
       setTimelineStatus(windowError);
@@ -1879,10 +2020,10 @@ export function OrbitalDashboard() {
     setTimelineStatus("Saving timeline event...");
     try {
       if (timelineModalMode === "edit" && selectedTimelineEvent) {
-        const request = buildTimelineRequest(timelineDraft, selectedTimelineEvent.sequenceIndex, selectedTimelineEvent.enabled);
+        const request = buildTimelineRequest(timelineDraft, mission, selectedTimelineEvent.sequenceIndex, selectedTimelineEvent.enabled);
         await updateMissionTimelineEvent(mission.id, selectedTimelineEvent.id, request);
       } else {
-        const request = buildTimelineRequest(timelineDraft, missionTimelineEvents.length, true);
+        const request = buildTimelineRequest(timelineDraft, mission, missionTimelineEvents.length, true);
         await createMissionTimelineEvent(mission.id, request);
       }
       await refreshMissionTimeline(mission.id);
@@ -4413,8 +4554,10 @@ function VisualMissionTimeline({
   mission: BackendMission;
   blocks: Array<{
     event: BackendMissionTimelineEvent;
+    offsetSeconds: number;
     durationSeconds: number;
     widthPercent: number;
+    startPercent: number;
   }>;
   timeMode: TimelineTimeMode;
   selectedEventId: string | null;
@@ -4431,7 +4574,7 @@ function VisualMissionTimeline({
   return (
     <div className="mt-3 overflow-hidden border border-white/10 bg-black/30">
       <div className="flex items-stretch gap-1 overflow-x-auto p-2">
-        {blocks.map(({ event, durationSeconds, widthPercent }) => {
+        {blocks.map(({ event, offsetSeconds, durationSeconds, widthPercent, startPercent }) => {
           const isBurn = event.type === "FINITE_BURN";
           return (
             <button
@@ -4439,6 +4582,7 @@ function VisualMissionTimeline({
               type="button"
               onClick={() => onSelectEvent(event.id)}
               style={{ flexBasis: `${widthPercent}%` }}
+              title={`Mission-relative position ${metOffsetLabelFromSeconds(offsetSeconds)} (${formatNumber(startPercent, 1)}%)`}
               className={`min-w-[150px] border px-3 py-2 text-left transition ${
                 selectedEventId === event.id
                   ? "border-cyan-300 bg-cyan-300/10"
@@ -4455,6 +4599,9 @@ function VisualMissionTimeline({
               </span>
               <span className="mt-2 block font-mono text-[10px] text-cyan-100">
                 {displayTimelineTime(timeMode, mission, event.executionTime)}
+              </span>
+              <span className="mt-1 block font-mono text-[10px] text-zinc-400">
+                MET {metOffsetLabelFromSeconds(offsetSeconds)}
               </span>
               <span className="mt-1 block font-mono text-[10px] text-zinc-500">
                 Duration {secondsToDurationLabel(durationSeconds)}
@@ -4740,11 +4887,11 @@ function TimelineEventModal({
   const update = (patch: Partial<TimelineEditorDraft>) => onDraftChange({ ...draft, ...patch });
   const isoPreview = useMemo(() => {
     try {
-      return utcDateAndTimeInputToIso(draft.executionDateUtc, draft.executionTimeUtc);
+      return executionIsoFromTimelineDraft(draft, mission);
     } catch {
       return "Invalid UTC timestamp";
     }
-  }, [draft.executionDateUtc, draft.executionTimeUtc]);
+  }, [draft, mission]);
   const missionWindowError = isoPreview.endsWith("Z") ? eventWindowError(mission, isoPreview) : null;
   const offsetFromMissionStart = mission && isoPreview.endsWith("Z")
     ? signedOffsetLabel(mission.scenarioStart, isoPreview)
@@ -4804,33 +4951,104 @@ function TimelineEventModal({
             </TimelineField>
             <div>
               <span className="flex items-center justify-between gap-3">
-                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Execution Time</span>
+                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Execute At</span>
                 {(errors.executionDateUtc || errors.executionTimeUtc) && (
                   <span className="font-mono text-[10px] uppercase text-rose-200">{errors.executionDateUtc ?? errors.executionTimeUtc}</span>
                 )}
+                {(errors.metHours || errors.metMinutes || errors.metSeconds) && (
+                  <span className="font-mono text-[10px] uppercase text-rose-200">{errors.metHours ?? errors.metMinutes ?? errors.metSeconds}</span>
+                )}
               </span>
-              <div className="mt-1 grid grid-cols-[minmax(0,1fr)_150px_auto] gap-2 max-sm:grid-cols-1">
-                <input
-                  type="date"
-                  value={draft.executionDateUtc}
-                  onChange={(event) => update({ executionDateUtc: event.target.value })}
-                  className="timeline-input"
-                  aria-label="Execution UTC date"
-                />
-                <input
-                  type="time"
-                  step="1"
-                  value={draft.executionTimeUtc}
-                  onChange={(event) => update({ executionTimeUtc: event.target.value })}
-                  className="timeline-input"
-                  aria-label="Execution UTC time"
-                />
-                <span className="grid min-h-[42px] place-items-center border border-cyan-300/35 bg-cyan-300/[0.08] px-3 font-mono text-xs font-semibold uppercase text-cyan-100">
-                  UTC
-                </span>
+              <div className="mt-1 grid grid-cols-2 border border-cyan-300/20">
+                {(["MET", "UTC"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => {
+                      if (mode === "MET" && mission && isoPreview.endsWith("Z")) {
+                        const offsetSeconds = Math.max(0, Math.round((new Date(isoPreview).getTime() - new Date(mission.scenarioStart).getTime()) / 1000));
+                        update({ scheduleMode: mode, ...metOffsetPartsFromSeconds(offsetSeconds) });
+                        return;
+                      }
+                      if (mode === "UTC" && isoPreview.endsWith("Z")) {
+                        update({
+                          scheduleMode: mode,
+                          executionDateUtc: utcIsoToDateInput(isoPreview),
+                          executionTimeUtc: utcIsoToTimeInput(isoPreview),
+                        });
+                        return;
+                      }
+                      update({ scheduleMode: mode });
+                    }}
+                    className={`px-3 py-2 font-mono text-xs uppercase transition ${
+                      draft.scheduleMode === mode
+                        ? "bg-cyan-300 text-slate-950"
+                        : "text-cyan-200 hover:bg-cyan-300/10"
+                    }`}
+                  >
+                    {mode}
+                  </button>
+                ))}
               </div>
+              {draft.scheduleMode === "MET" ? (
+                <div className="mt-2 grid grid-cols-[1fr_1fr_1fr_auto] gap-2 max-sm:grid-cols-1">
+                  <input
+                    value={draft.metHours}
+                    onChange={(event) => update({ metHours: event.target.value })}
+                    inputMode="numeric"
+                    className="timeline-input"
+                    aria-label="MET hours"
+                    placeholder="Hours"
+                  />
+                  <input
+                    value={draft.metMinutes}
+                    onChange={(event) => update({ metMinutes: event.target.value })}
+                    inputMode="numeric"
+                    className="timeline-input"
+                    aria-label="MET minutes"
+                    placeholder="Minutes"
+                  />
+                  <input
+                    value={draft.metSeconds}
+                    onChange={(event) => update({ metSeconds: event.target.value })}
+                    inputMode="numeric"
+                    className="timeline-input"
+                    aria-label="MET seconds"
+                    placeholder="Seconds"
+                  />
+                  <span className="grid min-h-[42px] place-items-center border border-cyan-300/35 bg-cyan-300/[0.08] px-3 font-mono text-xs font-semibold uppercase text-cyan-100">
+                    MET
+                  </span>
+                </div>
+              ) : (
+                <div className="mt-2 grid grid-cols-[minmax(0,1fr)_150px_auto] gap-2 max-sm:grid-cols-1">
+                  <input
+                    type="date"
+                    value={draft.executionDateUtc}
+                    onChange={(event) => update({ executionDateUtc: event.target.value })}
+                    className="timeline-input"
+                    aria-label="Execution UTC date"
+                  />
+                  <input
+                    type="time"
+                    step="1"
+                    value={draft.executionTimeUtc}
+                    onChange={(event) => update({ executionTimeUtc: event.target.value })}
+                    className="timeline-input"
+                    aria-label="Execution UTC time"
+                  />
+                  <span className="grid min-h-[42px] place-items-center border border-cyan-300/35 bg-cyan-300/[0.08] px-3 font-mono text-xs font-semibold uppercase text-cyan-100">
+                    UTC
+                  </span>
+                </div>
+              )}
+              {draft.scheduleMode === "MET" && (
+                <p className="mt-2 border border-cyan-300/15 bg-black/25 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-zinc-400">
+                  Schedule: <span className="text-cyan-100">{metOffsetLabelFromSeconds(metOffsetSeconds(draft) ?? 0)}</span>
+                </p>
+              )}
               <p className="mt-2 border border-white/10 bg-black/25 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-zinc-400">
-                ISO UTC: <span className="text-cyan-100">{isoPreview}</span>
+                Computed UTC: <span className="text-cyan-100">{isoPreview}</span>
               </p>
               {missionWindowError && (
                 <p className="mt-2 whitespace-pre-line border border-rose-300/35 bg-rose-300/[0.06] px-3 py-2 text-xs leading-5 text-rose-100">
