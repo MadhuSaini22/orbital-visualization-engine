@@ -132,6 +132,7 @@ type TimelineScheduleMode = "UTC" | "MET" | "AFTER_EVENT";
 type TimelineZoomPreset = "THIRTY_MIN" | "ONE_HOUR" | "THREE_HOURS" | "SIX_HOURS" | "TWELVE_HOURS" | "TWENTY_FOUR_HOURS" | "CUSTOM";
 type TimelineSnapMode = "FREE" | "ONE_MIN" | "FIVE_MIN" | "TEN_MIN" | "THIRTY_MIN" | "ONE_HOUR";
 type MissionDurationPreset = "ONE_ORBIT" | "THREE_HOURS" | "TWELVE_HOURS" | "TWENTY_FOUR_HOURS" | "CUSTOM";
+type CommandModalId = "mission" | "analysis" | "workspace" | "templates";
 type TimelineEditorDraft = {
   type: "COAST" | "FINITE_BURN";
   name: string;
@@ -1669,6 +1670,7 @@ export function OrbitalDashboard() {
   );
   const [timelineStatus, setTimelineStatus] = useState<string | null>(null);
   const [timelineDragEventId, setTimelineDragEventId] = useState<string | null>(null);
+  const [activeCommandModal, setActiveCommandModal] = useState<CommandModalId | null>(null);
   const [missionTrajectoryOverlay, setMissionTrajectoryOverlay] = useState<MissionTrajectoryOverlay | null>(null);
   const [showMissionComparison, setShowMissionComparison] = useState(false);
   const [isMissionTrajectoryLoading, setIsMissionTrajectoryLoading] = useState(false);
@@ -1941,6 +1943,14 @@ export function OrbitalDashboard() {
     }
     return null;
   }, [activeWorkspaceMissionId, mission, missionLibrary.missions]);
+  const missionSummaryAnalysis = useMemo(() => timelineAnalysis(mission, missionTimelineEvents), [mission, missionTimelineEvents]);
+  const dependencyCount = useMemo(() => missionTimelineEvents.filter((event) => eventScheduleMode(event) === "AFTER_EVENT").length, [missionTimelineEvents]);
+  const trajectoryStatus = missionTrajectoryOverlay
+    ? "Generated"
+    : mission && missionTimelineEvents.length > 0
+      ? "Needs Regeneration"
+      : "Not Generated";
+  const analysisLastTimestamp = missionTrajectoryOverlay?.generatedAt ?? (dynamicDataMessage ? "Recent" : "--");
   const isPresetSpeed = speedPresetOptions.some((option) => option.speed === speed);
   const pauseBackendRequests = useCallback((error: unknown) => {
     setBackendRequestPauseUntil(Date.now() + 10_000);
@@ -3520,7 +3530,35 @@ export function OrbitalDashboard() {
                 onClick={() => setIsSourcePickerOpen(true)}
                 className="border border-cyan-300/55 px-4 py-2 font-mono text-xs uppercase tracking-[0.14em] text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-300 hover:text-slate-950"
               >
-                Add Orbit
+                New Orbit
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveCommandModal("mission")}
+                className="border border-emerald-300/55 px-4 py-2 font-mono text-xs uppercase tracking-[0.14em] text-emerald-100 transition hover:border-emerald-300 hover:bg-emerald-300 hover:text-slate-950"
+              >
+                Plan Mission
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveCommandModal("analysis")}
+                className="border border-white/15 px-4 py-2 font-mono text-xs uppercase tracking-[0.14em] text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100"
+              >
+                Analysis
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveCommandModal("workspace")}
+                className="border border-white/15 px-4 py-2 font-mono text-xs uppercase tracking-[0.14em] text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100"
+              >
+                Workspace
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveCommandModal("templates")}
+                className="border border-white/15 px-4 py-2 font-mono text-xs uppercase tracking-[0.14em] text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100"
+              >
+                Templates
               </button>
               <div className="grid min-w-[520px] grid-cols-4 gap-3 max-lg:min-w-0 max-lg:flex-1 max-sm:grid-cols-2">
                 <HudMetric label="Satellites" value={`${satellites.length}/${MAX_TLE_OBJECTS}`} />
@@ -3583,70 +3621,6 @@ export function OrbitalDashboard() {
           </HudPanel>
         )}
 
-        {hasOrbitLoaded && selectedNoradId && canUseAnalysisConfig && (
-          <HudPanel className="p-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Analysis Config</p>
-                <p className="mt-1 font-mono text-[10px] text-zinc-500">NORAD {selectedNoradId}</p>
-              </div>
-              <span className="border border-cyan-300/30 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
-                {analysisConfig?.config.propagatorType.replaceAll("_", " ") ?? "--"}
-              </span>
-            </div>
-            <div className="mt-3 grid grid-cols-4 gap-1.5">
-              {analysisPresetOptions.map((preset) => (
-                <button
-                  key={preset.id}
-                  type="button"
-                  onClick={() => applySelectedPreset(preset.id)}
-                  className={`border px-2 py-1.5 font-mono text-[10px] uppercase transition ${
-                    analysisConfig?.config.preset === preset.id
-                      ? "border-cyan-300 bg-cyan-300 text-slate-950"
-                      : "border-cyan-300/25 text-cyan-100 hover:border-cyan-300"
-                  }`}
-                >
-                  {preset.label}
-                </button>
-              ))}
-            </div>
-            <div className="mt-2 grid grid-cols-3 gap-1.5">
-              {analysisModeOptions.map((mode) => {
-                const checked = Boolean(analysisConfig?.config[mode.key]);
-                return (
-                  <button
-                    key={mode.id}
-                    type="button"
-                    aria-pressed={checked}
-                    onClick={() => toggleSelectedMode(mode.id, !checked)}
-                    className={`border px-2 py-1.5 font-mono text-[10px] uppercase transition ${
-                      checked
-                        ? "border-lime-300 bg-lime-300/15 text-lime-100"
-                        : "border-white/10 text-zinc-500 hover:border-lime-300/60 hover:text-zinc-200"
-                    }`}
-                  >
-                    {mode.label}
-                  </button>
-                );
-              })}
-            </div>
-            <div className="mt-3 grid grid-cols-2 gap-3">
-              <DetailMetric label="Gravity" value={`${analysisConfig?.config.gravityDegree ?? "--"} x ${analysisConfig?.config.gravityOrder ?? "--"}`} />
-              <DetailMetric label="Preset" value={analysisConfig?.config.preset.replaceAll("_", " ") ?? "--"} />
-            </div>
-            {analysisConfig && analysisConfig.warnings.length > 0 && (
-              <p className="mt-2 line-clamp-3 text-[10px] leading-4 text-amber-100" title={analysisConfig.warnings[0]}>
-                {analysisConfig.warnings[0]}
-              </p>
-            )}
-            {analysisMessage && (
-              <div className="mt-3 border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-xs text-cyan-100">
-                {analysisMessage}
-              </div>
-            )}
-          </HudPanel>
-        )}
-
         {hasOrbitLoaded && (
           <GroundTrackMiniMap
             currentSnapshots={snapshots}
@@ -3703,145 +3677,46 @@ export function OrbitalDashboard() {
           </div>
         </HudPanel>
 
-        <HudPanel>
-          <div className="flex items-center justify-between gap-3">
-            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Range Check</p>
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-sm text-cyan-100">{effectiveShowRangeCheck && rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : "--"}</span>
-              <button
-                type="button"
-                aria-pressed={effectiveShowRangeCheck}
-                disabled={!canUseRangeCheck}
-                onClick={toggleRangeCheck}
-                className={`flex min-w-16 items-center gap-2 border px-2 py-1 font-mono text-[10px] uppercase transition ${
-                  !canUseRangeCheck
-                    ? "cursor-not-allowed border-white/10 text-zinc-600 opacity-60"
-                    : effectiveShowRangeCheck
-                      ? "border-cyan-300 bg-cyan-300/15 text-cyan-100"
-                      : "border-white/10 text-zinc-500 hover:border-cyan-300"
-                }`}
-              >
-                <span className={`h-2.5 w-2.5 rounded-full ${effectiveShowRangeCheck ? "bg-cyan-300" : "bg-zinc-600"}`} />
-                {effectiveShowRangeCheck ? "On" : "Off"}
-              </button>
-            </div>
-          </div>
-          {!effectiveShowRangeCheck ? (
-            <p className="mt-3 text-xs leading-5 text-zinc-500">
-              {canUseRangeCheck ? "Range is off. Globe clicks select one active satellite only." : "Load at least 2 satellites to enable range check."}
-            </p>
-          ) : satellites.length < 2 ? (
-            <p className="mt-3 text-xs text-zinc-500">Load at least 2 satellites.</p>
-          ) : (
-            <div className="mt-3 grid gap-2">
-              <select
-                value={rangePrimaryId}
-                onChange={(event) => updateRangePrimary(event.target.value)}
-                className="border border-white/10 bg-black/45 px-3 py-2 text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
-              >
-                {!rangePrimaryId && <option value="">Primary: Select satellite</option>}
-                {satellites.map((satellite) => (
-                  <option key={satellite.id} value={satellite.id}>Primary: {satellite.name}</option>
-                ))}
-              </select>
-              <select
-                value={rangeSecondaryId}
-                onChange={(event) => updateRangeSecondary(event.target.value)}
-                className="border border-white/10 bg-black/45 px-3 py-2 text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
-              >
-                {!rangeSecondaryId && <option value="">Secondary: Select satellite</option>}
-                {satellites.map((satellite) => (
-                  <option key={satellite.id} value={satellite.id} disabled={satellite.id === rangePrimaryId}>
-                    Secondary: {satellite.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-        </HudPanel>
-
-        <MissionTimelinePanel
-          mission={mission}
-          events={missionTimelineEvents}
-          selectedEventId={selectedTimelineEvent?.id ?? null}
-          status={timelineStatus}
-          canUseMissionTimeline={canUseMissionTimeline}
-          unavailableReason={missionTimelineUnavailableReason}
-          subjectSummary={missionSubjectSummary(activeDataSource, selectedSnapshot?.satellite, selectedNoradId, manualOrbitId)}
-          isTrajectoryLoading={isMissionTrajectoryLoading}
-          showComparison={showMissionComparison}
-          trajectoryOverlay={missionTrajectoryOverlay}
-          dragEventId={timelineDragEventId}
-          simulationTimeIso={simTime.toISOString()}
-          onInitializeMission={openMissionSetup}
-          onOpenCatalog={() => openOrbitSource("catalog")}
-          onCreateEvent={openCreateTimelineModal}
-          onEditEvent={openEditTimelineModal}
-          onDeleteEvent={deleteTimelineEvent}
-          onToggleEvent={toggleTimelineEventEnabled}
-          onSelectEvent={setSelectedTimelineEventId}
-          onGenerateTrajectory={generateMissionTrajectory}
-          onToggleComparison={() => setShowMissionComparison((value) => !value)}
-          onDragEvent={setTimelineDragEventId}
-          onDropEvent={reorderTimelineEvent}
-          onScheduleEvent={updateTimelineEventSchedule}
+        <CommandSummaryCard
+          title="Mission Summary"
+          cta="Plan Mission"
+          onAction={() => setActiveCommandModal("mission")}
+          rows={[
+            ["Mission", mission?.name ?? "No mission"],
+            ["Window", mission ? `${compactIsoUtc(mission.scenarioStart)} -> ${compactIsoUtc(mission.scenarioEnd)}` : "--"],
+            ["Events", String(missionSummaryAnalysis.eventCount)],
+            ["Burns / Coasts", `${missionSummaryAnalysis.burnCount} / ${missionSummaryAnalysis.coastCount}`],
+            ["Dependencies", String(dependencyCount)],
+            ["Warnings", String(missionSummaryAnalysis.warnings.length)],
+            ["Trajectory", trajectoryStatus],
+          ]}
         />
 
-        <WorkspaceLibraryPanel
-          orbitLibrary={orbitLibrary}
-          missionLibrary={missionLibrary}
-          templateLibrary={templateLibrary}
-          orbitTemplateLibrary={orbitTemplateLibrary}
-          activeOrbitId={activeStoredOrbit?.orbitId ?? activeWorkspaceOrbitId}
-          activeMissionId={activeStoredMission?.missionId ?? activeWorkspaceMissionId}
-          onLoadOrbit={loadStoredOrbit}
-          onRenameOrbit={renameStoredOrbit}
-          onDeleteOrbit={deleteStoredOrbit}
-          onCloneOrbitOnly={(orbit) => cloneStoredOrbit(orbit, false)}
-          onCloneOrbitWithMissions={(orbit) => cloneStoredOrbit(orbit, true)}
-          onExportOrbit={exportStoredOrbit}
-          onOpenMission={openStoredMission}
-          onRenameMission={renameStoredMission}
-          onDeleteMission={deleteStoredMission}
-          onCloneMission={cloneStoredMission}
-          onExportMission={exportStoredMission}
-          onSaveCurrentMissionAsTemplate={saveCurrentMissionAsTemplate}
-          onRenameTemplate={renameTemplate}
-          onEditTemplate={editTemplateMetadata}
-          onCloneTemplate={cloneTemplate}
-          onDeleteTemplate={deleteTemplate}
-          onExportTemplate={exportTemplate}
-          onSaveCurrentOrbitAsTemplate={saveCurrentOrbitAsTemplate}
-          onCreateOrbitFromTemplate={createOrbitFromTemplate}
-          onRenameOrbitTemplate={renameOrbitTemplate}
-          onEditOrbitTemplate={editOrbitTemplateMetadata}
-          onCloneOrbitTemplate={cloneOrbitTemplate}
-          onDeleteOrbitTemplate={deleteOrbitTemplateAction}
-          onExportOrbitTemplate={exportOrbitTemplate}
-          onExportWorkspace={exportWorkspace}
-          onImportWorkspace={() => workspaceImportInputRef.current?.click()}
-          onImportTemplate={() => templateImportInputRef.current?.click()}
-          onImportOrbitTemplate={() => orbitTemplateImportInputRef.current?.click()}
+        <CommandSummaryCard
+          title="Analysis Summary"
+          cta="Analysis"
+          onAction={() => setActiveCommandModal("analysis")}
+          rows={[
+            ["Range", effectiveShowRangeCheck && rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : canUseRangeCheck ? "Available" : "Unavailable"],
+            ["Conjunction", effectiveShowConjunctions ? `${conjunctionSnapshots.length} visible` : conjunctionSnapshots.length > 0 ? "Available" : "No events"],
+            ["Maneuvers", effectiveShowManeuvers ? `${maneuverSnapshots.length} visible` : maneuverSnapshots.length > 0 ? "Available" : "No events"],
+            ["Last Analysis", analysisLastTimestamp],
+          ]}
         />
 
-        <ManeuverPanel
-          maneuverSnapshots={maneuverSnapshots}
-          selectedManeuverId={selectedManeuver?.event.id ?? null}
-          showManeuvers={effectiveShowManeuvers}
-          disabled={!canShowManeuvers}
-          onSelectManeuver={setSelectedManeuverId}
-          onToggleManeuvers={() => setShowManeuvers((value) => !value)}
-          onOpenManeuverModal={() => setIsManeuverModalOpen(true)}
-        />
-
-        <ConjunctionPanel
-          conjunctionSnapshots={conjunctionSnapshots}
-          selectedConjunctionId={selectedConjunction?.event.id ?? null}
-          showConjunctions={effectiveShowConjunctions}
-          disabled={!canShowConjunctions}
-          onSelectConjunction={setSelectedConjunctionId}
-          onToggleConjunctions={() => setShowConjunctions((value) => !value)}
-          onRefreshConjunctions={syncConjunctionsFromSpaceTrack}
+        <CommandSummaryCard
+          title="Workspace Summary"
+          cta="Workspace"
+          secondaryCta="Templates"
+          onAction={() => setActiveCommandModal("workspace")}
+          onSecondaryAction={() => setActiveCommandModal("templates")}
+          rows={[
+            ["Active Orbit", activeStoredOrbit?.orbitName ?? selectedSnapshot?.satellite.name ?? "--"],
+            ["Active Mission", activeStoredMission?.missionName ?? mission?.name ?? "--"],
+            ["Orbits", String(orbitLibrary.length)],
+            ["Missions", String(missionLibrary.missions.length)],
+            ["Templates", String(templateLibrary.templates.length + orbitTemplateLibrary.templates.length)],
+          ]}
         />
       </section>
       )}
@@ -4000,6 +3875,124 @@ export function OrbitalDashboard() {
         />
       )}
 
+      {activeCommandModal === "mission" && (
+        <CommandModal title="Mission Planner" onClose={() => setActiveCommandModal(null)} size="wide">
+          <MissionTimelinePanel
+            mission={mission}
+            events={missionTimelineEvents}
+            selectedEventId={selectedTimelineEvent?.id ?? null}
+            status={timelineStatus}
+            canUseMissionTimeline={canUseMissionTimeline}
+            unavailableReason={missionTimelineUnavailableReason}
+            subjectSummary={missionSubjectSummary(activeDataSource, selectedSnapshot?.satellite, selectedNoradId, manualOrbitId)}
+            isTrajectoryLoading={isMissionTrajectoryLoading}
+            showComparison={showMissionComparison}
+            trajectoryOverlay={missionTrajectoryOverlay}
+            dragEventId={timelineDragEventId}
+            simulationTimeIso={simTime.toISOString()}
+            onInitializeMission={openMissionSetup}
+            onOpenCatalog={() => openOrbitSource("catalog")}
+            onCreateEvent={openCreateTimelineModal}
+            onEditEvent={openEditTimelineModal}
+            onDeleteEvent={deleteTimelineEvent}
+            onToggleEvent={toggleTimelineEventEnabled}
+            onSelectEvent={setSelectedTimelineEventId}
+            onGenerateTrajectory={generateMissionTrajectory}
+            onToggleComparison={() => setShowMissionComparison((value) => !value)}
+            onDragEvent={setTimelineDragEventId}
+            onDropEvent={reorderTimelineEvent}
+            onScheduleEvent={updateTimelineEventSchedule}
+          />
+        </CommandModal>
+      )}
+
+      {activeCommandModal === "workspace" && (
+        <CommandModal title="Workspace" onClose={() => setActiveCommandModal(null)} size="wide">
+          <WorkspaceLibraryPanel
+            orbitLibrary={orbitLibrary}
+            missionLibrary={missionLibrary}
+            activeOrbitId={activeStoredOrbit?.orbitId ?? activeWorkspaceOrbitId}
+            activeMissionId={activeStoredMission?.missionId ?? activeWorkspaceMissionId}
+            onLoadOrbit={loadStoredOrbit}
+            onRenameOrbit={renameStoredOrbit}
+            onDeleteOrbit={deleteStoredOrbit}
+            onCloneOrbitOnly={(orbit) => cloneStoredOrbit(orbit, false)}
+            onCloneOrbitWithMissions={(orbit) => cloneStoredOrbit(orbit, true)}
+            onExportOrbit={exportStoredOrbit}
+            onOpenMission={openStoredMission}
+            onRenameMission={renameStoredMission}
+            onDeleteMission={deleteStoredMission}
+            onCloneMission={cloneStoredMission}
+            onExportMission={exportStoredMission}
+            onExportWorkspace={exportWorkspace}
+            onImportWorkspace={() => workspaceImportInputRef.current?.click()}
+          />
+        </CommandModal>
+      )}
+
+      {activeCommandModal === "templates" && (
+        <CommandModal title="Templates" onClose={() => setActiveCommandModal(null)} size="wide">
+          <TemplateLibraryPanel
+            templateLibrary={templateLibrary}
+            orbitTemplateLibrary={orbitTemplateLibrary}
+            onSaveCurrentMissionAsTemplate={saveCurrentMissionAsTemplate}
+            onRenameTemplate={renameTemplate}
+            onEditTemplate={editTemplateMetadata}
+            onCloneTemplate={cloneTemplate}
+            onDeleteTemplate={deleteTemplate}
+            onExportTemplate={exportTemplate}
+            onSaveCurrentOrbitAsTemplate={saveCurrentOrbitAsTemplate}
+            onCreateOrbitFromTemplate={createOrbitFromTemplate}
+            onRenameOrbitTemplate={renameOrbitTemplate}
+            onEditOrbitTemplate={editOrbitTemplateMetadata}
+            onCloneOrbitTemplate={cloneOrbitTemplate}
+            onDeleteOrbitTemplate={deleteOrbitTemplateAction}
+            onExportOrbitTemplate={exportOrbitTemplate}
+            onImportTemplate={() => templateImportInputRef.current?.click()}
+            onImportOrbitTemplate={() => orbitTemplateImportInputRef.current?.click()}
+          />
+        </CommandModal>
+      )}
+
+      {activeCommandModal === "analysis" && (
+        <CommandModal title="Analysis" onClose={() => setActiveCommandModal(null)} size="wide">
+          <AnalysisModalContent
+            selectedNoradId={selectedNoradId}
+            canUseAnalysisConfig={canUseAnalysisConfig}
+            analysisConfig={analysisConfig}
+            analysisMessage={analysisMessage}
+            rangePrimaryId={rangePrimaryId}
+            rangeSecondaryId={rangeSecondaryId}
+            satellites={satellites}
+            canUseRangeCheck={canUseRangeCheck}
+            effectiveShowRangeCheck={effectiveShowRangeCheck}
+            rangeMeasurement={rangeMeasurement}
+            maneuverSnapshots={maneuverSnapshots}
+            selectedManeuverId={selectedManeuver?.event.id ?? null}
+            showManeuvers={effectiveShowManeuvers}
+            canShowManeuvers={canShowManeuvers}
+            conjunctionSnapshots={conjunctionSnapshots}
+            selectedConjunctionId={selectedConjunction?.event.id ?? null}
+            showConjunctions={effectiveShowConjunctions}
+            canShowConjunctions={canShowConjunctions}
+            trajectoryOverlay={missionTrajectoryOverlay}
+            showComparison={showMissionComparison}
+            onApplyPreset={applySelectedPreset}
+            onToggleMode={toggleSelectedMode}
+            onToggleRangeCheck={toggleRangeCheck}
+            onUpdateRangePrimary={updateRangePrimary}
+            onUpdateRangeSecondary={updateRangeSecondary}
+            onSelectManeuver={setSelectedManeuverId}
+            onToggleManeuvers={() => setShowManeuvers((value) => !value)}
+            onOpenManeuverModal={() => setIsManeuverModalOpen(true)}
+            onSelectConjunction={setSelectedConjunctionId}
+            onToggleConjunctions={() => setShowConjunctions((value) => !value)}
+            onRefreshConjunctions={syncConjunctionsFromSpaceTrack}
+            onToggleComparison={() => setShowMissionComparison((value) => !value)}
+          />
+        </CommandModal>
+      )}
+
       {isSourcePickerOpen && (
         <div className="pointer-events-auto fixed inset-0 z-40 grid place-items-center bg-black/72 p-4 backdrop-blur-md" role="dialog" aria-modal="true" aria-label="Select orbit source">
           <div className="w-[min(880px,calc(100vw-2rem))]">
@@ -4080,6 +4073,78 @@ function HudMetric({ label, value }: { label: string; value: string }) {
       <p className="text-xs font-semibold text-zinc-400">{label}</p>
       <p className="font-mono text-lg font-semibold text-white">{value}</p>
     </div>
+  );
+}
+
+function CommandSummaryCard({
+  title,
+  rows,
+  cta,
+  secondaryCta,
+  onAction,
+  onSecondaryAction,
+}: {
+  title: string;
+  rows: Array<[string, string]>;
+  cta: string;
+  secondaryCta?: string;
+  onAction: () => void;
+  onSecondaryAction?: () => void;
+}) {
+  return (
+    <HudPanel>
+      <div className="flex items-start justify-between gap-3">
+        <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">{title}</p>
+        <button type="button" onClick={onAction} className="border border-cyan-300/50 px-3 py-1.5 font-mono text-[10px] uppercase text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-300 hover:text-slate-950">
+          {cta}
+        </button>
+      </div>
+      <div className="mt-3 grid gap-2">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex items-center justify-between gap-3 border-b border-white/5 pb-1.5 text-xs last:border-b-0 last:pb-0">
+            <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-zinc-500">{label}</span>
+            <span className="max-w-[190px] truncate text-right text-zinc-200" title={value}>{value}</span>
+          </div>
+        ))}
+      </div>
+      {secondaryCta && onSecondaryAction && (
+        <button type="button" onClick={onSecondaryAction} className="mt-3 w-full border border-white/15 px-3 py-1.5 font-mono text-[10px] uppercase text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100">
+          {secondaryCta}
+        </button>
+      )}
+    </HudPanel>
+  );
+}
+
+function CommandModal({
+  title,
+  children,
+  onClose,
+  size = "normal",
+}: {
+  title: string;
+  children: ReactNode;
+  onClose: () => void;
+  size?: "normal" | "wide";
+}) {
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
+      <div className={`flex max-h-[90vh] flex-col overflow-hidden border border-cyan-300/30 bg-[#071016]/96 shadow-2xl ${size === "wide" ? "w-[min(1180px,96vw)]" : "w-[min(760px,94vw)]"}`}>
+        <div className="flex items-center justify-between border-b border-cyan-300/20 px-5 py-4">
+          <div>
+            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Command Center</p>
+            <h2 className="mt-1 text-2xl font-semibold text-white">{title}</h2>
+          </div>
+          <button type="button" onClick={onClose} className="grid h-9 w-9 place-items-center border border-white/15 text-zinc-200 transition hover:border-cyan-300 hover:text-white" aria-label={`Close ${title}`} title="Close">
+            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
+            </svg>
+          </button>
+        </div>
+        <div className="min-h-0 overflow-auto p-5">{children}</div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -5068,11 +5133,214 @@ function getConjunctionStatusDescription(status: ConjunctionSnapshot["status"]) 
   return "Safe means the closest approach stays outside the configured warning threshold.";
 }
 
+function AnalysisModalContent({
+  selectedNoradId,
+  canUseAnalysisConfig,
+  analysisConfig,
+  analysisMessage,
+  rangePrimaryId,
+  rangeSecondaryId,
+  satellites,
+  canUseRangeCheck,
+  effectiveShowRangeCheck,
+  rangeMeasurement,
+  maneuverSnapshots,
+  selectedManeuverId,
+  showManeuvers,
+  canShowManeuvers,
+  conjunctionSnapshots,
+  selectedConjunctionId,
+  showConjunctions,
+  canShowConjunctions,
+  trajectoryOverlay,
+  showComparison,
+  onApplyPreset,
+  onToggleMode,
+  onToggleRangeCheck,
+  onUpdateRangePrimary,
+  onUpdateRangeSecondary,
+  onSelectManeuver,
+  onToggleManeuvers,
+  onOpenManeuverModal,
+  onSelectConjunction,
+  onToggleConjunctions,
+  onRefreshConjunctions,
+  onToggleComparison,
+}: {
+  selectedNoradId: string | number | null;
+  canUseAnalysisConfig: boolean;
+  analysisConfig: BackendAnalysisConfigResponse | null;
+  analysisMessage: string | null;
+  rangePrimaryId: string;
+  rangeSecondaryId: string;
+  satellites: SatelliteObject[];
+  canUseRangeCheck: boolean;
+  effectiveShowRangeCheck: boolean;
+  rangeMeasurement: { primary: SatelliteSnapshot; secondary: SatelliteSnapshot; distanceKm: number } | null;
+  maneuverSnapshots: ManeuverSnapshot[];
+  selectedManeuverId: string | null;
+  showManeuvers: boolean;
+  canShowManeuvers: boolean;
+  conjunctionSnapshots: ConjunctionSnapshot[];
+  selectedConjunctionId: string | null;
+  showConjunctions: boolean;
+  canShowConjunctions: boolean;
+  trajectoryOverlay: MissionTrajectoryOverlay | null;
+  showComparison: boolean;
+  onApplyPreset: (preset: AnalysisPresetId) => void;
+  onToggleMode: (mode: string, enabled: boolean) => void;
+  onToggleRangeCheck: () => void;
+  onUpdateRangePrimary: (satelliteId: string) => void;
+  onUpdateRangeSecondary: (satelliteId: string) => void;
+  onSelectManeuver: (eventId: string) => void;
+  onToggleManeuvers: () => void;
+  onOpenManeuverModal: () => void;
+  onSelectConjunction: (eventId: string) => void;
+  onToggleConjunctions: () => void;
+  onRefreshConjunctions: () => void;
+  onToggleComparison: () => void;
+}) {
+  const [tab, setTab] = useState<"trajectory" | "range" | "conjunction" | "maneuver">("trajectory");
+
+  return (
+    <div>
+      <div className="grid grid-cols-4 border border-cyan-300/20 max-sm:grid-cols-2">
+        {[
+          { id: "trajectory" as const, label: "Trajectory" },
+          { id: "range" as const, label: "Range" },
+          { id: "conjunction" as const, label: "Conjunction" },
+          { id: "maneuver" as const, label: "Maneuver" },
+        ].map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => setTab(item.id)}
+            className={`px-3 py-2 font-mono text-xs uppercase transition ${tab === item.id ? "bg-cyan-300 text-slate-950" : "text-cyan-100 hover:bg-cyan-300/10"}`}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="mt-4">
+        {tab === "trajectory" && (
+          <div className="grid gap-4 lg:grid-cols-2">
+            <HudPanel>
+              <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Trajectory Preview</p>
+              <p className="mt-2 text-sm text-zinc-300">{trajectoryOverlay ? trajectoryOverlay.message : "No mission trajectory generated yet."}</p>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <DetailMetric label="Mission Overlay" value={trajectoryOverlay?.mission ? "Ready" : "--"} />
+                <DetailMetric label="Legacy Overlay" value={trajectoryOverlay?.legacy ? "Ready" : "--"} />
+                <DetailMetric label="Comparison" value={showComparison ? "Visible" : "Hidden"} />
+                <DetailMetric label="Generated" value={trajectoryOverlay ? compactIsoUtc(trajectoryOverlay.generatedAt) : "--"} />
+              </div>
+              <button type="button" disabled={!trajectoryOverlay} onClick={onToggleComparison} className="mt-3 workspace-action">
+                Toggle Overlay
+              </button>
+            </HudPanel>
+
+            <HudPanel>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Analysis Config</p>
+                  <p className="mt-1 font-mono text-[10px] text-zinc-500">{selectedNoradId ? `NORAD ${selectedNoradId}` : "Manual/local orbit"}</p>
+                </div>
+                <span className="border border-cyan-300/30 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
+                  {analysisConfig?.config.propagatorType.replaceAll("_", " ") ?? "--"}
+                </span>
+              </div>
+              {!canUseAnalysisConfig ? (
+                <p className="mt-3 text-xs leading-5 text-zinc-500">Analysis force-model configuration is available for backend catalog orbits.</p>
+              ) : (
+                <>
+                  <div className="mt-3 grid grid-cols-4 gap-1.5">
+                    {analysisPresetOptions.map((preset) => (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => onApplyPreset(preset.id)}
+                        className={`border px-2 py-1.5 font-mono text-[10px] uppercase transition ${analysisConfig?.config.preset === preset.id ? "border-cyan-300 bg-cyan-300 text-slate-950" : "border-cyan-300/25 text-cyan-100 hover:border-cyan-300"}`}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-2 grid grid-cols-3 gap-1.5">
+                    {analysisModeOptions.map((mode) => {
+                      const checked = Boolean(analysisConfig?.config[mode.key]);
+                      return (
+                        <button
+                          key={mode.id}
+                          type="button"
+                          aria-pressed={checked}
+                          onClick={() => onToggleMode(mode.id, !checked)}
+                          className={`border px-2 py-1.5 font-mono text-[10px] uppercase transition ${checked ? "border-lime-300 bg-lime-300/15 text-lime-100" : "border-white/10 text-zinc-500 hover:border-lime-300/60 hover:text-zinc-200"}`}
+                        >
+                          {mode.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+              {analysisMessage && <p className="mt-3 text-xs leading-5 text-cyan-100">{analysisMessage}</p>}
+            </HudPanel>
+          </div>
+        )}
+
+        {tab === "range" && (
+          <HudPanel>
+            <div className="flex items-center justify-between gap-3">
+              <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Range Analysis</p>
+              <button type="button" aria-pressed={effectiveShowRangeCheck} disabled={!canUseRangeCheck} onClick={onToggleRangeCheck} className="workspace-action">
+                {effectiveShowRangeCheck ? "On" : "Off"}
+              </button>
+            </div>
+            <p className="mt-2 text-sm text-zinc-300">{rangeMeasurement ? `${rangeMeasurement.primary.satellite.name} -> ${rangeMeasurement.secondary.satellite.name}: ${formatNumber(rangeMeasurement.distanceKm, 1)} km` : "Select two satellites to measure range."}</p>
+            <div className="mt-3 grid gap-2 md:grid-cols-2">
+              <select value={rangePrimaryId} onChange={(event) => onUpdateRangePrimary(event.target.value)} className="border border-white/10 bg-black/45 px-3 py-2 text-xs text-zinc-100 outline-none transition focus:border-cyan-300">
+                {!rangePrimaryId && <option value="">Primary: Select satellite</option>}
+                {satellites.map((satellite) => <option key={satellite.id} value={satellite.id}>Primary: {satellite.name}</option>)}
+              </select>
+              <select value={rangeSecondaryId} onChange={(event) => onUpdateRangeSecondary(event.target.value)} className="border border-white/10 bg-black/45 px-3 py-2 text-xs text-zinc-100 outline-none transition focus:border-cyan-300">
+                {!rangeSecondaryId && <option value="">Secondary: Select satellite</option>}
+                {satellites.map((satellite) => <option key={satellite.id} value={satellite.id} disabled={satellite.id === rangePrimaryId}>Secondary: {satellite.name}</option>)}
+              </select>
+            </div>
+          </HudPanel>
+        )}
+
+        {tab === "conjunction" && (
+          <ConjunctionPanel
+            conjunctionSnapshots={conjunctionSnapshots}
+            selectedConjunctionId={selectedConjunctionId}
+            showConjunctions={showConjunctions}
+            disabled={!canShowConjunctions}
+            onSelectConjunction={onSelectConjunction}
+            onToggleConjunctions={onToggleConjunctions}
+            onRefreshConjunctions={onRefreshConjunctions}
+          />
+        )}
+
+        {tab === "maneuver" && (
+          <ManeuverPanel
+            maneuverSnapshots={maneuverSnapshots}
+            selectedManeuverId={selectedManeuverId}
+            showManeuvers={showManeuvers}
+            disabled={!canShowManeuvers}
+            onSelectManeuver={onSelectManeuver}
+            onToggleManeuvers={onToggleManeuvers}
+            onOpenManeuverModal={onOpenManeuverModal}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function WorkspaceLibraryPanel({
   orbitLibrary,
   missionLibrary,
-  templateLibrary,
-  orbitTemplateLibrary,
   activeOrbitId,
   activeMissionId,
   onLoadOrbit,
@@ -5086,28 +5354,11 @@ function WorkspaceLibraryPanel({
   onDeleteMission,
   onCloneMission,
   onExportMission,
-  onSaveCurrentMissionAsTemplate,
-  onRenameTemplate,
-  onEditTemplate,
-  onCloneTemplate,
-  onDeleteTemplate,
-  onExportTemplate,
-  onSaveCurrentOrbitAsTemplate,
-  onCreateOrbitFromTemplate,
-  onRenameOrbitTemplate,
-  onEditOrbitTemplate,
-  onCloneOrbitTemplate,
-  onDeleteOrbitTemplate,
-  onExportOrbitTemplate,
   onExportWorkspace,
   onImportWorkspace,
-  onImportTemplate,
-  onImportOrbitTemplate,
 }: {
   orbitLibrary: StoredOrbit[];
   missionLibrary: MissionLibraryState;
-  templateLibrary: MissionTemplateLibraryState;
-  orbitTemplateLibrary: OrbitTemplateLibraryState;
   activeOrbitId: string | null;
   activeMissionId: string | null;
   onLoadOrbit: (orbit: StoredOrbit) => void;
@@ -5121,23 +5372,8 @@ function WorkspaceLibraryPanel({
   onDeleteMission: (mission: StoredMission) => void;
   onCloneMission: (mission: StoredMission) => void;
   onExportMission: (mission: StoredMission) => void;
-  onSaveCurrentMissionAsTemplate: () => void;
-  onRenameTemplate: (template: MissionTemplate) => void;
-  onEditTemplate: (template: MissionTemplate) => void;
-  onCloneTemplate: (template: MissionTemplate) => void;
-  onDeleteTemplate: (template: MissionTemplate) => void;
-  onExportTemplate: (template: MissionTemplate) => void;
-  onSaveCurrentOrbitAsTemplate: () => void;
-  onCreateOrbitFromTemplate: (template: OrbitTemplate) => void;
-  onRenameOrbitTemplate: (template: OrbitTemplate) => void;
-  onEditOrbitTemplate: (template: OrbitTemplate) => void;
-  onCloneOrbitTemplate: (template: OrbitTemplate) => void;
-  onDeleteOrbitTemplate: (template: OrbitTemplate) => void;
-  onExportOrbitTemplate: (template: OrbitTemplate) => void;
   onExportWorkspace: () => void;
   onImportWorkspace: () => void;
-  onImportTemplate: () => void;
-  onImportOrbitTemplate: () => void;
 }) {
   const missionsByOrbit = useMemo(() => {
     const map = new Map<string, StoredMission[]>();
@@ -5164,7 +5400,7 @@ function WorkspaceLibraryPanel({
         <div>
           <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Workspace</p>
           <p className="mt-1 text-[11px] text-zinc-500">
-            {orbitLibrary.length} orbits / {missionLibrary.missions.length} missions / {templateLibrary.templates.length + orbitTemplateLibrary.templates.length} templates
+            {orbitLibrary.length} orbits / {missionLibrary.missions.length} missions
           </p>
         </div>
         <div className="flex gap-1.5">
@@ -5177,42 +5413,6 @@ function WorkspaceLibraryPanel({
         <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Active Context</p>
         <p className="mt-1 text-zinc-300">Orbit: <span className="font-mono text-cyan-100">{activeOrbitId ?? "--"}</span></p>
         <p className="mt-1 text-zinc-300">Mission: <span className="font-mono text-cyan-100">{activeMissionId ?? "--"}</span></p>
-      </div>
-
-      <div className="mt-3">
-        <div className="flex items-center justify-between gap-3">
-          <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Orbit Template Library</p>
-          <div className="flex gap-1.5">
-            <button type="button" onClick={onSaveCurrentOrbitAsTemplate} className="workspace-action">Save</button>
-            <button type="button" onClick={onImportOrbitTemplate} className="workspace-action">Import</button>
-          </div>
-        </div>
-        <div className="mt-2 max-h-[24vh] space-y-2 overflow-auto pr-1">
-          {orbitTemplateLibrary.templates.length === 0 ? (
-            <p className="border border-white/10 bg-black/25 px-3 py-2 font-mono text-[10px] uppercase text-zinc-600">No orbit templates yet</p>
-          ) : (
-            orbitTemplateLibrary.templates.map((template) => (
-              <div key={template.templateId} className="border border-white/10 bg-black/25 p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold text-white">{template.name}</p>
-                    <p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">{template.category} / {orbitTemplateTypeLabel(template)}</p>
-                  </div>
-                  <span className="font-mono text-[10px] text-cyan-200">{template.tags.slice(0, 2).join(", ") || "orbit"}</span>
-                </div>
-                {template.description && <p className="mt-2 line-clamp-2 text-[11px] leading-5 text-zinc-500">{template.description}</p>}
-                <div className="mt-3 grid grid-cols-6 gap-1">
-                  <button type="button" onClick={() => onCreateOrbitFromTemplate(template)} className="workspace-action">Create</button>
-                  <button type="button" onClick={() => onRenameOrbitTemplate(template)} className="workspace-action">Name</button>
-                  <button type="button" onClick={() => onEditOrbitTemplate(template)} className="workspace-action">Edit</button>
-                  <button type="button" onClick={() => onCloneOrbitTemplate(template)} className="workspace-action">Clone</button>
-                  <button type="button" onClick={() => onExportOrbitTemplate(template)} className="workspace-action">JSON</button>
-                  <button type="button" onClick={() => onDeleteOrbitTemplate(template)} className="workspace-action danger">Del</button>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
       </div>
 
       <div className="mt-3">
@@ -5266,17 +5466,108 @@ function WorkspaceLibraryPanel({
         </div>
       </div>
 
-      <div className="mt-3">
+      <div className="mt-3 border border-white/10 bg-black/25 px-3 py-2">
+        <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Auth Ready</p>
+        <p className="mt-1 text-[11px] leading-5 text-zinc-500">
+          Anonymous local workspace now. Future login can sync this Orbit / Mission / Event graph without changing propagation.
+        </p>
+      </div>
+    </HudPanel>
+  );
+}
+
+function TemplateLibraryPanel({
+  templateLibrary,
+  orbitTemplateLibrary,
+  onSaveCurrentMissionAsTemplate,
+  onRenameTemplate,
+  onEditTemplate,
+  onCloneTemplate,
+  onDeleteTemplate,
+  onExportTemplate,
+  onSaveCurrentOrbitAsTemplate,
+  onCreateOrbitFromTemplate,
+  onRenameOrbitTemplate,
+  onEditOrbitTemplate,
+  onCloneOrbitTemplate,
+  onDeleteOrbitTemplate,
+  onExportOrbitTemplate,
+  onImportTemplate,
+  onImportOrbitTemplate,
+}: {
+  templateLibrary: MissionTemplateLibraryState;
+  orbitTemplateLibrary: OrbitTemplateLibraryState;
+  onSaveCurrentMissionAsTemplate: () => void;
+  onRenameTemplate: (template: MissionTemplate) => void;
+  onEditTemplate: (template: MissionTemplate) => void;
+  onCloneTemplate: (template: MissionTemplate) => void;
+  onDeleteTemplate: (template: MissionTemplate) => void;
+  onExportTemplate: (template: MissionTemplate) => void;
+  onSaveCurrentOrbitAsTemplate: () => void;
+  onCreateOrbitFromTemplate: (template: OrbitTemplate) => void;
+  onRenameOrbitTemplate: (template: OrbitTemplate) => void;
+  onEditOrbitTemplate: (template: OrbitTemplate) => void;
+  onCloneOrbitTemplate: (template: OrbitTemplate) => void;
+  onDeleteOrbitTemplate: (template: OrbitTemplate) => void;
+  onExportOrbitTemplate: (template: OrbitTemplate) => void;
+  onImportTemplate: () => void;
+  onImportOrbitTemplate: () => void;
+}) {
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <HudPanel>
         <div className="flex items-center justify-between gap-3">
-          <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Template Library</p>
+          <div>
+            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Orbit Templates</p>
+            <p className="mt-1 text-[11px] text-zinc-500">{orbitTemplateLibrary.templates.length} reusable orbit definitions</p>
+          </div>
           <div className="flex gap-1.5">
-            <button type="button" onClick={onSaveCurrentMissionAsTemplate} className="workspace-action">Save</button>
+            <button type="button" onClick={onSaveCurrentOrbitAsTemplate} className="workspace-action">Save Current</button>
+            <button type="button" onClick={onImportOrbitTemplate} className="workspace-action">Import</button>
+          </div>
+        </div>
+        <div className="mt-3 max-h-[58vh] space-y-2 overflow-auto pr-1">
+          {orbitTemplateLibrary.templates.length === 0 ? (
+            <p className="border border-white/10 bg-black/25 px-3 py-2 font-mono text-[10px] uppercase text-zinc-600">No orbit templates yet</p>
+          ) : (
+            orbitTemplateLibrary.templates.map((template) => (
+              <div key={template.templateId} className="border border-white/10 bg-black/25 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-white">{template.name}</p>
+                    <p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">{template.category} / {orbitTemplateTypeLabel(template)}</p>
+                  </div>
+                  <span className="font-mono text-[10px] text-cyan-200">{template.tags.slice(0, 2).join(", ") || "orbit"}</span>
+                </div>
+                {template.description && <p className="mt-2 line-clamp-2 text-[11px] leading-5 text-zinc-500">{template.description}</p>}
+                <div className="mt-3 grid grid-cols-6 gap-1">
+                  <button type="button" onClick={() => onCreateOrbitFromTemplate(template)} className="workspace-action">Use</button>
+                  <button type="button" onClick={() => onRenameOrbitTemplate(template)} className="workspace-action">Name</button>
+                  <button type="button" onClick={() => onEditOrbitTemplate(template)} className="workspace-action">Edit</button>
+                  <button type="button" onClick={() => onCloneOrbitTemplate(template)} className="workspace-action">Clone</button>
+                  <button type="button" onClick={() => onExportOrbitTemplate(template)} className="workspace-action">JSON</button>
+                  <button type="button" onClick={() => onDeleteOrbitTemplate(template)} className="workspace-action danger">Del</button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </HudPanel>
+
+      <HudPanel>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Mission Templates</p>
+            <p className="mt-1 text-[11px] text-zinc-500">{templateLibrary.templates.length} reusable timelines</p>
+          </div>
+          <div className="flex gap-1.5">
+            <button type="button" onClick={onSaveCurrentMissionAsTemplate} className="workspace-action">Save Current</button>
             <button type="button" onClick={onImportTemplate} className="workspace-action">Import</button>
           </div>
         </div>
-        <div className="mt-2 max-h-[24vh] space-y-2 overflow-auto pr-1">
+        <div className="mt-3 max-h-[58vh] space-y-2 overflow-auto pr-1">
           {templateLibrary.templates.length === 0 ? (
-            <p className="border border-white/10 bg-black/25 px-3 py-2 font-mono text-[10px] uppercase text-zinc-600">No templates yet</p>
+            <p className="border border-white/10 bg-black/25 px-3 py-2 font-mono text-[10px] uppercase text-zinc-600">No mission templates yet</p>
           ) : (
             templateLibrary.templates.map((template) => (
               <div key={template.templateId} className="border border-white/10 bg-black/25 p-3">
@@ -5299,15 +5590,8 @@ function WorkspaceLibraryPanel({
             ))
           )}
         </div>
-      </div>
-
-      <div className="mt-3 border border-white/10 bg-black/25 px-3 py-2">
-        <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Auth Ready</p>
-        <p className="mt-1 text-[11px] leading-5 text-zinc-500">
-          Anonymous local workspace now. Future login can sync this Orbit / Mission / Event graph without changing propagation.
-        </p>
-      </div>
-    </HudPanel>
+      </HudPanel>
+    </div>
   );
 }
 
