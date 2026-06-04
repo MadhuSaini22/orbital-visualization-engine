@@ -117,7 +117,12 @@ public class NumericalPropagator implements OrbitPropagator {
     Orbit initialOrbit = initialOrbit(context);
     SpacecraftState initialState = new SpacecraftState(initialOrbit, context.spacecraft().wetMassKg());
 
-    DormandPrince853Integrator integrator = new DormandPrince853Integrator(0.1, 120.0, 1.0, 1.0);
+    NumericalIntegratorSettings settings = context.integratorSettings();
+    DormandPrince853Integrator integrator = new DormandPrince853Integrator(
+        settings.minStep(),
+        settings.maxStep(),
+        settings.absTolerance(),
+        settings.relTolerance());
     org.orekit.propagation.numerical.NumericalPropagator propagator =
         new org.orekit.propagation.numerical.NumericalPropagator(integrator);
     propagator.setOrbitType(OrbitType.CARTESIAN);

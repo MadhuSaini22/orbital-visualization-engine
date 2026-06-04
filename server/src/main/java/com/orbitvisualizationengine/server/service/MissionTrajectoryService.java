@@ -2,10 +2,12 @@ package com.orbitvisualizationengine.server.service;
 
 import com.orbitvisualizationengine.server.domain.EphemerisState;
 import com.orbitvisualizationengine.server.domain.Mission;
+import com.orbitvisualizationengine.server.domain.PropagationProfile;
 import com.orbitvisualizationengine.server.domain.PropagatorType;
 import com.orbitvisualizationengine.server.dto.MissionTrajectoryRequest;
 import com.orbitvisualizationengine.server.propagation.MissionPropagationContextFactory;
 import com.orbitvisualizationengine.server.propagation.NumericalPropagator;
+import com.orbitvisualizationengine.server.propagation.NumericalIntegratorSettings;
 import com.orbitvisualizationengine.server.propagation.PropagationContext;
 import com.orbitvisualizationengine.server.propagation.PropagationManeuverCommand;
 import java.util.List;
@@ -62,9 +64,10 @@ public class MissionTrajectoryService {
     PropagationContext context = mission.subjectOrbitId() == null
         ? contextFactory.buildLegacyFreeContext(mission.subjectNoradId())
         : contextFactory.buildManualOrbitContext(mission.subjectOrbitId());
-    var missionConfig = propagationProfiles == null
+    PropagationProfile missionProfile = propagationProfiles == null ? null : propagationProfiles.getOrCreateMissionProfile(mission);
+    var missionConfig = missionProfile == null
         ? context.analysisConfig()
-        : propagationProfiles.missionAnalysisConfig(mission);
+        : missionProfile.toAnalysisConfig(mission.subjectNoradId() == null ? 0 : mission.subjectNoradId());
     if (!commands.isEmpty() && !missionConfig.maneuverModelEnabled()) {
       throw new IllegalArgumentException(
           "Mission contains finite-burn events, but the mission propagation profile has maneuver model disabled.");
@@ -72,6 +75,9 @@ public class MissionTrajectoryService {
     context = context
         .withAnalysisConfig(missionConfig)
         .withManeuverCommands(commands);
+    if (missionProfile != null) {
+      context = context.withIntegratorSettings(NumericalIntegratorSettings.fromProfile(missionProfile));
+    }
     return numericalPropagator.trajectory(context, request.startTime(), request.endTime(), request.stepSeconds());
   }
 }

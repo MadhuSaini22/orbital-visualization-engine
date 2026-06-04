@@ -12,7 +12,25 @@ public record PropagationContext(
     SatelliteAnalysisConfig analysisConfig,
     SpacecraftModel spacecraft,
     List<ManeuverEvent> maneuvers,
-    List<PropagationManeuverCommand> maneuverCommands) {
+    List<PropagationManeuverCommand> maneuverCommands,
+    NumericalIntegratorSettings integratorSettings) {
+
+  public PropagationContext(
+      int noradId,
+      OrbitSeed seed,
+      SatelliteAnalysisConfig analysisConfig,
+      SpacecraftModel spacecraft,
+      List<ManeuverEvent> maneuvers,
+      List<PropagationManeuverCommand> maneuverCommands) {
+    this(
+        noradId,
+        seed,
+        analysisConfig,
+        spacecraft,
+        maneuvers,
+        maneuverCommands,
+        NumericalIntegratorSettings.defaults());
+  }
 
   public PropagationContext(
       int noradId,
@@ -33,11 +51,15 @@ public record PropagationContext(
   }
 
   public PropagationContext withManeuverCommands(List<PropagationManeuverCommand> commands) {
-    return new PropagationContext(noradId, seed, analysisConfig, spacecraft, maneuvers, commands);
+    return new PropagationContext(noradId, seed, analysisConfig, spacecraft, maneuvers, commands, integratorSettings);
   }
 
   public PropagationContext withAnalysisConfig(SatelliteAnalysisConfig config) {
-    return new PropagationContext(noradId, seed, config, SpacecraftModel.fromConfig(config), maneuvers, maneuverCommands);
+    return new PropagationContext(noradId, seed, config, SpacecraftModel.fromConfig(config), maneuvers, maneuverCommands, integratorSettings);
+  }
+
+  public PropagationContext withIntegratorSettings(NumericalIntegratorSettings settings) {
+    return new PropagationContext(noradId, seed, analysisConfig, spacecraft, maneuvers, maneuverCommands, settings);
   }
 
   public TLE tle() {

@@ -4118,6 +4118,7 @@ export function OrbitalDashboard() {
             trajectoryOverlay={missionTrajectoryOverlay}
             trajectoryStale={missionTrajectoryIsStale}
             propagationProfile={missionPropagationProfile}
+            propagationProfileStatus={propagationProfileStatus}
             trajectoryCadenceInput={missionTrajectoryCadenceInput}
             trajectoryCadenceError={missionTrajectoryCadenceValidation}
             dragEventId={timelineDragEventId}
@@ -4133,6 +4134,7 @@ export function OrbitalDashboard() {
             onSelectEvent={setSelectedTimelineEventId}
             onGenerateTrajectory={generateMissionTrajectory}
             onTrajectoryCadenceChange={setMissionTrajectoryCadenceInput}
+            onUpdatePropagationProfile={updateMissionPropagationProfileAction}
             onToggleComparison={() => setShowMissionComparison((value) => !value)}
             onDragEvent={setTimelineDragEventId}
             onDropEvent={reorderTimelineEvent}
@@ -5681,6 +5683,7 @@ function AnalysisModalContent({
                 key={`${missionPropagationProfile.id}-${missionPropagationProfile.updatedAt}`}
                 profile={missionPropagationProfile}
                 status={propagationProfileStatus}
+                surface="analysis"
                 onUpdate={onUpdatePropagationProfile}
               />
             ) : (
@@ -5707,14 +5710,20 @@ function AnalysisModalContent({
 function PropagationProfileEditor({
   profile,
   status,
+  surface = "analysis",
+  defaultShowAdvanced = false,
+  defaultShowExpert = false,
   onUpdate,
 }: {
   profile: BackendPropagationProfile;
   status: string | null;
+  surface?: "planner" | "analysis";
+  defaultShowAdvanced?: boolean;
+  defaultShowExpert?: boolean;
   onUpdate: (request: UpdatePropagationProfileRequest) => Promise<void>;
 }) {
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [showExpert, setShowExpert] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(defaultShowAdvanced);
+  const [showExpert, setShowExpert] = useState(defaultShowExpert);
   const [setupDraft, setSetupDraft] = useState(() => propagationSetupDraftFromProfile(profile));
   const [advancedDraft, setAdvancedDraft] = useState(() => spacecraftDraftFromProfile(profile));
   const [expertDraft, setExpertDraft] = useState(() => integratorDraftFromProfile(profile));
@@ -5762,11 +5771,17 @@ function PropagationProfileEditor({
     <div className="mt-5 border border-cyan-300/15 bg-black/20 p-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-cyan-300">Propagation Setup</p>
-          <p className="mt-1 text-xs text-zinc-500">{profile.name} · authoritative mission configuration used by trajectory generation and Orekit force-model construction.</p>
+          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-cyan-300">
+            {surface === "planner" ? "Mission Definition: Propagation Setup" : "Analysis: Propagation Setup"}
+          </p>
+          <p className="mt-1 text-xs text-zinc-500">
+            {surface === "planner"
+              ? `${profile.name} · system defaults are visible here before the first run; edits are saved to the backend mission profile used by trajectory generation and Orekit propagator construction.`
+              : `${profile.name} · review or edit the mission profile that generated, or will regenerate, trajectory results.`}
+          </p>
         </div>
         <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
-          {profile.preset.replaceAll("_", " ")}
+          {profile.preset.replaceAll("_", " ")} default
         </span>
       </div>
 
@@ -5783,7 +5798,17 @@ function PropagationProfileEditor({
             <option value="TLE_SGP4">TLE SGP4</option>
           </select>
         </label>
-        <DetailMetric label="Integrator" value="Dormand Prince 853" />
+        <label className="block">
+          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">Integrator Type</span>
+          <select
+            value="DORMAND_PRINCE_853"
+            disabled
+            className="mt-1 w-full border border-white/10 bg-black/35 px-2 py-1.5 text-xs text-zinc-400 outline-none"
+            title="Current backend numerical solver. Additional integrator families require backend support before they can be selected."
+          >
+            <option value="DORMAND_PRINCE_853">Dormand Prince 853</option>
+          </select>
+        </label>
         <DetailMetric label="Profile Revision" value={compactIsoUtc(profile.updatedAt)} />
         <ProfileNumberInput
           label="Gravity Degree"
@@ -5818,13 +5843,13 @@ function PropagationProfileEditor({
             </button>
           );
         })}
-        <button type="button" disabled className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-600" title="Future force model">
+        <button type="button" disabled className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-600" title="Future force model. Not currently sent to Orekit.">
           Relativity Off
         </button>
-        <button type="button" disabled className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-600" title="Future force model">
+        <button type="button" disabled className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-600" title="Future force model. Not currently sent to Orekit.">
           Solid Tides Off
         </button>
-        <button type="button" disabled className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-600" title="Future force model">
+        <button type="button" disabled className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-600" title="Future force model. Not currently sent to Orekit.">
           Ocean Tides Off
         </button>
       </div>
@@ -6267,6 +6292,7 @@ function MissionTimelinePanel({
   trajectoryOverlay,
   trajectoryStale,
   propagationProfile,
+  propagationProfileStatus,
   trajectoryCadenceInput,
   trajectoryCadenceError,
   dragEventId,
@@ -6282,6 +6308,7 @@ function MissionTimelinePanel({
   onSelectEvent,
   onGenerateTrajectory,
   onTrajectoryCadenceChange,
+  onUpdatePropagationProfile,
   onToggleComparison,
   onDragEvent,
   onDropEvent,
@@ -6299,6 +6326,7 @@ function MissionTimelinePanel({
   trajectoryOverlay: MissionTrajectoryOverlay | null;
   trajectoryStale: boolean;
   propagationProfile: BackendPropagationProfile | null;
+  propagationProfileStatus: string | null;
   trajectoryCadenceInput: string;
   trajectoryCadenceError: string | null;
   dragEventId: string | null;
@@ -6314,6 +6342,7 @@ function MissionTimelinePanel({
   onSelectEvent: (eventId: string) => void;
   onGenerateTrajectory: () => void;
   onTrajectoryCadenceChange: (value: string) => void;
+  onUpdatePropagationProfile: (request: UpdatePropagationProfileRequest) => Promise<void>;
   onToggleComparison: () => void;
   onDragEvent: (eventId: string | null) => void;
   onDropEvent: (sourceEventId: string, targetEventId: string) => void;
@@ -6329,6 +6358,9 @@ function MissionTimelinePanel({
     customVisibleSeconds: Math.max(60, Number(customZoomHours) * 3600 || 3 * 3600),
   }), [customZoomHours, snapMode, zoomPreset]);
   const analysis = useMemo(() => timelineAnalysis(mission, events), [events, mission]);
+  const trajectoryGenerationBlocker = !propagationProfile
+    ? "Mission propagation profile is still loading. Configure propagation before generating trajectory."
+    : trajectoryCadenceError;
   const layoutModel = useMemo(() => mission
     ? buildTimelineLayoutModel(mission, events, interactionModel, selectedEventId, simulationTimeIso)
     : null, [events, interactionModel, mission, selectedEventId, simulationTimeIso]);
@@ -6455,6 +6487,29 @@ function MissionTimelinePanel({
           <div className="border-t border-white/10 pt-2 text-[11px] leading-5 text-zinc-500">
             Trajectory generation currently uses a separate preview window centered on the simulation clock.
           </div>
+        </div>
+      )}
+
+      {mission && (
+        <div className="mt-3 border border-cyan-300/15 bg-black/25 p-3">
+          {propagationProfile ? (
+            <PropagationProfileEditor
+              key={`planner-${propagationProfile.id}-${propagationProfile.updatedAt}`}
+              profile={propagationProfile}
+              status={propagationProfileStatus}
+              surface="planner"
+              defaultShowAdvanced
+              defaultShowExpert
+              onUpdate={onUpdatePropagationProfile}
+            />
+          ) : (
+            <div className="border border-amber-300/25 bg-amber-300/[0.05] p-3">
+              <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-amber-200">Mission Definition Incomplete</p>
+              <p className="mt-2 text-xs leading-5 text-amber-100">
+                Mission propagation profile is still loading. Propagator, force models, spacecraft parameters, integrator settings, and cadence must be visible before the first trajectory run.
+              </p>
+            </div>
+          )}
         </div>
       )}
 
@@ -6612,8 +6667,8 @@ function MissionTimelinePanel({
           <button
             type="button"
             onClick={onGenerateTrajectory}
-            disabled={isTrajectoryLoading || Boolean(trajectoryCadenceError)}
-            title={trajectoryCadenceError ?? "Generate trajectory using the displayed mission run configuration."}
+            disabled={isTrajectoryLoading || Boolean(trajectoryGenerationBlocker)}
+            title={trajectoryGenerationBlocker ?? "Generate trajectory using the displayed mission run configuration."}
             className="border border-cyan-300 bg-cyan-300 px-3 py-2 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-950 transition hover:bg-cyan-200 disabled:cursor-wait disabled:opacity-60"
           >
             {isTrajectoryLoading ? "Generating" : trajectoryOverlay ? "Update Trajectory" : "Generate Trajectory"}
