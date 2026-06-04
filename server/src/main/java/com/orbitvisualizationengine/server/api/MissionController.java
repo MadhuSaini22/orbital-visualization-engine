@@ -111,16 +111,15 @@ public class MissionController {
   PropagationResponse trajectory(
       @PathVariable String missionId,
       @Valid @RequestBody MissionTrajectoryRequest request) {
-    var states = trajectories.trajectory(missionId, request);
+    var result = trajectories.trajectoryResult(missionId, request);
     var mission = missions.get(missionId);
-    var config = propagationProfiles.missionAnalysisConfig(mission);
     return new PropagationResponse(
         mission.subjectNoradId() == null ? 0 : mission.subjectNoradId(),
-        "OREKIT_NUMERICAL",
+        result.model(),
         "ITRF",
-        config,
+        result.analysisConfig(),
         List.of(),
-        states);
+        result.states());
   }
 
   @GetMapping("/{missionId}/propagation-profile")
