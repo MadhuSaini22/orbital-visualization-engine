@@ -177,6 +177,14 @@ export type BackendAnalysisConfig = {
   thirdBodySunEnabled: boolean;
   thirdBodyMoonEnabled: boolean;
   maneuverModelEnabled: boolean;
+  dryMassKg: number;
+  fuelMassKg: number;
+  dragAreaM2: number;
+  dragCoefficient: number;
+  srpAreaM2: number;
+  reflectivityCoefficient: number;
+  nominalThrustN: number;
+  nominalIspS: number;
   notes: string | null;
   updatedAt: string;
 };
@@ -186,6 +194,20 @@ export type BackendAnalysisConfigResponse = {
   activeModes: string[];
   warnings: string[];
 };
+
+export type BackendPropagationProfile = Omit<BackendAnalysisConfig, "noradId"> & {
+  id: string;
+  ownerType: "SATELLITE" | "MANUAL_ORBIT" | "MISSION";
+  ownerId: string;
+  name: string;
+  integratorMinStep: number;
+  integratorMaxStep: number;
+  integratorAbsTol: number;
+  integratorRelTol: number;
+  createdAt: string;
+};
+
+export type UpdatePropagationProfileRequest = Partial<Omit<BackendPropagationProfile, "id" | "ownerType" | "ownerId" | "createdAt" | "updatedAt">>;
 
 export type CreateManualOrbitRequest = {
   name: string;
@@ -345,6 +367,20 @@ export async function fetchMissionTrajectory(
       endTime,
       stepSeconds,
     }),
+  });
+}
+
+export async function fetchMissionPropagationProfile(missionId: string) {
+  return fetchJson<BackendPropagationProfile>(`/api/missions/${missionId}/propagation-profile`);
+}
+
+export async function updateMissionPropagationProfile(missionId: string, request: UpdatePropagationProfileRequest) {
+  return fetchJson<BackendPropagationProfile>(`/api/missions/${missionId}/propagation-profile`, {}, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
   });
 }
 

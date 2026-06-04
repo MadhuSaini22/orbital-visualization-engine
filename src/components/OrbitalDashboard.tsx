@@ -35,6 +35,7 @@ import {
   fetchConjunctions,
   fetchCurrentOrbitState,
   fetchMissionTimelineEvents,
+  fetchMissionPropagationProfile,
   fetchMissionTrajectory,
   fetchMissions,
   fetchManualOrbitState,
@@ -44,6 +45,7 @@ import {
   reorderMissionTimelineEvents,
   setAnalysisMode,
   setMissionTimelineEventEnabled,
+  updateMissionPropagationProfile,
   updateMissionTimelineEvent,
 } from "@/services/orbitServerApi";
 import {
@@ -86,10 +88,12 @@ import type {
   BackendConjunctionRecord,
   BackendEphemerisState,
   BackendManeuverEvent,
+  BackendPropagationProfile,
   CreateTimelineEventRequest,
   CreateManualOrbitRequest,
   ManualOrbitType,
   PropagatorTypeId,
+  UpdatePropagationProfileRequest,
 } from "@/services/orbitServerApi";
 import type {
   MissionLibraryState,
@@ -1678,6 +1682,8 @@ export function OrbitalDashboard() {
   const [selectedConjunctionId, setSelectedConjunctionId] = useState<string | null>(null);
   const [dynamicDataMessage, setDynamicDataMessage] = useState<string | null>(null);
   const [analysisConfig, setAnalysisConfig] = useState<BackendAnalysisConfigResponse | null>(null);
+  const [missionPropagationProfile, setMissionPropagationProfile] = useState<BackendPropagationProfile | null>(null);
+  const [propagationProfileStatus, setPropagationProfileStatus] = useState<string | null>(null);
   const [analysisMessage, setAnalysisMessage] = useState<string | null>(null);
   const [serverStateBySatelliteId, setServerStateBySatelliteId] = useState<Map<string, OrbitState>>(() => new Map());
   const [serverOrbitSnapshots, setServerOrbitSnapshots] = useState<SatelliteSnapshot[] | null>(null);
@@ -2087,6 +2093,7 @@ export function OrbitalDashboard() {
       setTimelineStatus("This cloned/imported mission is stored locally. Recreate it against the backend before trajectory generation.");
       toast.info("Local mission opened as a library draft.");
       setMissionTimelineEvents(eventsFromStoredMission(missionLibrary, storedMission.missionId));
+      setMissionPropagationProfile(null);
       return;
     }
     setMission(backendMission);
@@ -2660,6 +2667,33 @@ export function OrbitalDashboard() {
     return events;
   }, [rememberMissionEvents]);
 
+  const refreshMissionPropagationProfile = useCallback(async (missionId: string) => {
+    const profile = await fetchMissionPropagationProfile(missionId);
+    setMissionPropagationProfile(profile);
+    setPropagationProfileStatus("Mission propagation profile loaded.");
+    return profile;
+  }, []);
+
+  const updateMissionPropagationProfileAction = useCallback(async (request: UpdatePropagationProfileRequest) => {
+    if (!mission) {
+      const message = "Open a mission before editing its propagation profile.";
+      setPropagationProfileStatus(message);
+      toast.error(message);
+      return;
+    }
+    try {
+      setPropagationProfileStatus("Updating mission propagation profile...");
+      const updated = await updateMissionPropagationProfile(mission.id, request);
+      setMissionPropagationProfile(updated);
+      setPropagationProfileStatus("Mission propagation profile updated.");
+      toast.success("Propagation profile updated.");
+    } catch (error) {
+      const message = userErrorMessage(error, "Unable to update propagation profile.");
+      setPropagationProfileStatus(message);
+      toast.error(message);
+    }
+  }, [mission]);
+
   const openMissionSetup = useCallback(() => {
     if (!selectedSnapshot?.satellite || (!selectedNoradId && !manualOrbitId)) {
       const message = "Select a catalog or manual backend orbit first.";
@@ -2745,6 +2779,7 @@ export function OrbitalDashboard() {
       if (selectedTemplate) {
         await instantiateTemplateEvents(created, selectedTemplate);
       }
+      await refreshMissionPropagationProfile(created.id);
       await refreshMissionTimeline(created.id);
       setIsMissionSetupOpen(false);
       setTimelineStatus(selectedTemplate ? `Mission created from template "${selectedTemplate.name}".` : "Mission timeline initialized.");
@@ -2754,7 +2789,7 @@ export function OrbitalDashboard() {
       setTimelineStatus(message);
       toast.error(message);
     }
-  }, [activeStoredOrbit, instantiateTemplateEvents, manualOrbitId, missionSetupDraft, refreshMissionTimeline, rememberMission, selectedNoradId, selectedSnapshot, templateLibrary.templates]);
+  }, [activeStoredOrbit, instantiateTemplateEvents, manualOrbitId, missionSetupDraft, refreshMissionPropagationProfile, refreshMissionTimeline, rememberMission, selectedNoradId, selectedSnapshot, templateLibrary.templates]);
 
   const openCreateTimelineModal = useCallback((type: TimelineEditorDraft["type"] = "FINITE_BURN") => {
     const offsetSeconds = mission
@@ -2980,6 +3015,7 @@ export function OrbitalDashboard() {
         message: `${missionResponse.states.length} mission samples generated.`,
       });
       setShowMissionComparison(true);
+      await refreshMissionPropagationProfile(mission.id);
       setTimelineStatus("Mission trajectory generated.");
       toast.success("Mission trajectory generated.");
       setActiveCommandModal((current) => current === "mission" ? null : current);
@@ -2990,7 +3026,38 @@ export function OrbitalDashboard() {
     } finally {
       setIsMissionTrajectoryLoading(false);
     }
-  }, [manualOrbitId, mission, selectedNoradId, selectedSnapshot, trajectoryAnchorTime, trajectoryWindowOptions.stepSec]);
+  }, [manualOrbitId, mission, refreshMissionPropagationProfile, selectedNoradId, selectedSnapshot, trajectoryAnchorTime, trajectoryWindowOptions.stepSec]);
+
+  useEffect(() => {
+    let ignore = false;
+
+    async function loadMissionProfile() {
+      if (!mission) {
+        setMissionPropagationProfile(null);
+        setPropagationProfileStatus(null);
+        return;
+      }
+      try {
+        const profile = await fetchMissionPropagationProfile(mission.id);
+        if (!ignore) {
+          setMissionPropagationProfile(profile);
+          setPropagationProfileStatus("Mission propagation profile loaded.");
+        }
+      } catch (error) {
+        if (!ignore) {
+          const message = userErrorMessage(error, "Unable to load mission propagation profile.");
+          setMissionPropagationProfile(null);
+          setPropagationProfileStatus(message);
+        }
+      }
+    }
+
+    loadMissionProfile();
+
+    return () => {
+      ignore = true;
+    };
+  }, [mission]);
 
   const handleCesiumClockTick = useCallback((timeIso: string) => {
     viewerClockAvailableRef.current = true;
@@ -3019,6 +3086,8 @@ export function OrbitalDashboard() {
           setMissionTimelineEvents([]);
           setSelectedTimelineEventId(null);
           setMissionTrajectoryOverlay(null);
+          setMissionPropagationProfile(null);
+          setPropagationProfileStatus(null);
           setTimelineStatus(null);
         }
         return;
@@ -3040,6 +3109,8 @@ export function OrbitalDashboard() {
         if (!selectedMission) {
           setMissionTimelineEvents([]);
           setSelectedTimelineEventId(null);
+          setMissionPropagationProfile(null);
+          setPropagationProfileStatus(null);
           setTimelineStatus(null);
           return;
         }
@@ -3054,6 +3125,8 @@ export function OrbitalDashboard() {
           setMission(null);
           setMissionTimelineEvents([]);
           setSelectedTimelineEventId(null);
+          setMissionPropagationProfile(null);
+          setPropagationProfileStatus(null);
           setTimelineStatus(error instanceof Error ? error.message : "Unable to load mission timeline.");
         }
       }
@@ -3966,6 +4039,8 @@ export function OrbitalDashboard() {
             selectedNoradId={selectedNoradId}
             canUseAnalysisConfig={canUseAnalysisConfig}
             analysisConfig={analysisConfig}
+            missionPropagationProfile={missionPropagationProfile}
+            propagationProfileStatus={propagationProfileStatus}
             analysisMessage={analysisMessage}
             rangePrimaryId={rangePrimaryId}
             rangeSecondaryId={rangeSecondaryId}
@@ -3986,6 +4061,7 @@ export function OrbitalDashboard() {
             showComparison={showMissionComparison}
             onApplyPreset={applySelectedPreset}
             onToggleMode={toggleSelectedMode}
+            onUpdatePropagationProfile={updateMissionPropagationProfileAction}
             onToggleRangeCheck={toggleRangeCheck}
             onUpdateRangePrimary={updateRangePrimary}
             onUpdateRangeSecondary={updateRangeSecondary}
@@ -5194,6 +5270,8 @@ function AnalysisModalContent({
   selectedNoradId,
   canUseAnalysisConfig,
   analysisConfig,
+  missionPropagationProfile,
+  propagationProfileStatus,
   analysisMessage,
   rangePrimaryId,
   rangeSecondaryId,
@@ -5214,6 +5292,7 @@ function AnalysisModalContent({
   showComparison,
   onApplyPreset,
   onToggleMode,
+  onUpdatePropagationProfile,
   onToggleRangeCheck,
   onUpdateRangePrimary,
   onUpdateRangeSecondary,
@@ -5227,6 +5306,8 @@ function AnalysisModalContent({
   selectedNoradId: string | number | null;
   canUseAnalysisConfig: boolean;
   analysisConfig: BackendAnalysisConfigResponse | null;
+  missionPropagationProfile: BackendPropagationProfile | null;
+  propagationProfileStatus: string | null;
   analysisMessage: string | null;
   rangePrimaryId: string;
   rangeSecondaryId: string;
@@ -5247,6 +5328,7 @@ function AnalysisModalContent({
   showComparison: boolean;
   onApplyPreset: (preset: AnalysisPresetId) => void;
   onToggleMode: (mode: string, enabled: boolean) => void;
+  onUpdatePropagationProfile: (request: UpdatePropagationProfileRequest) => Promise<void>;
   onToggleRangeCheck: () => void;
   onUpdateRangePrimary: (satelliteId: string) => void;
   onUpdateRangeSecondary: (satelliteId: string) => void;
@@ -5260,6 +5342,7 @@ function AnalysisModalContent({
   const [tab, setTab] = useState<"trajectory" | "range" | "conjunction" | "maneuver" | "propagation">("trajectory");
   const missionBurnEvents = useMemo(() => missionEvents.filter((event) => event.type === "FINITE_BURN"), [missionEvents]);
   const totalBurnDuration = missionBurnEvents.reduce((sum, event) => sum + readNumberParameter(event.parameters ?? {}, "durationSeconds", 0), 0);
+  const visiblePropagationConfig = missionPropagationProfile ?? analysisConfig?.config ?? null;
 
   return (
     <div>
@@ -5303,14 +5386,23 @@ function AnalysisModalContent({
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Analysis Config</p>
-                  <p className="mt-1 font-mono text-[10px] text-zinc-500">{selectedNoradId ? `NORAD ${selectedNoradId}` : "Manual/local orbit"}</p>
+                  <p className="mt-1 font-mono text-[10px] text-zinc-500">
+                    {missionPropagationProfile ? "Mission profile used by trajectory" : selectedNoradId ? `NORAD ${selectedNoradId}` : "Manual/local orbit"}
+                  </p>
                 </div>
                 <span className="border border-cyan-300/30 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
-                  {analysisConfig?.config.propagatorType.replaceAll("_", " ") ?? "--"}
+                  {visiblePropagationConfig?.propagatorType.replaceAll("_", " ") ?? "--"}
                 </span>
               </div>
-              {!canUseAnalysisConfig ? (
-                <p className="mt-3 text-xs leading-5 text-zinc-500">Analysis force-model configuration is available for backend catalog orbits.</p>
+              {missionPropagationProfile ? (
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <DetailMetric label="Profile" value={missionPropagationProfile.name} />
+                  <DetailMetric label="Maneuvers" value={missionPropagationProfile.maneuverModelEnabled ? "Enabled" : "Disabled"} />
+                  <DetailMetric label="Owner" value={missionPropagationProfile.ownerType.replaceAll("_", " ")} />
+                  <DetailMetric label="Updated" value={compactIsoUtc(missionPropagationProfile.updatedAt)} />
+                </div>
+              ) : !canUseAnalysisConfig ? (
+                <p className="mt-3 text-xs leading-5 text-zinc-500">Create or open a mission to view the exact mission propagation profile. Catalog-only analysis configuration is available for backend catalog orbits.</p>
               ) : (
                 <>
                   <div className="mt-3 grid grid-cols-4 gap-1.5">
@@ -5429,16 +5521,20 @@ function AnalysisModalContent({
         {tab === "propagation" && (
           <HudPanel>
             <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Propagation Configuration</p>
-            <p className="mt-2 text-xs leading-5 text-zinc-500">Read-only visibility for currently enabled propagator forces.</p>
+            <p className="mt-2 text-xs leading-5 text-zinc-500">
+              {missionPropagationProfile
+                ? "Exact mission propagation profile used by generated trajectories."
+                : "Catalog analysis configuration fallback. Open or create a mission to edit the exact trajectory profile."}
+            </p>
             <div className="mt-4 grid gap-2 md:grid-cols-2">
               {[
-                ["Propagator", analysisConfig?.config.propagatorType.replaceAll("_", " ") ?? "Manual/default"],
-                ["Gravity", analysisConfig?.config.gravityEnabled ? `ON ${analysisConfig.config.gravityDegree}x${analysisConfig.config.gravityOrder}` : "OFF"],
-                ["Atmospheric Drag", analysisConfig?.config.dragEnabled ? "ON" : "OFF"],
-                ["Solar Radiation", analysisConfig?.config.solarRadiationPressureEnabled ? "ON" : "OFF"],
-                ["Third Body Sun", analysisConfig?.config.thirdBodySunEnabled ? "ON" : "OFF"],
-                ["Third Body Moon", analysisConfig?.config.thirdBodyMoonEnabled ? "ON" : "OFF"],
-                ["Maneuver Model", analysisConfig?.config.maneuverModelEnabled ? "ON" : "OFF"],
+                ["Propagator", visiblePropagationConfig?.propagatorType.replaceAll("_", " ") ?? "Manual/default"],
+                ["Gravity", visiblePropagationConfig?.gravityEnabled ? `ON ${visiblePropagationConfig.gravityDegree}x${visiblePropagationConfig.gravityOrder}` : "OFF"],
+                ["Atmospheric Drag", visiblePropagationConfig?.dragEnabled ? "ON" : "OFF"],
+                ["Solar Radiation", visiblePropagationConfig?.solarRadiationPressureEnabled ? "ON" : "OFF"],
+                ["Third Body Sun", visiblePropagationConfig?.thirdBodySunEnabled ? "ON" : "OFF"],
+                ["Third Body Moon", visiblePropagationConfig?.thirdBodyMoonEnabled ? "ON" : "OFF"],
+                ["Maneuver Model", visiblePropagationConfig?.maneuverModelEnabled ? "ON" : "OFF"],
                 ["Relativity / Tides", "Not configured"],
               ].map(([label, value]) => (
                 <div key={label} className="flex items-center justify-between gap-3 border border-white/10 bg-black/25 px-3 py-2 text-xs">
@@ -5447,11 +5543,207 @@ function AnalysisModalContent({
                 </div>
               ))}
             </div>
+            {missionPropagationProfile ? (
+              <PropagationProfileEditor
+                key={`${missionPropagationProfile.id}-${missionPropagationProfile.updatedAt}`}
+                profile={missionPropagationProfile}
+                status={propagationProfileStatus}
+                onUpdate={onUpdatePropagationProfile}
+              />
+            ) : propagationProfileStatus ? (
+              <p className="mt-3 text-xs leading-5 text-zinc-500">{propagationProfileStatus}</p>
+            ) : null}
           </HudPanel>
         )}
       </div>
     </div>
   );
+}
+
+function PropagationProfileEditor({
+  profile,
+  status,
+  onUpdate,
+}: {
+  profile: BackendPropagationProfile;
+  status: string | null;
+  onUpdate: (request: UpdatePropagationProfileRequest) => Promise<void>;
+}) {
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showExpert, setShowExpert] = useState(false);
+  const [advancedDraft, setAdvancedDraft] = useState(() => spacecraftDraftFromProfile(profile));
+  const [expertDraft, setExpertDraft] = useState(() => integratorDraftFromProfile(profile));
+
+  const forceModes = [
+    { key: "gravityEnabled" as const, label: "Gravity" },
+    { key: "dragEnabled" as const, label: "Drag" },
+    { key: "solarRadiationPressureEnabled" as const, label: "SRP" },
+    { key: "thirdBodySunEnabled" as const, label: "Sun" },
+    { key: "thirdBodyMoonEnabled" as const, label: "Moon" },
+    { key: "maneuverModelEnabled" as const, label: "Maneuver" },
+  ];
+
+  const saveAdvanced = () => {
+    void onUpdate({
+      dryMassKg: numberFromDraft(advancedDraft.dryMassKg, profile.dryMassKg),
+      fuelMassKg: numberFromDraft(advancedDraft.fuelMassKg, profile.fuelMassKg),
+      dragAreaM2: numberFromDraft(advancedDraft.dragAreaM2, profile.dragAreaM2),
+      dragCoefficient: numberFromDraft(advancedDraft.dragCoefficient, profile.dragCoefficient),
+      srpAreaM2: numberFromDraft(advancedDraft.srpAreaM2, profile.srpAreaM2),
+      reflectivityCoefficient: numberFromDraft(advancedDraft.reflectivityCoefficient, profile.reflectivityCoefficient),
+      nominalThrustN: numberFromDraft(advancedDraft.nominalThrustN, profile.nominalThrustN),
+      nominalIspS: numberFromDraft(advancedDraft.nominalIspS, profile.nominalIspS),
+    });
+  };
+
+  const saveExpert = () => {
+    void onUpdate({
+      integratorMinStep: numberFromDraft(expertDraft.integratorMinStep, profile.integratorMinStep),
+      integratorMaxStep: numberFromDraft(expertDraft.integratorMaxStep, profile.integratorMaxStep),
+      integratorAbsTol: numberFromDraft(expertDraft.integratorAbsTol, profile.integratorAbsTol),
+      integratorRelTol: numberFromDraft(expertDraft.integratorRelTol, profile.integratorRelTol),
+    });
+  };
+
+  return (
+    <div className="mt-5 border border-cyan-300/15 bg-black/20 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-cyan-300">Mission Profile Editor</p>
+          <p className="mt-1 text-xs text-zinc-500">{profile.name}</p>
+        </div>
+        <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
+          {profile.preset.replaceAll("_", " ")}
+        </span>
+      </div>
+
+      <div className="mt-3 grid grid-cols-3 gap-1.5">
+        {forceModes.map((mode) => {
+          const checked = Boolean(profile[mode.key]);
+          return (
+            <button
+              key={mode.key}
+              type="button"
+              aria-pressed={checked}
+              onClick={() => {
+                void onUpdate({ [mode.key]: !checked });
+              }}
+              className={`border px-2 py-1.5 font-mono text-[10px] uppercase transition ${checked ? "border-lime-300 bg-lime-300/15 text-lime-100" : "border-white/10 text-zinc-500 hover:border-lime-300/60 hover:text-zinc-200"}`}
+            >
+              {mode.label}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button type="button" onClick={() => setShowAdvanced((value) => !value)} className="workspace-action">
+          {showAdvanced ? "Hide Advanced" : "Advanced"}
+        </button>
+        <button type="button" onClick={() => setShowExpert((value) => !value)} className="workspace-action">
+          {showExpert ? "Hide Expert" : "Expert"}
+        </button>
+      </div>
+
+      {showAdvanced && (
+        <div className="mt-3 grid gap-2 md:grid-cols-4">
+          {[
+            ["dryMassKg", "Dry Mass kg"],
+            ["fuelMassKg", "Fuel Mass kg"],
+            ["dragAreaM2", "Drag Area m2"],
+            ["dragCoefficient", "Drag Cd"],
+            ["srpAreaM2", "SRP Area m2"],
+            ["reflectivityCoefficient", "Reflectivity"],
+            ["nominalThrustN", "Thrust N"],
+            ["nominalIspS", "ISP s"],
+          ].map(([key, label]) => (
+            <ProfileNumberInput
+              key={key}
+              label={label}
+              value={advancedDraft[key as keyof typeof advancedDraft]}
+              onChange={(value) => setAdvancedDraft((current) => ({ ...current, [key]: value }))}
+            />
+          ))}
+          <button type="button" onClick={saveAdvanced} className="workspace-action md:col-span-4">
+            Save Advanced
+          </button>
+        </div>
+      )}
+
+      {showExpert && (
+        <div className="mt-3 grid gap-2 md:grid-cols-4">
+          {[
+            ["integratorMinStep", "Min Step s"],
+            ["integratorMaxStep", "Max Step s"],
+            ["integratorAbsTol", "Abs Tol"],
+            ["integratorRelTol", "Rel Tol"],
+          ].map(([key, label]) => (
+            <ProfileNumberInput
+              key={key}
+              label={label}
+              value={expertDraft[key as keyof typeof expertDraft]}
+              onChange={(value) => setExpertDraft((current) => ({ ...current, [key]: value }))}
+            />
+          ))}
+          <button type="button" onClick={saveExpert} className="workspace-action md:col-span-4">
+            Save Expert
+          </button>
+        </div>
+      )}
+
+      {status && <p className="mt-3 text-xs leading-5 text-zinc-500">{status}</p>}
+    </div>
+  );
+}
+
+function ProfileNumberInput({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">{label}</span>
+      <input
+        type="number"
+        step="any"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="mt-1 w-full border border-white/10 bg-black/35 px-2 py-1.5 text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
+      />
+    </label>
+  );
+}
+
+function spacecraftDraftFromProfile(profile: BackendPropagationProfile) {
+  return {
+    dryMassKg: String(profile.dryMassKg),
+    fuelMassKg: String(profile.fuelMassKg),
+    dragAreaM2: String(profile.dragAreaM2),
+    dragCoefficient: String(profile.dragCoefficient),
+    srpAreaM2: String(profile.srpAreaM2),
+    reflectivityCoefficient: String(profile.reflectivityCoefficient),
+    nominalThrustN: String(profile.nominalThrustN),
+    nominalIspS: String(profile.nominalIspS),
+  };
+}
+
+function integratorDraftFromProfile(profile: BackendPropagationProfile) {
+  return {
+    integratorMinStep: String(profile.integratorMinStep),
+    integratorMaxStep: String(profile.integratorMaxStep),
+    integratorAbsTol: String(profile.integratorAbsTol),
+    integratorRelTol: String(profile.integratorRelTol),
+  };
+}
+
+function numberFromDraft(value: string, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function WorkspaceLibraryPanel({

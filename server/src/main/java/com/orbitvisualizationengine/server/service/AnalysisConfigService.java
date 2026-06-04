@@ -19,11 +19,17 @@ public class AnalysisConfigService {
   private final AnalysisConfigRepository configs;
   private final SatelliteRepository satellites;
   private final AppProperties properties;
+  private final PropagationProfileService propagationProfiles;
 
-  public AnalysisConfigService(AnalysisConfigRepository configs, SatelliteRepository satellites, AppProperties properties) {
+  public AnalysisConfigService(
+      AnalysisConfigRepository configs,
+      SatelliteRepository satellites,
+      AppProperties properties,
+      PropagationProfileService propagationProfiles) {
     this.configs = configs;
     this.satellites = satellites;
     this.properties = properties;
+    this.propagationProfiles = propagationProfiles;
   }
 
   public AnalysisConfigResponse get(int noradId) {
@@ -55,7 +61,9 @@ public class AnalysisConfigService {
         current.nominalIspS(),
         request.notes() == null ? current.notes() : request.notes(),
         Instant.now());
-    return response(configs.save(next));
+    SatelliteAnalysisConfig saved = configs.save(next);
+    propagationProfiles.syncSatelliteProfile(saved);
+    return response(saved);
   }
 
   public AnalysisConfigResponse applyPreset(int noradId, AnalysisPreset preset) {
@@ -96,7 +104,9 @@ public class AnalysisConfigService {
           next.nominalThrustN(), next.nominalIspS(), current.notes(), next.updatedAt());
     }
 
-    return response(configs.save(next));
+    SatelliteAnalysisConfig saved = configs.save(next);
+    propagationProfiles.syncSatelliteProfile(saved);
+    return response(saved);
   }
 
   public AnalysisConfigResponse setMode(int noradId, String mode, boolean enabled) {
@@ -147,14 +157,18 @@ public class AnalysisConfigService {
           current.nominalIspS(), current.notes(), Instant.now());
       default -> throw new IllegalArgumentException("Unsupported analysis mode: " + mode);
     };
-    return response(configs.save(next));
+    SatelliteAnalysisConfig saved = configs.save(next);
+    propagationProfiles.syncSatelliteProfile(saved);
+    return response(saved);
   }
 
   public SatelliteAnalysisConfig getOrCreate(int noradId) {
     satellites.findByNoradId(noradId)
         .orElseThrow(() -> new IllegalArgumentException("Satellite " + noradId + " is not in the local catalog yet"));
-    return configs.findByNoradId(noradId)
+    SatelliteAnalysisConfig config = configs.findByNoradId(noradId)
         .orElseGet(() -> configs.save(AnalysisConfigRepository.defaultConfig(noradId)));
+    propagationProfiles.syncSatelliteProfile(config);
+    return config;
   }
 
   public AnalysisConfigResponse response(SatelliteAnalysisConfig config) {

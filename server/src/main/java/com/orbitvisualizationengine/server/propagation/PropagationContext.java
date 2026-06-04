@@ -36,6 +36,10 @@ public record PropagationContext(
     return new PropagationContext(noradId, seed, analysisConfig, spacecraft, maneuvers, commands);
   }
 
+  public PropagationContext withAnalysisConfig(SatelliteAnalysisConfig config) {
+    return new PropagationContext(noradId, seed, config, SpacecraftModel.fromConfig(config), maneuvers, maneuverCommands);
+  }
+
   public TLE tle() {
     return seed.tle();
   }

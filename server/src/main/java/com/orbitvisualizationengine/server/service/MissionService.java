@@ -12,10 +12,19 @@ import org.springframework.stereotype.Service;
 public class MissionService {
   private final MissionRepository missions;
   private final MissionTimelineValidator validator;
+  private final PropagationProfileService propagationProfiles;
 
-  public MissionService(MissionRepository missions, MissionTimelineValidator validator) {
+  public MissionService(
+      MissionRepository missions,
+      MissionTimelineValidator validator,
+      PropagationProfileService propagationProfiles) {
     this.missions = missions;
     this.validator = validator;
+    this.propagationProfiles = propagationProfiles;
+  }
+
+  public MissionService(MissionRepository missions, MissionTimelineValidator validator) {
+    this(missions, validator, null);
   }
 
   public Mission create(CreateMissionRequest request) {
@@ -26,7 +35,7 @@ public class MissionService {
       throw new IllegalArgumentException("Mission must reference exactly one subject: subjectNoradId or subjectOrbitId.");
     }
     Instant now = Instant.now();
-    return missions.save(new Mission(
+    Mission mission = missions.save(new Mission(
         "mission-" + UUID.randomUUID(),
         request.name().trim(),
         request.subjectNoradId(),
@@ -36,6 +45,10 @@ public class MissionService {
         request.scenarioEnd(),
         now,
         now));
+    if (propagationProfiles != null) {
+      propagationProfiles.createMissionSnapshot(mission);
+    }
+    return mission;
   }
 
   public Mission get(String missionId) {

@@ -5,13 +5,15 @@ import com.orbitvisualizationengine.server.dto.CreateTimelineEventRequest;
 import com.orbitvisualizationengine.server.dto.MissionTrajectoryRequest;
 import com.orbitvisualizationengine.server.dto.MissionResponse;
 import com.orbitvisualizationengine.server.dto.MissionTimelineEventResponse;
+import com.orbitvisualizationengine.server.dto.PropagationProfileResponse;
 import com.orbitvisualizationengine.server.dto.PropagationResponse;
 import com.orbitvisualizationengine.server.dto.ReorderTimelineRequest;
+import com.orbitvisualizationengine.server.dto.UpdatePropagationProfileRequest;
 import com.orbitvisualizationengine.server.dto.UpdateTimelineEventRequest;
-import com.orbitvisualizationengine.server.service.AnalysisConfigService;
 import com.orbitvisualizationengine.server.service.MissionService;
 import com.orbitvisualizationengine.server.service.MissionTimelineService;
 import com.orbitvisualizationengine.server.service.MissionTrajectoryService;
+import com.orbitvisualizationengine.server.service.PropagationProfileService;
 import jakarta.validation.Valid;
 import java.util.List;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -29,17 +31,17 @@ public class MissionController {
   private final MissionService missions;
   private final MissionTimelineService timeline;
   private final MissionTrajectoryService trajectories;
-  private final AnalysisConfigService analysisConfigService;
+  private final PropagationProfileService propagationProfiles;
 
   public MissionController(
       MissionService missions,
       MissionTimelineService timeline,
       MissionTrajectoryService trajectories,
-      AnalysisConfigService analysisConfigService) {
+      PropagationProfileService propagationProfiles) {
     this.missions = missions;
     this.timeline = timeline;
     this.trajectories = trajectories;
-    this.analysisConfigService = analysisConfigService;
+    this.propagationProfiles = propagationProfiles;
   }
 
   @PostMapping
@@ -111,13 +113,27 @@ public class MissionController {
       @Valid @RequestBody MissionTrajectoryRequest request) {
     var states = trajectories.trajectory(missionId, request);
     var mission = missions.get(missionId);
-    var config = mission.subjectNoradId() == null ? null : analysisConfigService.get(mission.subjectNoradId());
+    var config = propagationProfiles.missionAnalysisConfig(mission);
     return new PropagationResponse(
         mission.subjectNoradId() == null ? 0 : mission.subjectNoradId(),
         "OREKIT_NUMERICAL",
         "ITRF",
-        config == null ? null : config.config(),
-        config == null ? List.of() : config.warnings(),
+        config,
+        List.of(),
         states);
+  }
+
+  @GetMapping("/{missionId}/propagation-profile")
+  PropagationProfileResponse propagationProfile(@PathVariable String missionId) {
+    var mission = missions.get(missionId);
+    return PropagationProfileResponse.from(propagationProfiles.getOrCreateMissionProfile(mission));
+  }
+
+  @PatchMapping("/{missionId}/propagation-profile")
+  PropagationProfileResponse updatePropagationProfile(
+      @PathVariable String missionId,
+      @RequestBody UpdatePropagationProfileRequest request) {
+    missions.get(missionId);
+    return PropagationProfileResponse.from(propagationProfiles.updateMissionProfile(missionId, request));
   }
 }

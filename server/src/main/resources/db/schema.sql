@@ -69,6 +69,53 @@ create table if not exists satellite_analysis_configs (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists propagation_profiles (
+  id text primary key,
+  owner_type text not null,
+  owner_id text not null,
+  name text not null,
+  preset text not null default 'FAST_PREVIEW',
+  propagator_type text not null default 'NUMERICAL',
+  gravity_enabled boolean not null default false,
+  gravity_degree integer not null default 2,
+  gravity_order integer not null default 0,
+  drag_enabled boolean not null default false,
+  solar_radiation_pressure_enabled boolean not null default false,
+  third_body_sun_enabled boolean not null default false,
+  third_body_moon_enabled boolean not null default false,
+  maneuver_model_enabled boolean not null default true,
+  dry_mass_kg double precision not null default 850.0,
+  fuel_mass_kg double precision not null default 150.0,
+  drag_area_m2 double precision not null default 20.0,
+  drag_coefficient double precision not null default 2.2,
+  srp_area_m2 double precision not null default 15.0,
+  reflectivity_coefficient double precision not null default 1.2,
+  nominal_thrust_n double precision not null default 0.2,
+  nominal_isp_s double precision not null default 220.0,
+  integrator_min_step double precision not null default 0.1,
+  integrator_max_step double precision not null default 120.0,
+  integrator_abs_tol double precision not null default 1.0,
+  integrator_rel_tol double precision not null default 1.0,
+  notes text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint propagation_profiles_owner_type_valid check (owner_type in ('SATELLITE', 'MANUAL_ORBIT', 'MISSION')),
+  constraint propagation_profiles_propagator_type_valid check (propagator_type in ('TLE_SGP4', 'KEPLERIAN', 'NUMERICAL')),
+  constraint propagation_profiles_gravity_degree_valid check (gravity_degree >= 2),
+  constraint propagation_profiles_gravity_order_valid check (gravity_order >= 0 and gravity_order <= gravity_degree),
+  constraint propagation_profiles_mass_valid check (dry_mass_kg >= 0 and fuel_mass_kg >= 0),
+  constraint propagation_profiles_area_valid check (drag_area_m2 >= 0 and srp_area_m2 >= 0),
+  constraint propagation_profiles_coefficients_valid check (drag_coefficient >= 0 and reflectivity_coefficient >= 0),
+  constraint propagation_profiles_maneuver_defaults_valid check (nominal_thrust_n >= 0 and nominal_isp_s >= 0),
+  constraint propagation_profiles_integrator_valid check (integrator_min_step > 0 and integrator_max_step >= integrator_min_step and integrator_abs_tol > 0 and integrator_rel_tol > 0)
+);
+
+create unique index if not exists propagation_profiles_owner_unique
+  on propagation_profiles(owner_type, owner_id);
+
+create index if not exists propagation_profiles_updated_idx
+  on propagation_profiles(updated_at desc);
+
 alter table satellite_analysis_configs
   add column if not exists dry_mass_kg double precision not null default 850.0,
   add column if not exists fuel_mass_kg double precision not null default 150.0,
@@ -182,6 +229,66 @@ alter table mission_timeline_events
 
 alter table mission_timeline_events
   add constraint mission_timeline_type_valid check (type in ('COAST', 'IMPULSIVE_BURN', 'VECTOR_BURN', 'FINITE_BURN', 'STATION_KEEPING', 'PLANE_CHANGE', 'HOHMANN_TRANSFER'));
+
+alter table propagation_profiles
+  add column if not exists integrator_min_step double precision not null default 0.1,
+  add column if not exists integrator_max_step double precision not null default 120.0,
+  add column if not exists integrator_abs_tol double precision not null default 1.0,
+  add column if not exists integrator_rel_tol double precision not null default 1.0;
+
+alter table propagation_profiles
+  drop constraint if exists propagation_profiles_owner_type_valid;
+
+alter table propagation_profiles
+  add constraint propagation_profiles_owner_type_valid check (owner_type in ('SATELLITE', 'MANUAL_ORBIT', 'MISSION'));
+
+alter table propagation_profiles
+  drop constraint if exists propagation_profiles_propagator_type_valid;
+
+alter table propagation_profiles
+  add constraint propagation_profiles_propagator_type_valid check (propagator_type in ('TLE_SGP4', 'KEPLERIAN', 'NUMERICAL'));
+
+alter table propagation_profiles
+  drop constraint if exists propagation_profiles_gravity_degree_valid;
+
+alter table propagation_profiles
+  add constraint propagation_profiles_gravity_degree_valid check (gravity_degree >= 2);
+
+alter table propagation_profiles
+  drop constraint if exists propagation_profiles_gravity_order_valid;
+
+alter table propagation_profiles
+  add constraint propagation_profiles_gravity_order_valid check (gravity_order >= 0 and gravity_order <= gravity_degree);
+
+alter table propagation_profiles
+  drop constraint if exists propagation_profiles_mass_valid;
+
+alter table propagation_profiles
+  add constraint propagation_profiles_mass_valid check (dry_mass_kg >= 0 and fuel_mass_kg >= 0);
+
+alter table propagation_profiles
+  drop constraint if exists propagation_profiles_area_valid;
+
+alter table propagation_profiles
+  add constraint propagation_profiles_area_valid check (drag_area_m2 >= 0 and srp_area_m2 >= 0);
+
+alter table propagation_profiles
+  drop constraint if exists propagation_profiles_coefficients_valid;
+
+alter table propagation_profiles
+  add constraint propagation_profiles_coefficients_valid check (drag_coefficient >= 0 and reflectivity_coefficient >= 0);
+
+alter table propagation_profiles
+  drop constraint if exists propagation_profiles_maneuver_defaults_valid;
+
+alter table propagation_profiles
+  add constraint propagation_profiles_maneuver_defaults_valid check (nominal_thrust_n >= 0 and nominal_isp_s >= 0);
+
+alter table propagation_profiles
+  drop constraint if exists propagation_profiles_integrator_valid;
+
+alter table propagation_profiles
+  add constraint propagation_profiles_integrator_valid check (integrator_min_step > 0 and integrator_max_step >= integrator_min_step and integrator_abs_tol > 0 and integrator_rel_tol > 0);
 
 create table if not exists conjunctions (
   id text primary key,

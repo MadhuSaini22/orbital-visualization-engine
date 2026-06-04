@@ -32,6 +32,7 @@ public class ManualOrbitService {
   private final SGP4Propagator sgp4Propagator;
   private final KeplerianPropagator keplerianPropagator;
   private final NumericalPropagator numericalPropagator;
+  private final PropagationProfileService propagationProfiles;
 
   public ManualOrbitService(
       ManualOrbitRepository manualOrbits,
@@ -39,13 +40,15 @@ public class ManualOrbitService {
       OrekitOrbitFactory orbitFactory,
       SGP4Propagator sgp4Propagator,
       KeplerianPropagator keplerianPropagator,
-      NumericalPropagator numericalPropagator) {
+      NumericalPropagator numericalPropagator,
+      PropagationProfileService propagationProfiles) {
     this.manualOrbits = manualOrbits;
     this.mapper = mapper;
     this.orbitFactory = orbitFactory;
     this.sgp4Propagator = sgp4Propagator;
     this.keplerianPropagator = keplerianPropagator;
     this.numericalPropagator = numericalPropagator;
+    this.propagationProfiles = propagationProfiles;
   }
 
   public ManualOrbitRecord create(CreateOrbitRequest request) {
@@ -65,7 +68,9 @@ public class ManualOrbitService {
         propagatorType,
         now,
         now);
-    return manualOrbits.save(orbit);
+    ManualOrbitRecord saved = manualOrbits.save(orbit);
+    propagationProfiles.ensureManualOrbitProfile(saved);
+    return saved;
   }
 
   public ManualOrbitRecord get(String orbitId) {
@@ -86,7 +91,9 @@ public class ManualOrbitService {
   public PropagationContext missionPropagationContext(String orbitId) {
     ManualOrbitRecord orbit = get(orbitId);
     validatePropagatorCompatibility(orbit.type(), PropagatorType.NUMERICAL);
-    SatelliteAnalysisConfig config = manualConfig(PropagatorType.NUMERICAL, orbit.updatedAt(), true);
+    SatelliteAnalysisConfig config = propagationProfiles
+        .ensureManualOrbitProfile(orbit)
+        .toAnalysisConfig(0);
     return new PropagationContext(
         0,
         orbitFactory.fromManualOrbit(orbit),

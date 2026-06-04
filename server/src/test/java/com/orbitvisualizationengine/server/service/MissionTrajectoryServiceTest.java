@@ -152,6 +152,26 @@ class MissionTrajectoryServiceTest {
     assertEquals("Mission trajectory requires subjectNoradId or subjectOrbitId: " + MISSION_ID, exception.getMessage());
   }
 
+  @Test
+  void finiteBurnMissionFailsWhenManeuverModelDisabled() {
+    MissionTrajectoryService service = new MissionTrajectoryService(
+        missionService(mission()),
+        new FixedTimelinePropagationService(List.of(timelineCommand())),
+        fixedContextFactory(context(new OrekitEnvironment(), List.of(), List.of(), configWithoutManeuverModel())),
+        new NumericalPropagator(new OrekitEnvironment()));
+
+    IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () ->
+        service.trajectory(MISSION_ID, new MissionTrajectoryRequest(
+            MISSION_ID,
+            EPOCH,
+            EPOCH.plusSeconds(60),
+            60)));
+
+    assertEquals(
+        "Mission contains finite-burn events, but the mission propagation profile has maneuver model disabled.",
+        exception.getMessage());
+  }
+
   private static Mission mission() {
     return new Mission(
         MISSION_ID,
@@ -336,6 +356,31 @@ class MissionTrajectoryServiceTest {
         0.2,
         220.0,
         "Phase C parity test.",
+        EPOCH);
+  }
+
+  private static SatelliteAnalysisConfig configWithoutManeuverModel() {
+    return new SatelliteAnalysisConfig(
+        NORAD_ID,
+        AnalysisPreset.FAST_PREVIEW,
+        PropagatorType.NUMERICAL,
+        false,
+        2,
+        0,
+        false,
+        false,
+        false,
+        false,
+        false,
+        850.0,
+        150.0,
+        20.0,
+        2.2,
+        15.0,
+        1.2,
+        0.2,
+        220.0,
+        "Maneuver model disabled test.",
         EPOCH);
   }
 

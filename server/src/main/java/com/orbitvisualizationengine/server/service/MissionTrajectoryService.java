@@ -17,16 +17,27 @@ public class MissionTrajectoryService {
   private final MissionTimelinePropagationService timelinePropagation;
   private final MissionPropagationContextFactory contextFactory;
   private final NumericalPropagator numericalPropagator;
+  private final PropagationProfileService propagationProfiles;
+
+  public MissionTrajectoryService(
+      MissionService missions,
+      MissionTimelinePropagationService timelinePropagation,
+      MissionPropagationContextFactory contextFactory,
+      NumericalPropagator numericalPropagator,
+      PropagationProfileService propagationProfiles) {
+    this.missions = missions;
+    this.timelinePropagation = timelinePropagation;
+    this.contextFactory = contextFactory;
+    this.numericalPropagator = numericalPropagator;
+    this.propagationProfiles = propagationProfiles;
+  }
 
   public MissionTrajectoryService(
       MissionService missions,
       MissionTimelinePropagationService timelinePropagation,
       MissionPropagationContextFactory contextFactory,
       NumericalPropagator numericalPropagator) {
-    this.missions = missions;
-    this.timelinePropagation = timelinePropagation;
-    this.contextFactory = contextFactory;
-    this.numericalPropagator = numericalPropagator;
+    this(missions, timelinePropagation, contextFactory, numericalPropagator, null);
   }
 
   public List<EphemerisState> trajectory(String missionId, MissionTrajectoryRequest request) {
@@ -49,7 +60,15 @@ public class MissionTrajectoryService {
     PropagationContext context = mission.subjectOrbitId() == null
         ? contextFactory.buildLegacyFreeContext(mission.subjectNoradId())
         : contextFactory.buildManualOrbitContext(mission.subjectOrbitId());
+    var missionConfig = propagationProfiles == null
+        ? context.analysisConfig()
+        : propagationProfiles.missionAnalysisConfig(mission);
+    if (!commands.isEmpty() && !missionConfig.maneuverModelEnabled()) {
+      throw new IllegalArgumentException(
+          "Mission contains finite-burn events, but the mission propagation profile has maneuver model disabled.");
+    }
     context = context
+        .withAnalysisConfig(missionConfig)
         .withManeuverCommands(commands);
     return numericalPropagator.trajectory(context, request.startTime(), request.endTime(), request.stepSeconds());
   }
