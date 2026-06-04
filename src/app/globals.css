@@ -32,6 +32,41 @@ select {
   font: inherit;
 }
 
+button:not(:disabled),
+select:not(:disabled),
+summary,
+[role="button"],
+.workspace-action {
+  cursor: pointer;
+}
+
+button:disabled,
+select:disabled {
+  cursor: not-allowed;
+}
+
+.thin-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(103, 232, 249, 0.55) rgba(8, 16, 22, 0.55);
+}
+
+.thin-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.thin-scrollbar::-webkit-scrollbar-track {
+  background: rgba(8, 16, 22, 0.55);
+}
+
+.thin-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(103, 232, 249, 0.55);
+}
+
+.thin-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(103, 232, 249, 0.8);
+}
+
 .timeline-input {
   width: 100%;
   border: 1px solid rgba(103, 232, 249, 0.25);

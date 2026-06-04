@@ -1541,6 +1541,12 @@ function missionSubjectSummary(
       detail: manualOrbitId ?? satellite?.id ?? "manual orbit",
     };
   }
+  if (source === "endpoint" && manualOrbitId) {
+    return {
+      label: "Imported TLE mission",
+      detail: manualOrbitId,
+    };
+  }
   if (source === "backend" && selectedNoradId) {
     return {
       label: "Catalog NORAD mission",
@@ -1604,7 +1610,14 @@ function readStringParameter(parameters: Record<string, unknown>, key: string, f
 }
 
 function userErrorMessage(error: unknown, fallback: string) {
-  return error instanceof Error && error.message.trim() ? error.message : fallback;
+  if (!(error instanceof Error)) {
+    return fallback;
+  }
+  const message = error.message.trim();
+  if (!message || message === "Failed to fetch" || message === "NetworkError when attempting to fetch resource.") {
+    return fallback;
+  }
+  return message;
 }
 
 function getConjunctionStatusFromRisk(event: ConjunctionEvent, missDistanceKm: number) {
@@ -1882,13 +1895,13 @@ export function OrbitalDashboard() {
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
   const selectedNoradId = activeDataSource === "manual" ? null : selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? null;
   const canUseAnalysisConfig = activeDataSource === "backend" && Boolean(selectedNoradId);
-  const canUseMissionTimeline = canUseAnalysisConfig || (activeDataSource === "manual" && Boolean(manualOrbitId));
+  const canUseMissionTimeline = canUseAnalysisConfig || Boolean(manualOrbitId);
   const missionTimelineUnavailableReason = canUseMissionTimeline
     ? null
     : activeDataSource === "manual"
       ? "Create a manual Cartesian or Classical Elements orbit first, then create a mission."
       : activeDataSource === "endpoint"
-        ? "Mission planning currently requires a backend catalog orbit. Imported TLEs run locally in the browser."
+        ? "Persist the imported TLE as a backend orbit before creating a mission timeline."
         : "Load a backend catalog orbit to create a mission timeline.";
   const canUseRangeCheck = satellites.length >= 2;
   const canShowManeuvers = maneuverSnapshots.length > 0;
@@ -2578,15 +2591,25 @@ export function OrbitalDashboard() {
     if (result.satellites.length > 0) {
       const first = result.satellites[0];
       if (first.tle) {
-        await handleCreateManualOrbit({
+        const orbit = await createManualOrbit({
           name: first.name,
           type: "TLE",
           tle: first.tle,
           propagatorType: "TLE_SGP4",
         });
-        if (result.satellites.length > 1) {
-          storedOrbitsFromImportedTle(result.satellites.slice(1), raw, sourceLabel).forEach(rememberOrbit);
-        }
+        rememberOrbit(storedOrbitFromManualOrbit({
+          name: first.name,
+          type: "TLE",
+          tle: first.tle,
+          propagatorType: "TLE_SGP4",
+        }, orbit, manualOrbitToSatellite(orbit)));
+        storedOrbitsFromImportedTle(result.satellites, raw, sourceLabel).forEach(rememberOrbit);
+        setActiveDataSource("endpoint");
+        setManualOrbitId(orbit.id);
+        setServerStateBySatelliteId(new Map());
+        setServerOrbitSnapshots(null);
+        setServerGroundTrackSnapshots(null);
+        setActiveSourceModal(null);
       } else {
         storedOrbitsFromImportedTle(result.satellites, raw, sourceLabel).forEach(rememberOrbit);
         setActiveDataSource("endpoint");
@@ -2600,7 +2623,7 @@ export function OrbitalDashboard() {
         : [`Loaded ${result.satellites.length} satellites from ${sourceLabel}. ${result.satellites[0]?.tle ? "Active imported TLE persisted for mission planning." : ""}`],
     );
     return result;
-  }, [handleCreateManualOrbit, loadTleText, rememberOrbit]);
+  }, [loadTleText, rememberOrbit]);
 
   const handleLoadCatalogSatellite = useCallback((satellite: SatelliteObject) => {
     rememberOrbit(storedOrbitFromCatalogSatellite(satellite, backendCatalogGroup));
@@ -3706,13 +3729,28 @@ export function OrbitalDashboard() {
       )}
 
       {hasOrbitLoaded && (
-      <section className="pointer-events-auto absolute top-24 right-4 bottom-4 z-20 w-[340px] max-w-[calc(100vw-2rem)] space-y-3 overflow-y-auto pr-1 max-sm:hidden">
+      <section className="thin-scrollbar pointer-events-auto absolute top-24 right-4 bottom-4 z-20 w-[340px] max-w-[calc(100vw-2rem)] space-y-3 overflow-y-auto pr-1 max-sm:hidden">
         <HudPanel>
           <div className="flex items-center justify-between gap-3">
             <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Sat Filter</p>
             <button
               type="button"
-              onClick={() => setShowAllOrbits((value) => !value)}
+              onClick={() => {
+                setShowAllOrbits((value) => {
+                  const next = !value;
+                  if (next) {
+                    setSatellites((current) => current.map((satellite) => ({
+                      ...satellite,
+                      visual: {
+                        ...satellite.visual,
+                        showMarker: true,
+                        showOrbit: true,
+                      },
+                    })));
+                  }
+                  return next;
+                });
+              }}
               className={`border px-3 py-1 font-mono text-[11px] uppercase transition ${
                 showAllOrbits ? "border-cyan-300 bg-cyan-300 text-slate-950" : "border-cyan-300/30 text-cyan-200 hover:border-cyan-300"
               }`}
@@ -3724,7 +3762,7 @@ export function OrbitalDashboard() {
             <span>{effectiveShowRangeCheck ? "Selected range pair" : "Selected satellite"}</span>
             <span className="font-mono text-cyan-200">{selectedSatelliteIds.length}/{effectiveShowRangeCheck ? 2 : 1}</span>
           </div>
-          <div className="mt-3 max-h-[34vh] space-y-2 overflow-auto pr-1">
+          <div className="thin-scrollbar mt-3 max-h-[34vh] space-y-2 overflow-auto pr-1">
             {snapshots.map((snapshot) => (
               <SatelliteControl
                 key={snapshot.satellite.id}
@@ -5346,7 +5384,7 @@ function AnalysisModalContent({
 
   return (
     <div>
-      <div className="grid grid-cols-4 border border-cyan-300/20 max-sm:grid-cols-2">
+      <div className="grid grid-cols-5 border border-cyan-300/20 max-sm:grid-cols-2">
         {[
           { id: "trajectory" as const, label: "Trajectory" },
           { id: "range" as const, label: "Range" },
@@ -5378,7 +5416,7 @@ function AnalysisModalContent({
                 <DetailMetric label="Generated" value={trajectoryOverlay ? compactIsoUtc(trajectoryOverlay.generatedAt) : "--"} />
               </div>
               <button type="button" disabled={!trajectoryOverlay} onClick={onToggleComparison} className="mt-3 workspace-action">
-                Toggle Overlay
+                {showComparison ? "Hide Comparison Overlay" : "Show Comparison Overlay"}
               </button>
             </HudPanel>
 
@@ -5476,14 +5514,14 @@ function AnalysisModalContent({
         {tab === "maneuver" && (
           <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
             <HudPanel>
-              <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Mission Burn Summary</p>
+              <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Mission Timeline Burn Summary</p>
               <div className="mt-3 grid grid-cols-2 gap-2">
                 <DetailMetric label="Burn Count" value={String(missionBurnEvents.length)} />
                 <DetailMetric label="Duration" value={secondsToDurationLabel(totalBurnDuration)} />
                 <DetailMetric label="Delta-V" value="Not computed" />
                 <DetailMetric label="Timeline" value={missionBurnEvents.length > 0 ? "Available" : "--"} />
               </div>
-              <div className="mt-3 max-h-[42vh] space-y-2 overflow-auto pr-1">
+              <div className="thin-scrollbar mt-3 max-h-[42vh] space-y-2 overflow-auto pr-1">
                 {missionBurnEvents.length === 0 ? (
                   <p className="border border-white/10 bg-black/25 px-3 py-2 text-xs text-zinc-500">No finite-burn mission events found.</p>
                 ) : (
@@ -6320,7 +6358,7 @@ function MissionTimelinePanel({
         </div>
       )}
 
-      <div className="mt-3 max-h-[34vh] space-y-2 overflow-auto pr-1">
+      <div className="thin-scrollbar mt-3 max-h-[34vh] space-y-2 overflow-auto pr-1">
         {events.map((event, index) => (
           <TimelineEventCard
             key={event.id}
@@ -6352,7 +6390,7 @@ function MissionTimelinePanel({
             disabled={isTrajectoryLoading}
             className="border border-cyan-300 bg-cyan-300 px-3 py-2 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-950 transition hover:bg-cyan-200 disabled:cursor-wait disabled:opacity-60"
           >
-            {isTrajectoryLoading ? "Generating" : "Generate Trajectory"}
+            {isTrajectoryLoading ? "Generating" : trajectoryOverlay ? "Update Trajectory" : "Generate Trajectory"}
           </button>
           <button
             type="button"
@@ -6365,7 +6403,7 @@ function MissionTimelinePanel({
                 : "border-white/10 text-zinc-500 hover:border-lime-300/60 hover:text-lime-100 disabled:cursor-not-allowed disabled:text-zinc-700"
             }`}
           >
-            Overlay
+            {showComparison ? "Hide Overlay" : "Show Overlay"}
           </button>
         </div>
       )}
@@ -7204,7 +7242,7 @@ function ManeuverPanel({
   return (
     <HudPanel>
       <div className="flex items-center justify-between gap-3">
-        <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Maneuvers</p>
+        <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Legacy Maneuver Events</p>
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -7238,10 +7276,10 @@ function ManeuverPanel({
       </div>
       <p className="mt-1 text-[11px] text-zinc-500">
         {maneuverSnapshots.length === 0
-          ? "No maneuver events found for the loaded orbit."
+          ? "No legacy /api/maneuvers events found. Mission timeline burns are listed separately in the burn summary."
           : showManeuvers
-            ? `${maneuverSnapshots.length} event markers visible`
-            : "Enable to show maneuver markers and event details."}
+            ? `${maneuverSnapshots.length} legacy event markers visible`
+            : "Enable to show legacy maneuver markers and event details."}
       </p>
       {showManeuvers && selectedManeuver && (
         <button
