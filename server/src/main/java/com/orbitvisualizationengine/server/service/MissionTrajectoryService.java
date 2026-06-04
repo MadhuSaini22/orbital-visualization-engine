@@ -9,6 +9,7 @@ import com.orbitvisualizationengine.server.propagation.NumericalPropagator;
 import com.orbitvisualizationengine.server.propagation.PropagationContext;
 import com.orbitvisualizationengine.server.propagation.PropagationManeuverCommand;
 import java.util.List;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -19,6 +20,7 @@ public class MissionTrajectoryService {
   private final NumericalPropagator numericalPropagator;
   private final PropagationProfileService propagationProfiles;
 
+  @Autowired
   public MissionTrajectoryService(
       MissionService missions,
       MissionTimelinePropagationService timelinePropagation,

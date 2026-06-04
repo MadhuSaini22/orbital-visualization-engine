@@ -6,6 +6,7 @@ import com.orbitvisualizationengine.server.repository.MissionRepository;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -14,6 +15,7 @@ public class MissionService {
   private final MissionTimelineValidator validator;
   private final PropagationProfileService propagationProfiles;
 
+  @Autowired
   public MissionService(
       MissionRepository missions,
       MissionTimelineValidator validator,
