@@ -168,6 +168,9 @@ type MissionTrajectoryOverlay = {
   legacy: SatelliteSnapshot | null;
   generatedAt: string;
   message: string;
+  runSignature: string;
+  sampleCadenceSeconds: number;
+  stale: boolean;
 };
 type TimelineLayoutBlock = {
   event: BackendMissionTimelineEvent;
@@ -300,6 +303,7 @@ const orbitTemplateCategories = [
   "Custom",
 ] satisfies OrbitTemplateCategory[];
 const missionTrajectoryMinStepSeconds = 5;
+const missionTrajectoryMaxStepSeconds = 3600;
 const groundTrackRangeOptions = [
   {
     id: "live",
@@ -1415,6 +1419,82 @@ function timelineAnalysis(mission: BackendMission | null, events: BackendMission
   };
 }
 
+function parseMissionTrajectoryCadence(value: string) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
+}
+
+function missionTrajectoryCadenceError(value: string) {
+  if (!value.trim()) {
+    return "Sample cadence is required.";
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
+    return "Sample cadence must be a whole number of seconds.";
+  }
+  if (parsed < missionTrajectoryMinStepSeconds) {
+    return `Sample cadence must be at least ${missionTrajectoryMinStepSeconds} seconds.`;
+  }
+  if (parsed > missionTrajectoryMaxStepSeconds) {
+    return `Sample cadence must be ${missionTrajectoryMaxStepSeconds} seconds or less.`;
+  }
+  return null;
+}
+
+function missionRunSignature(
+  mission: BackendMission | null,
+  events: BackendMissionTimelineEvent[],
+  profile: BackendPropagationProfile | null,
+  sampleCadenceSeconds: number | null,
+) {
+  if (!mission || !profile || sampleCadenceSeconds === null) {
+    return "";
+  }
+  return JSON.stringify({
+    missionId: mission.id,
+    scenarioStart: mission.scenarioStart,
+    scenarioEnd: mission.scenarioEnd,
+    profileId: profile.id,
+    profileUpdatedAt: profile.updatedAt,
+    sampleCadenceSeconds,
+    events: events
+      .toSorted((a, b) => a.sequenceIndex - b.sequenceIndex)
+      .map((event) => ({
+        id: event.id,
+        type: event.type,
+        sequenceIndex: event.sequenceIndex,
+        enabled: event.enabled,
+        executionTime: event.executionTime,
+        parameters: event.parameters,
+        updatedAt: event.updatedAt,
+      })),
+  });
+}
+
+function forceModelSummary(profile: BackendPropagationProfile | null) {
+  if (!profile) {
+    return "Profile not loaded";
+  }
+  return [
+    profile.gravityEnabled ? `Gravity ${profile.gravityDegree}x${profile.gravityOrder}` : "Gravity OFF",
+    profile.dragEnabled ? "Drag ON" : "Drag OFF",
+    profile.solarRadiationPressureEnabled ? "SRP ON" : "SRP OFF",
+    profile.thirdBodySunEnabled ? "Sun ON" : "Sun OFF",
+    profile.thirdBodyMoonEnabled ? "Moon ON" : "Moon OFF",
+    profile.maneuverModelEnabled ? "Maneuver ON" : "Maneuver OFF",
+    "Relativity OFF",
+    "Solid Tides OFF",
+    "Ocean Tides OFF",
+  ].join(" · ");
+}
+
+function integratorSummary(profile: BackendPropagationProfile | null) {
+  if (!profile) {
+    return "Profile not loaded";
+  }
+  return `Dormand Prince 853 · min ${profile.integratorMinStep}s · max ${profile.integratorMaxStep}s · abs ${profile.integratorAbsTol} · rel ${profile.integratorRelTol}`;
+}
+
 function visualTimelineBlocks(mission: BackendMission | null, events: BackendMissionTimelineEvent[]) {
   const resolvedSchedule = resolveEventMetOffsets(mission, events);
   const ordered = events.toSorted((a, b) => {
@@ -1689,6 +1769,7 @@ export function OrbitalDashboard() {
   const [timelineDragEventId, setTimelineDragEventId] = useState<string | null>(null);
   const [activeCommandModal, setActiveCommandModal] = useState<CommandModalId | null>(null);
   const [missionTrajectoryOverlay, setMissionTrajectoryOverlay] = useState<MissionTrajectoryOverlay | null>(null);
+  const [missionTrajectoryCadenceInput, setMissionTrajectoryCadenceInput] = useState(String(missionTrajectoryMinStepSeconds));
   const [showMissionComparison, setShowMissionComparison] = useState(false);
   const [isMissionTrajectoryLoading, setIsMissionTrajectoryLoading] = useState(false);
   const [showConjunctions, setShowConjunctions] = useState(false);
@@ -1726,6 +1807,10 @@ export function OrbitalDashboard() {
     ...trajectoryOptions,
     stepSec: trajectorySampleStepSec,
   }), [trajectorySampleStepSec]);
+  const missionTrajectoryCadenceValidation = missionTrajectoryCadenceError(missionTrajectoryCadenceInput);
+  const missionTrajectoryCadenceSeconds = missionTrajectoryCadenceValidation
+    ? null
+    : parseMissionTrajectoryCadence(missionTrajectoryCadenceInput);
   const groundTrackStepSec = groundTrackRange.id === "live"
     ? 30
     : groundTrackRange.stepSec;
@@ -1963,9 +2048,14 @@ export function OrbitalDashboard() {
     return null;
   }, [activeWorkspaceMissionId, mission, missionLibrary.missions]);
   const missionSummaryAnalysis = useMemo(() => timelineAnalysis(mission, missionTimelineEvents), [mission, missionTimelineEvents]);
+  const currentMissionRunSignature = useMemo(
+    () => missionRunSignature(mission, missionTimelineEvents, missionPropagationProfile, missionTrajectoryCadenceSeconds),
+    [mission, missionPropagationProfile, missionTimelineEvents, missionTrajectoryCadenceSeconds],
+  );
+  const missionTrajectoryIsStale = Boolean(missionTrajectoryOverlay && missionTrajectoryOverlay.runSignature !== currentMissionRunSignature);
   const dependencyCount = useMemo(() => missionTimelineEvents.filter((event) => eventScheduleMode(event) === "AFTER_EVENT").length, [missionTimelineEvents]);
   const trajectoryStatus = missionTrajectoryOverlay
-    ? "Generated"
+    ? missionTrajectoryIsStale ? "Stale" : "Generated"
     : mission && missionTimelineEvents.length > 0
       ? "Needs Regeneration"
       : "Not Generated";
@@ -2698,6 +2788,16 @@ export function OrbitalDashboard() {
     return profile;
   }, []);
 
+  const markMissionTrajectoryStale = useCallback(() => {
+    setMissionTrajectoryOverlay((current) => current
+      ? {
+          ...current,
+          stale: true,
+          message: current.stale ? current.message : `${current.message} Mission configuration changed. Regenerate trajectory.`,
+        }
+      : null);
+  }, []);
+
   const updateMissionPropagationProfileAction = useCallback(async (request: UpdatePropagationProfileRequest) => {
     if (!mission) {
       const message = "Open a mission before editing its propagation profile.";
@@ -2709,6 +2809,7 @@ export function OrbitalDashboard() {
       setPropagationProfileStatus("Updating mission propagation profile...");
       const updated = await updateMissionPropagationProfile(mission.id, request);
       setMissionPropagationProfile(updated);
+      markMissionTrajectoryStale();
       setPropagationProfileStatus("Mission propagation profile updated.");
       toast.success("Propagation profile updated.");
     } catch (error) {
@@ -2716,7 +2817,7 @@ export function OrbitalDashboard() {
       setPropagationProfileStatus(message);
       toast.error(message);
     }
-  }, [mission]);
+  }, [markMissionTrajectoryStale, mission]);
 
   const openMissionSetup = useCallback(() => {
     if (!selectedSnapshot?.satellite || (!selectedNoradId && !manualOrbitId)) {
@@ -2892,7 +2993,7 @@ export function OrbitalDashboard() {
       }
       await refreshMissionTimeline(mission.id);
       setTimelineModalMode(null);
-      setMissionTrajectoryOverlay(null);
+      markMissionTrajectoryStale();
       setTimelineStatus("Timeline saved.");
       toast.success("Timeline event saved.");
     } catch (error) {
@@ -2900,7 +3001,7 @@ export function OrbitalDashboard() {
       setTimelineStatus(message);
       toast.error(message);
     }
-  }, [mission, missionTimelineEvents, refreshMissionTimeline, selectedTimelineEvent, timelineDraft, timelineModalMode]);
+  }, [markMissionTrajectoryStale, mission, missionTimelineEvents, refreshMissionTimeline, selectedTimelineEvent, timelineDraft, timelineModalMode]);
 
   const deleteTimelineEvent = useCallback(async (event: BackendMissionTimelineEvent) => {
     if (!mission) {
@@ -2910,7 +3011,7 @@ export function OrbitalDashboard() {
     try {
       await deleteMissionTimelineEvent(mission.id, event.id);
       await refreshMissionTimeline(mission.id);
-      setMissionTrajectoryOverlay(null);
+      markMissionTrajectoryStale();
       setTimelineStatus("Timeline event deleted.");
       toast.success("Timeline event deleted.");
     } catch (error) {
@@ -2918,7 +3019,7 @@ export function OrbitalDashboard() {
       setTimelineStatus(message);
       toast.error(message);
     }
-  }, [mission, refreshMissionTimeline]);
+  }, [markMissionTrajectoryStale, mission, refreshMissionTimeline]);
 
   const toggleTimelineEventEnabled = useCallback(async (event: BackendMissionTimelineEvent) => {
     if (!mission) {
@@ -2928,7 +3029,7 @@ export function OrbitalDashboard() {
     try {
       await setMissionTimelineEventEnabled(mission.id, event.id, !event.enabled);
       await refreshMissionTimeline(mission.id);
-      setMissionTrajectoryOverlay(null);
+      markMissionTrajectoryStale();
       setTimelineStatus(event.enabled ? "Event disabled." : "Event enabled.");
       toast.success(event.enabled ? "Event disabled." : "Event enabled.");
     } catch (error) {
@@ -2936,7 +3037,7 @@ export function OrbitalDashboard() {
       setTimelineStatus(message);
       toast.error(message);
     }
-  }, [mission, refreshMissionTimeline]);
+  }, [markMissionTrajectoryStale, mission, refreshMissionTimeline]);
 
   const reorderTimelineEvent = useCallback(async (sourceEventId: string, targetEventId: string) => {
     if (!mission || sourceEventId === targetEventId) {
@@ -2956,7 +3057,7 @@ export function OrbitalDashboard() {
       const reordered = await reorderMissionTimelineEvents(mission.id, next.map((event) => event.id));
       setMissionTimelineEvents(reordered);
       rememberMissionEvents(mission.id, reordered);
-      setMissionTrajectoryOverlay(null);
+      markMissionTrajectoryStale();
       setTimelineStatus("Timeline reordered.");
     } catch (error) {
       await refreshMissionTimeline(mission.id);
@@ -2964,7 +3065,7 @@ export function OrbitalDashboard() {
       setTimelineStatus(message);
       toast.error(message);
     }
-  }, [mission, missionTimelineEvents, refreshMissionTimeline, rememberMissionEvents]);
+  }, [markMissionTrajectoryStale, mission, missionTimelineEvents, refreshMissionTimeline, rememberMissionEvents]);
 
   const updateTimelineEventSchedule = useCallback(async (
     event: BackendMissionTimelineEvent,
@@ -2992,7 +3093,7 @@ export function OrbitalDashboard() {
       setTimelineStatus(`Saving ${event.name} at ${metOffsetLabelFromSeconds(command.targetMetSeconds)}...`);
       await updateMissionTimelineEvent(mission.id, event.id, command.request);
       const refreshed = await refreshMissionTimeline(mission.id);
-      setMissionTrajectoryOverlay(null);
+      markMissionTrajectoryStale();
       const saved = refreshed.find((item) => item.id === event.id);
       setTimelineStatus(saved ? `${saved.name} scheduled at ${signedOffsetLabel(mission.scenarioStart, saved.executionTime)}.` : "Timeline schedule updated.");
       toast.success("Timeline schedule updated.");
@@ -3002,7 +3103,7 @@ export function OrbitalDashboard() {
       setTimelineStatus(message);
       toast.error(message);
     }
-  }, [mission, missionTimelineEvents, refreshMissionTimeline]);
+  }, [markMissionTrajectoryStale, mission, missionTimelineEvents, refreshMissionTimeline]);
 
   const generateMissionTrajectory = useCallback(async () => {
     if (!mission || !selectedSnapshot?.satellite) {
@@ -3017,19 +3118,26 @@ export function OrbitalDashboard() {
       toast.error(message);
       return;
     }
+    if (missionTrajectoryCadenceValidation || missionTrajectoryCadenceSeconds === null) {
+      const message = missionTrajectoryCadenceValidation ?? "Enter a valid trajectory sample cadence.";
+      setTimelineStatus(message);
+      toast.error(message);
+      return;
+    }
 
     const centerTime = trajectoryAnchorTime;
     const start = addMinutes(centerTime, -defaultMissionTrajectoryWindowMinutes);
     const end = addMinutes(centerTime, defaultMissionTrajectoryWindowMinutes);
-    const missionTrajectoryStepSeconds = Math.max(missionTrajectoryMinStepSeconds, trajectoryWindowOptions.stepSec);
     setIsMissionTrajectoryLoading(true);
-    setTimelineStatus(`Generating mission trajectory at ${missionTrajectoryStepSeconds}s sample cadence...`);
+    setTimelineStatus(`Generating mission trajectory at ${missionTrajectoryCadenceSeconds}s sample cadence...`);
     try {
+      const profileForRun = missionPropagationProfile ?? await refreshMissionPropagationProfile(mission.id);
+      const runSignature = missionRunSignature(mission, missionTimelineEvents, profileForRun, missionTrajectoryCadenceSeconds);
       const [missionResponse, legacyResponse] = await Promise.all([
-        fetchMissionTrajectory(mission.id, start.toISOString(), end.toISOString(), missionTrajectoryStepSeconds),
+        fetchMissionTrajectory(mission.id, start.toISOString(), end.toISOString(), missionTrajectoryCadenceSeconds),
         manualOrbitId
-          ? fetchManualOrbitTrajectory(manualOrbitId, start.toISOString(), end.toISOString(), missionTrajectoryStepSeconds, undefined)
-          : fetchOrbitTrajectory(selectedNoradId as string | number, start.toISOString(), end.toISOString(), missionTrajectoryStepSeconds),
+          ? fetchManualOrbitTrajectory(manualOrbitId, start.toISOString(), end.toISOString(), missionTrajectoryCadenceSeconds, undefined)
+          : fetchOrbitTrajectory(selectedNoradId as string | number, start.toISOString(), end.toISOString(), missionTrajectoryCadenceSeconds),
       ]);
       const missionSatellite = missionOverlaySatellite(selectedSnapshot.satellite, "mission");
       const legacySatellite = missionOverlaySatellite(selectedSnapshot.satellite, "legacy");
@@ -3037,7 +3145,10 @@ export function OrbitalDashboard() {
         mission: buildTrajectorySnapshot(missionSatellite, missionResponse.states, centerTime),
         legacy: buildTrajectorySnapshot(legacySatellite, legacyResponse.states, centerTime),
         generatedAt: new Date().toISOString(),
-        message: `${missionResponse.states.length} mission samples generated.`,
+        message: `${missionResponse.states.length} mission samples generated at ${missionTrajectoryCadenceSeconds}s cadence.`,
+        runSignature,
+        sampleCadenceSeconds: missionTrajectoryCadenceSeconds,
+        stale: false,
       });
       setShowMissionComparison(true);
       await refreshMissionPropagationProfile(mission.id);
@@ -3051,7 +3162,7 @@ export function OrbitalDashboard() {
     } finally {
       setIsMissionTrajectoryLoading(false);
     }
-  }, [manualOrbitId, mission, refreshMissionPropagationProfile, selectedNoradId, selectedSnapshot, trajectoryAnchorTime, trajectoryWindowOptions.stepSec]);
+  }, [manualOrbitId, mission, missionPropagationProfile, missionTimelineEvents, missionTrajectoryCadenceSeconds, missionTrajectoryCadenceValidation, refreshMissionPropagationProfile, selectedNoradId, selectedSnapshot, trajectoryAnchorTime]);
 
   useEffect(() => {
     let ignore = false;
@@ -4005,6 +4116,10 @@ export function OrbitalDashboard() {
             isTrajectoryLoading={isMissionTrajectoryLoading}
             showComparison={showMissionComparison}
             trajectoryOverlay={missionTrajectoryOverlay}
+            trajectoryStale={missionTrajectoryIsStale}
+            propagationProfile={missionPropagationProfile}
+            trajectoryCadenceInput={missionTrajectoryCadenceInput}
+            trajectoryCadenceError={missionTrajectoryCadenceValidation}
             dragEventId={timelineDragEventId}
             simulationTimeIso={simTime.toISOString()}
             onInitializeMission={openMissionSetup}
@@ -4017,6 +4132,7 @@ export function OrbitalDashboard() {
             onToggleEvent={toggleTimelineEventEnabled}
             onSelectEvent={setSelectedTimelineEventId}
             onGenerateTrajectory={generateMissionTrajectory}
+            onTrajectoryCadenceChange={setMissionTrajectoryCadenceInput}
             onToggleComparison={() => setShowMissionComparison((value) => !value)}
             onDragEvent={setTimelineDragEventId}
             onDropEvent={reorderTimelineEvent}
@@ -5560,32 +5676,6 @@ function AnalysisModalContent({
 
         {tab === "propagation" && (
           <HudPanel>
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Active Force Model Status</p>
-              <span className="border border-zinc-500/40 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-zinc-400">Read-only</span>
-            </div>
-            <p className="mt-2 text-xs leading-5 text-zinc-500">
-              {missionPropagationProfile
-                ? "Status summary of the mission propagation profile used by trajectory generation. Edit force models and spacecraft parameters in the Mission Propagation Profile Editor below."
-                : "Catalog analysis configuration fallback. Open or create a mission to inspect the exact trajectory profile."}
-            </p>
-            <div className="mt-4 grid gap-2 md:grid-cols-2">
-              {[
-                ["Propagator", visiblePropagationConfig?.propagatorType.replaceAll("_", " ") ?? "Manual/default"],
-                ["Gravity", visiblePropagationConfig?.gravityEnabled ? `ON ${visiblePropagationConfig.gravityDegree}x${visiblePropagationConfig.gravityOrder}` : "OFF"],
-                ["Atmospheric Drag", visiblePropagationConfig?.dragEnabled ? "ON" : "OFF"],
-                ["Solar Radiation", visiblePropagationConfig?.solarRadiationPressureEnabled ? "ON" : "OFF"],
-                ["Third Body Sun", visiblePropagationConfig?.thirdBodySunEnabled ? "ON" : "OFF"],
-                ["Third Body Moon", visiblePropagationConfig?.thirdBodyMoonEnabled ? "ON" : "OFF"],
-                ["Maneuver Model", visiblePropagationConfig?.maneuverModelEnabled ? "ON" : "OFF"],
-                ["Relativity / Tides", "Not configured"],
-              ].map(([label, value]) => (
-                <div key={label} className="flex items-center justify-between gap-3 border border-white/10 bg-black/25 px-3 py-2 text-xs">
-                  <span className="font-mono uppercase tracking-[0.12em] text-zinc-500">{label}</span>
-                  <span className={String(value).startsWith("ON") ? "font-mono text-lime-100" : "font-mono text-zinc-300"}>{value}</span>
-                </div>
-              ))}
-            </div>
             {missionPropagationProfile ? (
               <PropagationProfileEditor
                 key={`${missionPropagationProfile.id}-${missionPropagationProfile.updatedAt}`}
@@ -5593,9 +5683,20 @@ function AnalysisModalContent({
                 status={propagationProfileStatus}
                 onUpdate={onUpdatePropagationProfile}
               />
-            ) : propagationProfileStatus ? (
-              <p className="mt-3 text-xs leading-5 text-zinc-500">{propagationProfileStatus}</p>
-            ) : null}
+            ) : (
+              <div className="border border-cyan-300/15 bg-black/20 p-3">
+                <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Propagation Setup</p>
+                <p className="mt-2 text-xs leading-5 text-zinc-500">
+                  Open or create a mission to inspect and edit the exact mission propagation profile used by trajectory generation.
+                </p>
+                {visiblePropagationConfig && (
+                  <p className="mt-3 text-xs leading-5 text-zinc-400">
+                    Catalog fallback currently visible: {visiblePropagationConfig.propagatorType.replaceAll("_", " ")}. Mission trajectory generation uses mission profiles, not this fallback.
+                  </p>
+                )}
+                {propagationProfileStatus && <p className="mt-3 text-xs leading-5 text-zinc-500">{propagationProfileStatus}</p>}
+              </div>
+            )}
           </HudPanel>
         )}
       </div>
@@ -5614,6 +5715,7 @@ function PropagationProfileEditor({
 }) {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showExpert, setShowExpert] = useState(false);
+  const [setupDraft, setSetupDraft] = useState(() => propagationSetupDraftFromProfile(profile));
   const [advancedDraft, setAdvancedDraft] = useState(() => spacecraftDraftFromProfile(profile));
   const [expertDraft, setExpertDraft] = useState(() => integratorDraftFromProfile(profile));
 
@@ -5625,6 +5727,14 @@ function PropagationProfileEditor({
     { key: "thirdBodyMoonEnabled" as const, label: "Moon" },
     { key: "maneuverModelEnabled" as const, label: "Maneuver" },
   ];
+
+  const saveSetup = () => {
+    void onUpdate({
+      propagatorType: setupDraft.propagatorType,
+      gravityDegree: Math.trunc(Math.max(0, numberFromDraft(setupDraft.gravityDegree, profile.gravityDegree))),
+      gravityOrder: Math.trunc(Math.max(0, numberFromDraft(setupDraft.gravityOrder, profile.gravityOrder))),
+    });
+  };
 
   const saveAdvanced = () => {
     void onUpdate({
@@ -5652,16 +5762,46 @@ function PropagationProfileEditor({
     <div className="mt-5 border border-cyan-300/15 bg-black/20 p-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-cyan-300">Mission Propagation Profile Editor</p>
-          <p className="mt-1 text-xs text-zinc-500">{profile.name} · edit force-model toggles and spacecraft parameters for this mission only.</p>
+          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-cyan-300">Propagation Setup</p>
+          <p className="mt-1 text-xs text-zinc-500">{profile.name} · authoritative mission configuration used by trajectory generation and Orekit force-model construction.</p>
         </div>
         <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
           {profile.preset.replaceAll("_", " ")}
         </span>
       </div>
 
+      <div className="mt-3 grid gap-2 md:grid-cols-3">
+        <label className="block">
+          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">Propagator Type</span>
+          <select
+            value={setupDraft.propagatorType}
+            onChange={(event) => setSetupDraft((current) => ({ ...current, propagatorType: event.target.value as PropagatorTypeId }))}
+            className="mt-1 w-full border border-white/10 bg-black/35 px-2 py-1.5 text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
+          >
+            <option value="NUMERICAL">Numerical</option>
+            <option value="KEPLERIAN">Keplerian</option>
+            <option value="TLE_SGP4">TLE SGP4</option>
+          </select>
+        </label>
+        <DetailMetric label="Integrator" value="Dormand Prince 853" />
+        <DetailMetric label="Profile Revision" value={compactIsoUtc(profile.updatedAt)} />
+        <ProfileNumberInput
+          label="Gravity Degree"
+          value={setupDraft.gravityDegree}
+          onChange={(value) => setSetupDraft((current) => ({ ...current, gravityDegree: value }))}
+        />
+        <ProfileNumberInput
+          label="Gravity Order"
+          value={setupDraft.gravityOrder}
+          onChange={(value) => setSetupDraft((current) => ({ ...current, gravityOrder: value }))}
+        />
+        <button type="button" onClick={saveSetup} className="workspace-action">
+          Save Propagation Setup
+        </button>
+      </div>
+
       <div className="mt-3 grid grid-cols-3 gap-1.5">
-        <p className="col-span-3 font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">Force Model Toggles</p>
+        <p className="col-span-3 font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">Force Models</p>
         {forceModes.map((mode) => {
           const checked = Boolean(profile[mode.key]);
           return (
@@ -5678,6 +5818,15 @@ function PropagationProfileEditor({
             </button>
           );
         })}
+        <button type="button" disabled className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-600" title="Future force model">
+          Relativity Off
+        </button>
+        <button type="button" disabled className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-600" title="Future force model">
+          Solid Tides Off
+        </button>
+        <button type="button" disabled className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-600" title="Future force model">
+          Ocean Tides Off
+        </button>
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2">
@@ -5763,6 +5912,14 @@ function ProfileNumberInput({
       />
     </label>
   );
+}
+
+function propagationSetupDraftFromProfile(profile: BackendPropagationProfile) {
+  return {
+    propagatorType: profile.propagatorType,
+    gravityDegree: String(profile.gravityDegree),
+    gravityOrder: String(profile.gravityOrder),
+  };
 }
 
 function spacecraftDraftFromProfile(profile: BackendPropagationProfile) {
@@ -6108,6 +6265,10 @@ function MissionTimelinePanel({
   isTrajectoryLoading,
   showComparison,
   trajectoryOverlay,
+  trajectoryStale,
+  propagationProfile,
+  trajectoryCadenceInput,
+  trajectoryCadenceError,
   dragEventId,
   simulationTimeIso,
   onInitializeMission,
@@ -6120,6 +6281,7 @@ function MissionTimelinePanel({
   onToggleEvent,
   onSelectEvent,
   onGenerateTrajectory,
+  onTrajectoryCadenceChange,
   onToggleComparison,
   onDragEvent,
   onDropEvent,
@@ -6135,6 +6297,10 @@ function MissionTimelinePanel({
   isTrajectoryLoading: boolean;
   showComparison: boolean;
   trajectoryOverlay: MissionTrajectoryOverlay | null;
+  trajectoryStale: boolean;
+  propagationProfile: BackendPropagationProfile | null;
+  trajectoryCadenceInput: string;
+  trajectoryCadenceError: string | null;
   dragEventId: string | null;
   simulationTimeIso: string;
   onInitializeMission: () => void;
@@ -6147,6 +6313,7 @@ function MissionTimelinePanel({
   onToggleEvent: (event: BackendMissionTimelineEvent) => void;
   onSelectEvent: (eventId: string) => void;
   onGenerateTrajectory: () => void;
+  onTrajectoryCadenceChange: (value: string) => void;
   onToggleComparison: () => void;
   onDragEvent: (eventId: string | null) => void;
   onDropEvent: (sourceEventId: string, targetEventId: string) => void;
@@ -6293,6 +6460,56 @@ function MissionTimelinePanel({
 
       {mission && (
         <div className="mt-3 border border-cyan-300/15 bg-black/25 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Mission Run Summary</p>
+              <p className="mt-1 text-[11px] leading-5 text-zinc-500">
+                Configuration that will be sent to the backend trajectory endpoint and used to build the Orekit propagation context.
+              </p>
+            </div>
+            <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${trajectoryStale ? "border-amber-300/40 text-amber-100" : trajectoryOverlay ? "border-lime-300/40 text-lime-100" : "border-white/15 text-zinc-400"}`}>
+              {trajectoryStale ? "Stale Trajectory" : trajectoryOverlay ? "Generated" : "Not Run"}
+            </span>
+          </div>
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            <DetailMetric label="Mission Subject" value={subjectSummary.label} />
+            <DetailMetric label="Orbit Source" value={subjectSummary.detail} />
+            <DetailMetric label="Propagator" value={propagationProfile?.propagatorType.replaceAll("_", " ") ?? mission.propagatorType.replaceAll("_", " ")} />
+            <DetailMetric label="Integrator" value={integratorSummary(propagationProfile)} />
+            <DetailMetric label="Force Models" value={forceModelSummary(propagationProfile)} />
+            <DetailMetric label="Spacecraft" value={propagationProfile ? `Dry ${propagationProfile.dryMassKg} kg · Fuel ${propagationProfile.fuelMassKg} kg` : "Profile not loaded"} />
+            <DetailMetric label="Mission Window" value={`${compactIsoUtc(mission.scenarioStart)} -> ${compactIsoUtc(mission.scenarioEnd)}`} />
+            <DetailMetric label="Timeline" value={`${analysis.burnCount} Burns · ${analysis.coastCount} Coasts · ${analysis.eventCount} Events`} />
+          </div>
+          <div className="mt-3 grid gap-2 md:grid-cols-[1fr_1fr]">
+            <label className="grid gap-1">
+              <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Trajectory Sample Cadence</span>
+              <input
+                value={trajectoryCadenceInput}
+                onChange={(event) => onTrajectoryCadenceChange(event.target.value)}
+                inputMode="numeric"
+                className={`border bg-black/45 px-3 py-2 font-mono text-sm outline-none ${trajectoryCadenceError ? "border-rose-300/60 text-rose-100" : "border-cyan-300/25 text-cyan-100"}`}
+                aria-invalid={Boolean(trajectoryCadenceError)}
+              />
+              <span className={trajectoryCadenceError ? "text-xs text-rose-100" : "text-xs text-zinc-500"}>
+                {trajectoryCadenceError ?? `Allowed range: ${missionTrajectoryMinStepSeconds}-${missionTrajectoryMaxStepSeconds} seconds. This exact value is sent to the trajectory API.`}
+              </span>
+            </label>
+            <div className="grid gap-2 border border-white/10 bg-black/20 p-2 text-xs">
+              <DetailMetric label="Trajectory Duration" value={`${defaultMissionTrajectoryWindowMinutes * 2} min preview window`} />
+              <DetailMetric label="Profile Revision" value={propagationProfile?.updatedAt ? compactIsoUtc(propagationProfile.updatedAt) : "Profile not loaded"} />
+            </div>
+          </div>
+          {trajectoryStale && (
+            <div className="mt-3 border border-amber-300/30 bg-amber-300/[0.06] px-3 py-2 text-xs text-amber-100">
+              Mission configuration changed. Regenerate trajectory.
+            </div>
+          )}
+        </div>
+      )}
+
+      {mission && (
+        <div className="mt-3 border border-cyan-300/15 bg-black/25 p-3">
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Visual Mission Timeline</p>
@@ -6395,7 +6612,8 @@ function MissionTimelinePanel({
           <button
             type="button"
             onClick={onGenerateTrajectory}
-            disabled={isTrajectoryLoading}
+            disabled={isTrajectoryLoading || Boolean(trajectoryCadenceError)}
+            title={trajectoryCadenceError ?? "Generate trajectory using the displayed mission run configuration."}
             className="border border-cyan-300 bg-cyan-300 px-3 py-2 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-950 transition hover:bg-cyan-200 disabled:cursor-wait disabled:opacity-60"
           >
             {isTrajectoryLoading ? "Generating" : trajectoryOverlay ? "Update Trajectory" : "Generate Trajectory"}
