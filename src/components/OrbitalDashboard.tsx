@@ -299,6 +299,7 @@ const orbitTemplateCategories = [
   "Sun Sync",
   "Custom",
 ] satisfies OrbitTemplateCategory[];
+const missionTrajectoryMinStepSeconds = 5;
 const groundTrackRangeOptions = [
   {
     id: "live",
@@ -3020,14 +3021,15 @@ export function OrbitalDashboard() {
     const centerTime = trajectoryAnchorTime;
     const start = addMinutes(centerTime, -defaultMissionTrajectoryWindowMinutes);
     const end = addMinutes(centerTime, defaultMissionTrajectoryWindowMinutes);
+    const missionTrajectoryStepSeconds = Math.max(missionTrajectoryMinStepSeconds, trajectoryWindowOptions.stepSec);
     setIsMissionTrajectoryLoading(true);
-    setTimelineStatus("Generating mission trajectory...");
+    setTimelineStatus(`Generating mission trajectory at ${missionTrajectoryStepSeconds}s sample cadence...`);
     try {
       const [missionResponse, legacyResponse] = await Promise.all([
-        fetchMissionTrajectory(mission.id, start.toISOString(), end.toISOString(), trajectoryWindowOptions.stepSec),
+        fetchMissionTrajectory(mission.id, start.toISOString(), end.toISOString(), missionTrajectoryStepSeconds),
         manualOrbitId
-          ? fetchManualOrbitTrajectory(manualOrbitId, start.toISOString(), end.toISOString(), trajectoryWindowOptions.stepSec, undefined)
-          : fetchOrbitTrajectory(selectedNoradId as string | number, start.toISOString(), end.toISOString(), trajectoryWindowOptions.stepSec),
+          ? fetchManualOrbitTrajectory(manualOrbitId, start.toISOString(), end.toISOString(), missionTrajectoryStepSeconds, undefined)
+          : fetchOrbitTrajectory(selectedNoradId as string | number, start.toISOString(), end.toISOString(), missionTrajectoryStepSeconds),
       ]);
       const missionSatellite = missionOverlaySatellite(selectedSnapshot.satellite, "mission");
       const legacySatellite = missionOverlaySatellite(selectedSnapshot.satellite, "legacy");
@@ -5558,11 +5560,14 @@ function AnalysisModalContent({
 
         {tab === "propagation" && (
           <HudPanel>
-            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Propagation Configuration</p>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Active Force Model Status</p>
+              <span className="border border-zinc-500/40 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-zinc-400">Read-only</span>
+            </div>
             <p className="mt-2 text-xs leading-5 text-zinc-500">
               {missionPropagationProfile
-                ? "Exact mission propagation profile used by generated trajectories."
-                : "Catalog analysis configuration fallback. Open or create a mission to edit the exact trajectory profile."}
+                ? "Status summary of the mission propagation profile used by trajectory generation. Edit force models and spacecraft parameters in the Mission Propagation Profile Editor below."
+                : "Catalog analysis configuration fallback. Open or create a mission to inspect the exact trajectory profile."}
             </p>
             <div className="mt-4 grid gap-2 md:grid-cols-2">
               {[
@@ -5647,8 +5652,8 @@ function PropagationProfileEditor({
     <div className="mt-5 border border-cyan-300/15 bg-black/20 p-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-cyan-300">Mission Profile Editor</p>
-          <p className="mt-1 text-xs text-zinc-500">{profile.name}</p>
+          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-cyan-300">Mission Propagation Profile Editor</p>
+          <p className="mt-1 text-xs text-zinc-500">{profile.name} · edit force-model toggles and spacecraft parameters for this mission only.</p>
         </div>
         <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
           {profile.preset.replaceAll("_", " ")}
@@ -5656,6 +5661,7 @@ function PropagationProfileEditor({
       </div>
 
       <div className="mt-3 grid grid-cols-3 gap-1.5">
+        <p className="col-span-3 font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">Force Model Toggles</p>
         {forceModes.map((mode) => {
           const checked = Boolean(profile[mode.key]);
           return (
@@ -5685,6 +5691,7 @@ function PropagationProfileEditor({
 
       {showAdvanced && (
         <div className="mt-3 grid gap-2 md:grid-cols-4">
+          <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500 md:col-span-4">Spacecraft Physical Parameters</p>
           {[
             ["dryMassKg", "Dry Mass kg"],
             ["fuelMassKg", "Fuel Mass kg"],
@@ -5710,6 +5717,7 @@ function PropagationProfileEditor({
 
       {showExpert && (
         <div className="mt-3 grid gap-2 md:grid-cols-4">
+          <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500 md:col-span-4">Numerical Integrator Settings</p>
           {[
             ["integratorMinStep", "Min Step s"],
             ["integratorMaxStep", "Max Step s"],

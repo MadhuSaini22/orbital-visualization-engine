@@ -3,6 +3,7 @@ package com.orbitvisualizationengine.server.api;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -30,6 +31,18 @@ public class ApiExceptionHandler {
 
   @ExceptionHandler(MethodArgumentNotValidException.class)
   ResponseEntity<Map<String, Object>> validationError(MethodArgumentNotValidException exception) {
-    return ResponseEntity.badRequest().body(Map.of("error", "Request validation failed"));
+    var errors = exception.getBindingResult().getFieldErrors().stream()
+        .map(ApiExceptionHandler::fieldErrorMessage)
+        .toList();
+    var message = errors.isEmpty()
+        ? "Request validation failed"
+        : "Request validation failed: " + String.join("; ", errors);
+    return ResponseEntity.badRequest().body(Map.of(
+        "error", message,
+        "validationErrors", errors));
+  }
+
+  private static String fieldErrorMessage(FieldError error) {
+    return error.getField() + " " + error.getDefaultMessage();
   }
 }
