@@ -10,6 +10,55 @@ Orbit -> Propagation Profile -> Mission -> Mission Profile Snapshot -> Timeline 
 
 The main screen is for situational awareness. Planning, analysis, workspace management, and reusable templates live in dedicated command modals.
 
+
+## Running Locally
+
+Install frontend dependencies:
+
+```bash
+npm install
+```
+
+Run the frontend:
+
+```bash
+npm run dev
+```
+
+Run the backend:
+
+```bash
+cd server
+mvn spring-boot:run
+```
+
+Open:
+
+```text
+http://localhost:3000
+```
+
+## Verification Commands
+
+Frontend lint:
+
+```bash
+npm run lint
+```
+
+Frontend production build:
+
+```bash
+npm run build
+```
+
+Backend tests:
+
+```bash
+cd server
+mvn test
+```
+
 ## Architecture Overview
 
 ```mermaid
@@ -174,8 +223,15 @@ sequenceDiagram
   participant Store as Workspace Storage
 
   User->>UI: Create or load orbit
-  UI->>API: Persist backend orbit if manual/imported
-  API-->>UI: subjectNoradId or subjectOrbitId
+  alt Imported multi-TLE
+    UI->>UI: Show all imported objects
+    User->>UI: Select exactly one Mission Spacecraft
+    UI->>API: POST /api/manual-orbits for selected TLE only
+    API-->>UI: subjectOrbitId
+  else Catalog or manual state
+    UI->>API: Persist backend orbit if manual/imported
+    API-->>UI: subjectNoradId or subjectOrbitId
+  end
   User->>UI: Create Mission
   UI->>API: POST /api/missions
   API->>API: Copy orbit profile into mission profile
@@ -198,7 +254,7 @@ sequenceDiagram
   participant API as MissionController
   participant Service as MissionTrajectoryService
   participant Executor as TimelineExecutor
-  participant Orekit as NumericalPropagator / Orekit
+  participant Prop as Selected Propagator / Orekit
 
   User->>UI: Generate Trajectory
   UI->>API: POST /api/missions/{missionId}/trajectory
@@ -206,10 +262,11 @@ sequenceDiagram
   Service->>Executor: timeline events -> commands
   Executor-->>Service: PropagationManeuverCommand[]
   Service->>Service: Load mission propagation profile
-  Service->>Service: Reject finite burns if maneuver model is disabled
+  Service->>Service: Select NUMERICAL / KEPLERIAN / TLE_SGP4 from profile
+  Service->>Service: Reject finite burns unless selected propagator supports maneuvers
   Service->>Service: Build mission-scoped PropagationContext
-  Service->>Orekit: trajectory(context, start, end, step)
-  Orekit-->>Service: Ephemeris samples
+  Service->>Prop: trajectory(context, start, end, step)
+  Prop-->>Service: Ephemeris samples + model name
   Service-->>API: states
   API-->>UI: PropagationResponse
   UI->>UI: Store overlay and close Mission Planner
@@ -220,7 +277,8 @@ sequenceDiagram
 ```mermaid
 flowchart LR
   TLE[TLE / Manual State / Template] --> OrbitObject[Frontend Orbit Object]
-  OrbitObject --> BackendOrbit[Backend Manual Orbit or Catalog NORAD]
+  OrbitObject --> SpacecraftChoice[Mission Spacecraft Selection]
+  SpacecraftChoice --> BackendOrbit[Backend Manual Orbit or Catalog NORAD]
   BackendOrbit --> OrbitProfile[Orbit Propagation Profile]
   OrbitProfile --> Mission[Mission Subject]
   Mission --> MissionProfile[Mission Profile Snapshot]
@@ -240,207 +298,27 @@ flowchart LR
   OrbitSnapshots --> Cesium[Cesium Renderer]
 ```
 
-## Command Center Screens
 
-| Area | Purpose | Notes |
-| --- | --- | --- |
-| Main Screen | Situational awareness | Earth visualization, selected orbit, active mission, status badges, simulation controls |
-| Mission Planner | Mission design | Mission setup, event creation, visual timeline, scheduling, trajectory generation |
-| Analysis | Inspection | Trajectory overlay, range, conjunction status, maneuver summaries, propagation config |
-| Workspace | Asset management | Orbit and mission libraries, import/export, clone, rename, delete |
-| Templates | Reuse | Orbit templates, mission templates, import/export, metadata |
+## Mission Spacecraft Rule
 
-## Feature Matrix
+Imported TLE files may contain multiple spacecraft. The application treats those objects as visualization and analysis objects until the operator chooses exactly one `Mission Spacecraft`.
 
-| Feature | Status | Storage / API | Notes |
-| --- | --- | --- | --- |
-| Catalog TLE orbit | Available | Backend catalog / NORAD | Supports backend mission subject via `subjectNoradId` |
-| Imported TLE orbit | Available | Backend manual orbit | Persisted as manual `TLE` orbit for `subjectOrbitId` mission planning |
-| Classical elements orbit | Available | Backend manual orbit | Mission subject uses `subjectOrbitId` |
-| Cartesian state orbit | Available | Backend manual orbit | Mission subject uses `subjectOrbitId` |
-| Orbit library | Available | `localStorage` | `orbit-library-v1` |
-| Mission library | Available | `localStorage` | `mission-library-v1` |
-| Orbit templates | Available | `localStorage` | `orbit-template-library-v1` |
-| Mission templates | Available | `localStorage` | `mission-template-library-v1` |
-| COAST events | Available | Backend timeline | Propagation no-op |
-| FINITE_BURN events | Available | Backend timeline | Existing finite burn bridge; no new physics |
-| UTC scheduling | Available | Backend `executionTime` | Backend execution remains UTC |
-| MET scheduling | Available | Event metadata + computed UTC | Planning layer only |
-| After Event scheduling | Available | Event metadata + computed UTC | Planning layer only |
-| Visual timeline | Available | Frontend planning layer | Draggable scheduling surface |
-| Mission trajectory | Available | `POST /api/missions/{id}/trajectory` | Uses existing numerical propagation |
-| Propagation profiles | Available | Backend `propagation_profiles` | Source-independent profiles for catalog, imported TLE, classical, Cartesian, and missions |
-| Propagation config tab | Available | Mission profile API | Shows the exact mission profile used by generated trajectories |
-| Conjunction sync | Not implemented | Disabled UI | Marked `Coming Soon` |
-| Impulsive burns | Not implemented | N/A | Future phase |
-| Vector burns | Not implemented | N/A | Future phase |
+Only the Mission Spacecraft receives:
 
-## State Management
+- mission propagation profile.
+- numerical integrator settings.
+- force-model configuration.
+- spacecraft mass and optical/aerodynamic properties.
+- maneuver timeline execution.
 
-Most state is intentionally local to `OrbitalDashboard.tsx` because the app is currently a single command-center workspace.
+Non-selected imported objects remain visible on the globe and available for range/conjunction-style analysis, but they continue using their native TLE/SGP4 visualization path and do not receive mission maneuvers.
 
-State groups:
+## Propagator UI Behavior
 
-- orbit source state: active source, selected satellite, manual orbit id.
-- simulation state: simulation time, playback speed, frame mode.
-- mission state: active mission, timeline events, selected event, mission trajectory overlay.
-- scheduling state: UTC/MET mode, dependency metadata, visual timeline drag state.
-- analysis state: range pair, conjunction visibility, maneuver visibility, legacy catalog analysis config, mission propagation profile.
-- workspace state: orbit library, mission library, templates, import/export refs.
+Mission propagation profile selection is not cosmetic:
 
-Persistent local state is handled by `src/services/workspaceStorage.ts`.
+- `NUMERICAL` exposes the backend-supported Dormand Prince 853 integrator, gravity degree/order, force-model toggles, spacecraft parameters, and expert integrator tolerances.
+- `KEPLERIAN` hides numerical force-model and integrator controls. The Mission Summary reports force models and integrator as not applicable.
+- `TLE_SGP4` hides numerical controls. The Mission Summary reports force models as embedded in SGP4 and integrator as not applicable.
 
-Backend API calls are centralized in `src/services/orbitServerApi.ts`.
-
-## Folder Structure
-
-```text
-src/
-  app/
-    layout.tsx
-    page.tsx
-    api/tle/route.ts
-
-  components/
-    OrbitalDashboard.tsx
-    CesiumGlobe.tsx
-
-  geometry/
-    orbitalMath.ts
-    utcDateTime.js
-
-  services/
-    orbitServerApi.ts
-    workspaceStorage.ts
-
-server/
-  src/main/java/com/orbitvisualizationengine/server/
-    api/
-      MissionController.java
-      ManualOrbitController.java
-      OrbitController.java
-
-    domain/
-      Mission.java
-      MissionTimelineEvent.java
-      ManualOrbitRecord.java
-      PropagationProfile.java
-
-    dto/
-      MissionTrajectoryRequest.java
-      CreateMissionRequest.java
-      CreateTimelineEventRequest.java
-      PropagationProfileResponse.java
-
-    propagation/
-      NumericalPropagator.java
-      OrekitManeuverFactory.java
-      PropagationContext.java
-
-    repository/
-      MissionRepository.java
-      MissionTimelineEventRepository.java
-      ManualOrbitRepository.java
-      PropagationProfileRepository.java
-
-    service/
-      MissionTrajectoryService.java
-      MissionTimelineService.java
-      TimelineExecutor.java
-      ManualOrbitService.java
-      PropagationProfileService.java
-
-  src/main/resources/db/
-    schema.sql
-
-audit/
-  architecture and validation reports
-```
-
-## Important Boundaries
-
-Do not casually modify these when working on UI/workspace features:
-
-- `server/src/main/java/.../propagation/NumericalPropagator.java`
-- `server/src/main/java/.../propagation/OrekitManeuverFactory.java`
-- `server/src/main/java/.../service/TimelineExecutor.java`
-- trajectory sampling logic.
-- Orekit force-model math.
-- backend UTC execution semantics.
-
-Planning-layer UX can change independently as long as it continues producing backend-compatible UTC `executionTime` values.
-
-## Running Locally
-
-Install frontend dependencies:
-
-```bash
-npm install
-```
-
-Run the frontend:
-
-```bash
-npm run dev
-```
-
-Run the backend:
-
-```bash
-cd server
-mvn spring-boot:run
-```
-
-Open:
-
-```text
-http://localhost:3000
-```
-
-## Verification Commands
-
-Frontend lint:
-
-```bash
-npm run lint
-```
-
-Frontend production build:
-
-```bash
-npm run build
-```
-
-Backend tests:
-
-```bash
-cd server
-mvn test
-```
-
-## Deployment Notes
-
-Frontend:
-
-- Next.js app can be deployed as a standard Node/Next deployment.
-- The `/api/tle` route proxies external TLE URLs to avoid browser CORS issues.
-
-Backend:
-
-- Spring Boot service requires database connectivity and Orekit data availability.
-- Schema initialization is defined in `server/src/main/resources/db/schema.sql`.
-- Mission trajectory generation requires the backend service to be reachable from the frontend API client configuration.
-- Existing `satellite_analysis_configs` rows are synced into `propagation_profiles` for catalog compatibility.
-- Manual/imported orbit profiles are generated on orbit creation and lazily for older persisted manual orbit records.
-- Mission creation snapshots the source profile into an owner=`MISSION` profile used by trajectory generation.
-
-## Developer Onboarding Checklist
-
-1. Read this README.
-2. Skim `audit/command-center-ui-rearchitecture-report.md`.
-3. Open `src/components/OrbitalDashboard.tsx` and identify the command modal sections.
-4. Open `src/services/orbitServerApi.ts` and map frontend calls to backend endpoints.
-5. Open `server/src/main/java/.../MissionTrajectoryService.java`.
-6. Confirm mission trajectory flow reaches `NumericalPropagator` without frontend physics manipulation.
-7. Run `npm run lint`.
-8. Run `npm run build`.
+Finite-burn mission events require `NUMERICAL` propagation. If enabled finite burns exist under `KEPLERIAN` or `TLE_SGP4`, the Mission Planner disables trajectory generation and explains the incompatibility.

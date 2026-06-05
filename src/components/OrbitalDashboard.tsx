@@ -172,6 +172,14 @@ type MissionTrajectoryOverlay = {
   sampleCadenceSeconds: number;
   stale: boolean;
 };
+type OperationLabel =
+  | "Importing TLE..."
+  | "Binding mission spacecraft..."
+  | "Creating orbit..."
+  | "Creating mission..."
+  | "Saving timeline event..."
+  | "Saving propagation setup..."
+  | "Generating trajectory...";
 type TimelineLayoutBlock = {
   event: BackendMissionTimelineEvent;
   offsetSeconds: number;
@@ -1475,6 +1483,12 @@ function forceModelSummary(profile: BackendPropagationProfile | null) {
   if (!profile) {
     return "Profile not loaded";
   }
+  if (profile.propagatorType === "KEPLERIAN") {
+    return "Not applicable for Keplerian analytical propagation";
+  }
+  if (profile.propagatorType === "TLE_SGP4") {
+    return "Embedded in SGP4";
+  }
   return [
     profile.gravityEnabled ? `Gravity ${profile.gravityDegree}x${profile.gravityOrder}` : "Gravity OFF",
     profile.dragEnabled ? "Drag ON" : "Drag OFF",
@@ -1491,6 +1505,9 @@ function forceModelSummary(profile: BackendPropagationProfile | null) {
 function integratorSummary(profile: BackendPropagationProfile | null) {
   if (!profile) {
     return "Profile not loaded";
+  }
+  if (profile.propagatorType !== "NUMERICAL") {
+    return "Not applicable";
   }
   return `Dormand Prince 853 · min ${profile.integratorMinStep}s · max ${profile.integratorMaxStep}s · abs ${profile.integratorAbsTol} · rel ${profile.integratorRelTol}`;
 }
@@ -1772,6 +1789,8 @@ export function OrbitalDashboard() {
   const [missionTrajectoryCadenceInput, setMissionTrajectoryCadenceInput] = useState(String(missionTrajectoryMinStepSeconds));
   const [showMissionComparison, setShowMissionComparison] = useState(false);
   const [isMissionTrajectoryLoading, setIsMissionTrajectoryLoading] = useState(false);
+  const [activeOperationLabel, setActiveOperationLabel] = useState<OperationLabel | null>(null);
+  const [importedMissionSpacecraftId, setImportedMissionSpacecraftId] = useState<string | null>(null);
   const [showConjunctions, setShowConjunctions] = useState(false);
   const [conjunctionEvents, setConjunctionEvents] = useState<ConjunctionEvent[]>([]);
   const [selectedConjunctionId, setSelectedConjunctionId] = useState<string | null>(null);
@@ -1979,6 +1998,9 @@ export function OrbitalDashboard() {
   const selectedConjunction = conjunctionSnapshots.find((snapshot) => snapshot.event.id === selectedConjunctionId) ?? conjunctionSnapshots[0] ?? null;
   const latestSelectedId = selectedSatelliteIds.at(-1) ?? null;
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
+  const missionSubjectSnapshot = activeDataSource === "endpoint" && importedMissionSpacecraftId
+    ? snapshots.find((item) => item.satellite.id === importedMissionSpacecraftId) ?? selectedSnapshot
+    : selectedSnapshot;
   const selectedNoradId = activeDataSource === "manual" ? null : selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? null;
   const canUseAnalysisConfig = activeDataSource === "backend" && Boolean(selectedNoradId);
   const canUseMissionTimeline = canUseAnalysisConfig || Boolean(manualOrbitId);
@@ -1987,7 +2009,7 @@ export function OrbitalDashboard() {
     : activeDataSource === "manual"
       ? "Create a manual Cartesian or Classical Elements orbit first, then create a mission."
       : activeDataSource === "endpoint"
-        ? "Persist the imported TLE as a backend orbit before creating a mission timeline."
+        ? "Select one imported object as the Mission Spacecraft before creating a mission timeline."
         : "Load a backend catalog orbit to create a mission timeline.";
   const canUseRangeCheck = satellites.length >= 2;
   const canShowManeuvers = maneuverSnapshots.length > 0;
@@ -2532,6 +2554,7 @@ export function OrbitalDashboard() {
     setMessages(result.errors);
     setSatellites(result.satellites);
     setSelectedSatelliteIds(defaultSelectedIds);
+    setImportedMissionSpacecraftId(null);
     setShowRangeCheck(false);
     setShowManeuvers(false);
     setShowConjunctions(false);
@@ -2641,23 +2664,29 @@ export function OrbitalDashboard() {
 
   const handleCreateManualOrbit = useCallback(async (request: CreateManualOrbitRequest) => {
     setMessages([`Creating ${request.type.replaceAll("_", " ").toLowerCase()} orbit...`]);
-    const orbit = await createManualOrbit(request);
-    const satellite = manualOrbitToSatellite(orbit);
-    rememberOrbit(storedOrbitFromManualOrbit(request, orbit, satellite));
-    setSatellites([satellite]);
-    setSelectedSatelliteIds([satellite.id]);
-    setShowRangeCheck(false);
-    setShowManeuvers(false);
-    setShowConjunctions(false);
-    setActiveDataSource("manual");
-    setManualOrbitId(orbit.id);
-    setTrajectoryAnchorTime(simTime);
-    const currentState = await fetchManualOrbitState(orbit.id, simTime.toISOString());
-    setServerStateBySatelliteId(new Map([[satellite.id, backendStateToOrbitState(satellite.id, currentState)]]));
-    setServerOrbitSnapshots(null);
-    setServerGroundTrackSnapshots(null);
-    setMessages([`Manual orbit "${orbit.name}" created and loaded.`]);
-    setActiveSourceModal(null);
+    setActiveOperationLabel("Creating orbit...");
+    try {
+      const orbit = await createManualOrbit(request);
+      const satellite = manualOrbitToSatellite(orbit);
+      rememberOrbit(storedOrbitFromManualOrbit(request, orbit, satellite));
+      setSatellites([satellite]);
+      setSelectedSatelliteIds([satellite.id]);
+      setImportedMissionSpacecraftId(null);
+      setShowRangeCheck(false);
+      setShowManeuvers(false);
+      setShowConjunctions(false);
+      setActiveDataSource("manual");
+      setManualOrbitId(orbit.id);
+      setTrajectoryAnchorTime(simTime);
+      const currentState = await fetchManualOrbitState(orbit.id, simTime.toISOString());
+      setServerStateBySatelliteId(new Map([[satellite.id, backendStateToOrbitState(satellite.id, currentState)]]));
+      setServerOrbitSnapshots(null);
+      setServerGroundTrackSnapshots(null);
+      setMessages([`Manual orbit "${orbit.name}" created and loaded.`]);
+      setActiveSourceModal(null);
+    } finally {
+      setActiveOperationLabel(null);
+    }
   }, [rememberOrbit, simTime]);
 
   const createOrbitFromTemplate = useCallback(async (template: OrbitTemplate) => {
@@ -2678,43 +2707,61 @@ export function OrbitalDashboard() {
   }, [handleCreateManualOrbit]);
 
   const handleLoadImportedTle = useCallback(async (raw: string, sourceLabel: string) => {
+    setActiveOperationLabel("Importing TLE...");
     const result = loadTleText(raw);
-    if (result.satellites.length > 0) {
-      const first = result.satellites[0];
-      if (first.tle) {
-        const orbit = await createManualOrbit({
-          name: first.name,
-          type: "TLE",
-          tle: first.tle,
-          propagatorType: "TLE_SGP4",
-        });
-        rememberOrbit(storedOrbitFromManualOrbit({
-          name: first.name,
-          type: "TLE",
-          tle: first.tle,
-          propagatorType: "TLE_SGP4",
-        }, orbit, manualOrbitToSatellite(orbit)));
+    try {
+      if (result.satellites.length > 0) {
         storedOrbitsFromImportedTle(result.satellites, raw, sourceLabel).forEach(rememberOrbit);
         setActiveDataSource("endpoint");
-        setManualOrbitId(orbit.id);
+        setManualOrbitId(null);
+        setImportedMissionSpacecraftId(null);
         setServerStateBySatelliteId(new Map());
         setServerOrbitSnapshots(null);
         setServerGroundTrackSnapshots(null);
         setActiveSourceModal(null);
-      } else {
-        storedOrbitsFromImportedTle(result.satellites, raw, sourceLabel).forEach(rememberOrbit);
-        setActiveDataSource("endpoint");
-        setManualOrbitId(null);
-        setActiveSourceModal(null);
       }
+      setMessages(
+        result.errors.length > 0
+          ? result.errors
+          : [`Loaded ${result.satellites.length} satellites from ${sourceLabel}. Select one Mission Spacecraft before creating a mission. Non-selected objects remain visualization/conjunction targets.`],
+      );
+      return result;
+    } finally {
+      setActiveOperationLabel(null);
     }
-    setMessages(
-      result.errors.length > 0
-        ? result.errors
-        : [`Loaded ${result.satellites.length} satellites from ${sourceLabel}. ${result.satellites[0]?.tle ? "Active imported TLE persisted for mission planning." : ""}`],
-    );
-    return result;
   }, [loadTleText, rememberOrbit]);
+
+  const bindImportedMissionSpacecraft = useCallback(async () => {
+    const satellite = selectedSnapshot?.satellite;
+    if (activeDataSource !== "endpoint" || !satellite?.tle) {
+      const message = "Select an imported TLE spacecraft before binding a mission spacecraft.";
+      setTimelineStatus(message);
+      toast.error(message);
+      return;
+    }
+    setActiveOperationLabel("Binding mission spacecraft...");
+    try {
+      const request: CreateManualOrbitRequest = {
+        name: satellite.name,
+        type: "TLE",
+        tle: satellite.tle,
+        propagatorType: "TLE_SGP4",
+      };
+      const orbit = await createManualOrbit(request);
+      rememberOrbit(storedOrbitFromManualOrbit(request, orbit, satellite));
+      setManualOrbitId(orbit.id);
+      setImportedMissionSpacecraftId(satellite.id);
+      setTimelineStatus(`Mission spacecraft set to ${satellite.name}.`);
+      setMessages([`Mission Spacecraft "${satellite.name}" bound to backend orbit ${orbit.id}. Other imported satellites remain visualization/conjunction objects.`]);
+      toast.success("Mission spacecraft selected.");
+    } catch (error) {
+      const message = userErrorMessage(error, "Unable to bind mission spacecraft.");
+      setTimelineStatus(message);
+      toast.error(message);
+    } finally {
+      setActiveOperationLabel(null);
+    }
+  }, [activeDataSource, rememberOrbit, selectedSnapshot]);
 
   const handleLoadCatalogSatellite = useCallback((satellite: SatelliteObject) => {
     rememberOrbit(storedOrbitFromCatalogSatellite(satellite, backendCatalogGroup));
@@ -2807,6 +2854,7 @@ export function OrbitalDashboard() {
     }
     try {
       setPropagationProfileStatus("Updating mission propagation profile...");
+      setActiveOperationLabel("Saving propagation setup...");
       const updated = await updateMissionPropagationProfile(mission.id, request);
       setMissionPropagationProfile(updated);
       markMissionTrajectoryStale();
@@ -2816,19 +2864,21 @@ export function OrbitalDashboard() {
       const message = userErrorMessage(error, "Unable to update propagation profile.");
       setPropagationProfileStatus(message);
       toast.error(message);
+    } finally {
+      setActiveOperationLabel(null);
     }
   }, [markMissionTrajectoryStale, mission]);
 
   const openMissionSetup = useCallback(() => {
-    if (!selectedSnapshot?.satellite || (!selectedNoradId && !manualOrbitId)) {
+    if (!missionSubjectSnapshot?.satellite || (!selectedNoradId && !manualOrbitId)) {
       const message = "Select a catalog or manual backend orbit first.";
       setTimelineStatus(message);
       toast.error(message);
       return;
     }
-    setMissionSetupDraft(missionSetupDraftFor(selectedSnapshot.satellite, simTimeRef.current));
+    setMissionSetupDraft(missionSetupDraftFor(missionSubjectSnapshot.satellite, simTimeRef.current));
     setIsMissionSetupOpen(true);
-  }, [manualOrbitId, selectedNoradId, selectedSnapshot]);
+  }, [manualOrbitId, missionSubjectSnapshot, selectedNoradId]);
 
   const instantiateTemplateEvents = useCallback(async (createdMission: BackendMission, template: MissionTemplate) => {
     const resolved = resolveTemplateOffsets(template);
@@ -2871,7 +2921,7 @@ export function OrbitalDashboard() {
   }, []);
 
   const initializeMissionTimeline = useCallback(async () => {
-    if (!selectedSnapshot?.satellite || (!selectedNoradId && !manualOrbitId)) {
+    if (!missionSubjectSnapshot?.satellite || (!selectedNoradId && !manualOrbitId)) {
       const message = "Select a catalog or manual backend orbit first.";
       setTimelineStatus(message);
       toast.error(message);
@@ -2885,6 +2935,7 @@ export function OrbitalDashboard() {
       return;
     }
     setTimelineStatus("Creating mission timeline...");
+    setActiveOperationLabel("Creating mission...");
     try {
       const { startIso, endIso } = missionWindowFromDraft(missionSetupDraft);
       const selectedTemplate = missionSetupDraft.templateId
@@ -2913,8 +2964,10 @@ export function OrbitalDashboard() {
       const message = userErrorMessage(error, "Unable to initialize mission timeline.");
       setTimelineStatus(message);
       toast.error(message);
+    } finally {
+      setActiveOperationLabel(null);
     }
-  }, [activeStoredOrbit, instantiateTemplateEvents, manualOrbitId, missionSetupDraft, refreshMissionPropagationProfile, refreshMissionTimeline, rememberMission, selectedNoradId, selectedSnapshot, templateLibrary.templates]);
+  }, [activeStoredOrbit, instantiateTemplateEvents, manualOrbitId, missionSetupDraft, missionSubjectSnapshot, refreshMissionPropagationProfile, refreshMissionTimeline, rememberMission, selectedNoradId, templateLibrary.templates]);
 
   const openCreateTimelineModal = useCallback((type: TimelineEditorDraft["type"] = "FINITE_BURN") => {
     const offsetSeconds = mission
@@ -2983,6 +3036,7 @@ export function OrbitalDashboard() {
     }
 
     setTimelineStatus("Saving timeline event...");
+    setActiveOperationLabel("Saving timeline event...");
     try {
       if (timelineModalMode === "edit" && selectedTimelineEvent) {
         const request = buildTimelineRequest(timelineDraft, mission, missionTimelineEvents, selectedTimelineEvent.sequenceIndex, selectedTimelineEvent.enabled, selectedTimelineEvent.id);
@@ -3000,6 +3054,8 @@ export function OrbitalDashboard() {
       const message = userErrorMessage(error, "Unable to save timeline event.");
       setTimelineStatus(message);
       toast.error(message);
+    } finally {
+      setActiveOperationLabel(null);
     }
   }, [markMissionTrajectoryStale, mission, missionTimelineEvents, refreshMissionTimeline, selectedTimelineEvent, timelineDraft, timelineModalMode]);
 
@@ -3091,6 +3147,7 @@ export function OrbitalDashboard() {
       }
       setMissionTimelineEvents(proposedEvents);
       setTimelineStatus(`Saving ${event.name} at ${metOffsetLabelFromSeconds(command.targetMetSeconds)}...`);
+      setActiveOperationLabel("Saving timeline event...");
       await updateMissionTimelineEvent(mission.id, event.id, command.request);
       const refreshed = await refreshMissionTimeline(mission.id);
       markMissionTrajectoryStale();
@@ -3102,11 +3159,13 @@ export function OrbitalDashboard() {
       const message = userErrorMessage(error, "Unable to update event schedule.");
       setTimelineStatus(message);
       toast.error(message);
+    } finally {
+      setActiveOperationLabel(null);
     }
   }, [markMissionTrajectoryStale, mission, missionTimelineEvents, refreshMissionTimeline]);
 
   const generateMissionTrajectory = useCallback(async () => {
-    if (!mission || !selectedSnapshot?.satellite) {
+    if (!mission || !missionSubjectSnapshot?.satellite) {
       const message = "Initialize a mission before generating a trajectory.";
       setTimelineStatus(message);
       toast.error(message);
@@ -3129,28 +3188,23 @@ export function OrbitalDashboard() {
     const start = addMinutes(centerTime, -defaultMissionTrajectoryWindowMinutes);
     const end = addMinutes(centerTime, defaultMissionTrajectoryWindowMinutes);
     setIsMissionTrajectoryLoading(true);
+    setActiveOperationLabel("Generating trajectory...");
     setTimelineStatus(`Generating mission trajectory at ${missionTrajectoryCadenceSeconds}s sample cadence...`);
     try {
       const profileForRun = missionPropagationProfile ?? await refreshMissionPropagationProfile(mission.id);
       const runSignature = missionRunSignature(mission, missionTimelineEvents, profileForRun, missionTrajectoryCadenceSeconds);
-      const [missionResponse, legacyResponse] = await Promise.all([
-        fetchMissionTrajectory(mission.id, start.toISOString(), end.toISOString(), missionTrajectoryCadenceSeconds),
-        manualOrbitId
-          ? fetchManualOrbitTrajectory(manualOrbitId, start.toISOString(), end.toISOString(), missionTrajectoryCadenceSeconds, undefined)
-          : fetchOrbitTrajectory(selectedNoradId as string | number, start.toISOString(), end.toISOString(), missionTrajectoryCadenceSeconds),
-      ]);
-      const missionSatellite = missionOverlaySatellite(selectedSnapshot.satellite, "mission");
-      const legacySatellite = missionOverlaySatellite(selectedSnapshot.satellite, "legacy");
+      const missionResponse = await fetchMissionTrajectory(mission.id, start.toISOString(), end.toISOString(), missionTrajectoryCadenceSeconds);
+      const missionSatellite = missionOverlaySatellite(missionSubjectSnapshot.satellite, "mission");
       setMissionTrajectoryOverlay({
         mission: buildTrajectorySnapshot(missionSatellite, missionResponse.states, centerTime),
-        legacy: buildTrajectorySnapshot(legacySatellite, legacyResponse.states, centerTime),
+        legacy: null,
         generatedAt: new Date().toISOString(),
-        message: `${missionResponse.states.length} mission samples generated at ${missionTrajectoryCadenceSeconds}s cadence.`,
+        message: `${missionResponse.model} · ${missionResponse.states.length} mission samples generated at ${missionTrajectoryCadenceSeconds}s cadence.`,
         runSignature,
         sampleCadenceSeconds: missionTrajectoryCadenceSeconds,
         stale: false,
       });
-      setShowMissionComparison(true);
+      setShowMissionComparison(false);
       await refreshMissionPropagationProfile(mission.id);
       setTimelineStatus("Mission trajectory generated.");
       toast.success("Mission trajectory generated.");
@@ -3161,8 +3215,9 @@ export function OrbitalDashboard() {
       toast.error(message);
     } finally {
       setIsMissionTrajectoryLoading(false);
+      setActiveOperationLabel(null);
     }
-  }, [manualOrbitId, mission, missionPropagationProfile, missionTimelineEvents, missionTrajectoryCadenceSeconds, missionTrajectoryCadenceValidation, refreshMissionPropagationProfile, selectedNoradId, selectedSnapshot, trajectoryAnchorTime]);
+  }, [manualOrbitId, mission, missionPropagationProfile, missionSubjectSnapshot, missionTimelineEvents, missionTrajectoryCadenceSeconds, missionTrajectoryCadenceValidation, refreshMissionPropagationProfile, selectedNoradId, trajectoryAnchorTime]);
 
   useEffect(() => {
     let ignore = false;
@@ -3875,6 +3930,32 @@ export function OrbitalDashboard() {
             <span>{effectiveShowRangeCheck ? "Selected range pair" : "Selected satellite"}</span>
             <span className="font-mono text-cyan-200">{selectedSatelliteIds.length}/{effectiveShowRangeCheck ? 2 : 1}</span>
           </div>
+          {activeDataSource === "endpoint" && (
+            <div className="mt-3 border border-emerald-300/20 bg-emerald-300/[0.04] p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-emerald-200">Mission Spacecraft</p>
+                  <p className="mt-1 text-xs leading-5 text-zinc-300">
+                    {importedMissionSpacecraftId
+                      ? satellites.find((satellite) => satellite.id === importedMissionSpacecraftId)?.name ?? "Selected imported spacecraft"
+                      : "Not selected"}
+                  </p>
+                  <p className="mt-1 text-[11px] leading-4 text-zinc-500">
+                    Mission mass, force models, integrator, and maneuvers apply only to this spacecraft. Other imported objects remain visualization/conjunction targets.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={!selectedSnapshot?.satellite.tle}
+                  onClick={bindImportedMissionSpacecraft}
+                  className="border border-emerald-300/50 px-2 py-1.5 font-mono text-[10px] uppercase text-emerald-100 transition hover:border-emerald-300 hover:bg-emerald-300/10 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-zinc-600"
+                  title={selectedSnapshot?.satellite.tle ? "Bind the selected imported TLE as the single mission spacecraft." : "Select an imported TLE object first."}
+                >
+                  Use Selected
+                </button>
+              </div>
+            </div>
+          )}
           <div className="thin-scrollbar mt-3 max-h-[34vh] space-y-2 overflow-auto pr-1">
             {snapshots.map((snapshot) => (
               <SatelliteControl
@@ -3927,7 +4008,7 @@ export function OrbitalDashboard() {
           rows={[
             ["Range", effectiveShowRangeCheck && rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : canUseRangeCheck ? "Available" : "Unavailable"],
             ["Conjunction", effectiveShowConjunctions ? `${conjunctionSnapshots.length} visible` : conjunctionSnapshots.length > 0 ? "Available" : "No events"],
-            ["Maneuvers", effectiveShowManeuvers ? `${maneuverSnapshots.length} visible` : maneuverSnapshots.length > 0 ? "Available" : "No events"],
+            ["Mission Burns", `${missionSummaryAnalysis.burnCount} finite burns`],
             ["Last Analysis", analysisLastTimestamp],
           ]}
         />
@@ -4093,9 +4174,9 @@ export function OrbitalDashboard() {
       )}
 
       {isMissionSetupOpen && (
-        <MissionSetupModal
+          <MissionSetupModal
           draft={missionSetupDraft}
-          subjectSummary={missionSubjectSummary(activeDataSource, selectedSnapshot?.satellite, selectedNoradId, manualOrbitId)}
+          subjectSummary={missionSubjectSummary(activeDataSource, missionSubjectSnapshot?.satellite, selectedNoradId, manualOrbitId)}
           templates={templateLibrary.templates}
           onDraftChange={setMissionSetupDraft}
           onCreate={initializeMissionTimeline}
@@ -4112,9 +4193,8 @@ export function OrbitalDashboard() {
             status={timelineStatus}
             canUseMissionTimeline={canUseMissionTimeline}
             unavailableReason={missionTimelineUnavailableReason}
-            subjectSummary={missionSubjectSummary(activeDataSource, selectedSnapshot?.satellite, selectedNoradId, manualOrbitId)}
+            subjectSummary={missionSubjectSummary(activeDataSource, missionSubjectSnapshot?.satellite, selectedNoradId, manualOrbitId)}
             isTrajectoryLoading={isMissionTrajectoryLoading}
-            showComparison={showMissionComparison}
             trajectoryOverlay={missionTrajectoryOverlay}
             trajectoryStale={missionTrajectoryIsStale}
             propagationProfile={missionPropagationProfile}
@@ -4135,7 +4215,6 @@ export function OrbitalDashboard() {
             onGenerateTrajectory={generateMissionTrajectory}
             onTrajectoryCadenceChange={setMissionTrajectoryCadenceInput}
             onUpdatePropagationProfile={updateMissionPropagationProfileAction}
-            onToggleComparison={() => setShowMissionComparison((value) => !value)}
             onDragEvent={setTimelineDragEventId}
             onDropEvent={reorderTimelineEvent}
             onScheduleEvent={updateTimelineEventSchedule}
@@ -4206,29 +4285,20 @@ export function OrbitalDashboard() {
             canUseRangeCheck={canUseRangeCheck}
             effectiveShowRangeCheck={effectiveShowRangeCheck}
             rangeMeasurement={rangeMeasurement}
-            maneuverSnapshots={maneuverSnapshots}
             missionEvents={missionTimelineEvents}
-            selectedManeuverId={selectedManeuver?.event.id ?? null}
-            showManeuvers={effectiveShowManeuvers}
-            canShowManeuvers={canShowManeuvers}
             conjunctionSnapshots={conjunctionSnapshots}
             selectedConjunctionId={selectedConjunction?.event.id ?? null}
             showConjunctions={effectiveShowConjunctions}
             canShowConjunctions={canShowConjunctions}
             trajectoryOverlay={missionTrajectoryOverlay}
-            showComparison={showMissionComparison}
             onApplyPreset={applySelectedPreset}
             onToggleMode={toggleSelectedMode}
             onUpdatePropagationProfile={updateMissionPropagationProfileAction}
             onToggleRangeCheck={toggleRangeCheck}
             onUpdateRangePrimary={updateRangePrimary}
             onUpdateRangeSecondary={updateRangeSecondary}
-            onSelectManeuver={setSelectedManeuverId}
-            onToggleManeuvers={() => setShowManeuvers((value) => !value)}
-            onOpenManeuverModal={() => setIsManeuverModalOpen(true)}
             onSelectConjunction={setSelectedConjunctionId}
             onToggleConjunctions={() => setShowConjunctions((value) => !value)}
-            onToggleComparison={() => setShowMissionComparison((value) => !value)}
           />
         </CommandModal>
       )}
@@ -4265,6 +4335,7 @@ export function OrbitalDashboard() {
           onTleUrlChange={setTleUrl}
         />
       )}
+      {activeOperationLabel && <GlobalOperationOverlay label={activeOperationLabel} />}
       <input
         ref={workspaceImportInputRef}
         type="file"
@@ -4304,6 +4375,19 @@ function HudPanel({ children, className = "p-4" }: { children: ReactNode; classN
     <div className={`border border-cyan-300/20 bg-[#071016]/82 shadow-2xl backdrop-blur-md ${className}`}>
       {children}
     </div>
+  );
+}
+
+function GlobalOperationOverlay({ label }: { label: string }) {
+  return createPortal(
+    <div className="fixed inset-0 z-[90] grid place-items-center bg-black/55 backdrop-blur-sm" role="status" aria-live="polite" aria-label={label}>
+      <div className="border border-cyan-300/35 bg-[#071016]/95 px-8 py-6 text-center shadow-2xl">
+        <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-cyan-300/20 border-t-cyan-200" />
+        <p className="mt-4 font-mono text-xs uppercase tracking-[0.2em] text-cyan-200">Processing...</p>
+        <p className="mt-2 text-sm text-zinc-300">{label}</p>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -5437,29 +5521,20 @@ function AnalysisModalContent({
   canUseRangeCheck,
   effectiveShowRangeCheck,
   rangeMeasurement,
-  maneuverSnapshots,
   missionEvents,
-  selectedManeuverId,
-  showManeuvers,
-  canShowManeuvers,
   conjunctionSnapshots,
   selectedConjunctionId,
   showConjunctions,
   canShowConjunctions,
   trajectoryOverlay,
-  showComparison,
   onApplyPreset,
   onToggleMode,
   onUpdatePropagationProfile,
   onToggleRangeCheck,
   onUpdateRangePrimary,
   onUpdateRangeSecondary,
-  onSelectManeuver,
-  onToggleManeuvers,
-  onOpenManeuverModal,
   onSelectConjunction,
   onToggleConjunctions,
-  onToggleComparison,
 }: {
   selectedNoradId: string | number | null;
   canUseAnalysisConfig: boolean;
@@ -5473,29 +5548,20 @@ function AnalysisModalContent({
   canUseRangeCheck: boolean;
   effectiveShowRangeCheck: boolean;
   rangeMeasurement: { primary: SatelliteSnapshot; secondary: SatelliteSnapshot; distanceKm: number } | null;
-  maneuverSnapshots: ManeuverSnapshot[];
   missionEvents: BackendMissionTimelineEvent[];
-  selectedManeuverId: string | null;
-  showManeuvers: boolean;
-  canShowManeuvers: boolean;
   conjunctionSnapshots: ConjunctionSnapshot[];
   selectedConjunctionId: string | null;
   showConjunctions: boolean;
   canShowConjunctions: boolean;
   trajectoryOverlay: MissionTrajectoryOverlay | null;
-  showComparison: boolean;
   onApplyPreset: (preset: AnalysisPresetId) => void;
   onToggleMode: (mode: string, enabled: boolean) => void;
   onUpdatePropagationProfile: (request: UpdatePropagationProfileRequest) => Promise<void>;
   onToggleRangeCheck: () => void;
   onUpdateRangePrimary: (satelliteId: string) => void;
   onUpdateRangeSecondary: (satelliteId: string) => void;
-  onSelectManeuver: (eventId: string) => void;
-  onToggleManeuvers: () => void;
-  onOpenManeuverModal: () => void;
   onSelectConjunction: (eventId: string) => void;
   onToggleConjunctions: () => void;
-  onToggleComparison: () => void;
 }) {
   const [tab, setTab] = useState<"trajectory" | "range" | "conjunction" | "maneuver" | "propagation">("trajectory");
   const missionBurnEvents = useMemo(() => missionEvents.filter((event) => event.type === "FINITE_BURN"), [missionEvents]);
@@ -5531,13 +5597,10 @@ function AnalysisModalContent({
               <p className="mt-2 text-sm text-zinc-300">{trajectoryOverlay ? trajectoryOverlay.message : "No mission trajectory generated yet."}</p>
               <div className="mt-3 grid grid-cols-2 gap-2">
                 <DetailMetric label="Mission Overlay" value={trajectoryOverlay?.mission ? "Ready" : "--"} />
-                <DetailMetric label="Legacy Overlay" value={trajectoryOverlay?.legacy ? "Ready" : "--"} />
-                <DetailMetric label="Comparison" value={showComparison ? "Visible" : "Hidden"} />
+                <DetailMetric label="Comparison" value="Disabled pending run labels and delta metrics" />
                 <DetailMetric label="Generated" value={trajectoryOverlay ? compactIsoUtc(trajectoryOverlay.generatedAt) : "--"} />
+                <DetailMetric label="Cadence" value={trajectoryOverlay ? `${trajectoryOverlay.sampleCadenceSeconds}s` : "--"} />
               </div>
-              <button type="button" disabled={!trajectoryOverlay} onClick={onToggleComparison} className="mt-3 workspace-action">
-                {showComparison ? "Hide Comparison Overlay" : "Show Comparison Overlay"}
-              </button>
             </HudPanel>
 
             <HudPanel>
@@ -5632,9 +5695,12 @@ function AnalysisModalContent({
         )}
 
         {tab === "maneuver" && (
-          <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
+          <div className="grid gap-4">
             <HudPanel>
               <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Mission Timeline Burn Summary</p>
+              <p className="mt-2 text-xs leading-5 text-zinc-500">
+                This view only reflects finite-burn events from the active mission timeline. Legacy maneuver-event overlays are hidden from the operator workflow.
+              </p>
               <div className="mt-3 grid grid-cols-2 gap-2">
                 <DetailMetric label="Burn Count" value={String(missionBurnEvents.length)} />
                 <DetailMetric label="Duration" value={secondsToDurationLabel(totalBurnDuration)} />
@@ -5664,15 +5730,6 @@ function AnalysisModalContent({
                 )}
               </div>
             </HudPanel>
-            <ManeuverPanel
-              maneuverSnapshots={maneuverSnapshots}
-              selectedManeuverId={selectedManeuverId}
-              showManeuvers={showManeuvers}
-              disabled={!canShowManeuvers}
-              onSelectManeuver={onSelectManeuver}
-              onToggleManeuvers={onToggleManeuvers}
-              onOpenManeuverModal={onOpenManeuverModal}
-            />
           </div>
         )}
 
@@ -5727,6 +5784,9 @@ function PropagationProfileEditor({
   const [setupDraft, setSetupDraft] = useState(() => propagationSetupDraftFromProfile(profile));
   const [advancedDraft, setAdvancedDraft] = useState(() => spacecraftDraftFromProfile(profile));
   const [expertDraft, setExpertDraft] = useState(() => integratorDraftFromProfile(profile));
+  const isNumericalDraft = setupDraft.propagatorType === "NUMERICAL";
+  const isKeplerianDraft = setupDraft.propagatorType === "KEPLERIAN";
+  const isSgp4Draft = setupDraft.propagatorType === "TLE_SGP4";
 
   const forceModes = [
     { key: "gravityEnabled" as const, label: "Gravity" },
@@ -5798,69 +5858,89 @@ function PropagationProfileEditor({
             <option value="TLE_SGP4">TLE SGP4</option>
           </select>
         </label>
-        <label className="block">
-          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">Integrator Type</span>
-          <select
-            value="DORMAND_PRINCE_853"
-            disabled
-            className="mt-1 w-full border border-white/10 bg-black/35 px-2 py-1.5 text-xs text-zinc-400 outline-none"
-            title="Current backend numerical solver. Additional integrator families require backend support before they can be selected."
-          >
-            <option value="DORMAND_PRINCE_853">Dormand Prince 853</option>
-          </select>
-        </label>
+        {isNumericalDraft ? (
+          <label className="block">
+            <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">Integrator Type</span>
+            <select
+              value="DORMAND_PRINCE_853"
+              disabled
+              className="mt-1 w-full border border-white/10 bg-black/35 px-2 py-1.5 text-xs text-zinc-400 outline-none"
+              title="Currently supported backend integrator. Future integrators require backend implementation before selection."
+            >
+              <option value="DORMAND_PRINCE_853">Dormand Prince 853 · currently supported backend integrator</option>
+            </select>
+          </label>
+        ) : (
+          <DetailMetric label="Integrator" value="Not applicable" />
+        )}
         <DetailMetric label="Profile Revision" value={compactIsoUtc(profile.updatedAt)} />
-        <ProfileNumberInput
-          label="Gravity Degree"
-          value={setupDraft.gravityDegree}
-          onChange={(value) => setSetupDraft((current) => ({ ...current, gravityDegree: value }))}
-        />
-        <ProfileNumberInput
-          label="Gravity Order"
-          value={setupDraft.gravityOrder}
-          onChange={(value) => setSetupDraft((current) => ({ ...current, gravityOrder: value }))}
-        />
+        {isNumericalDraft && (
+          <>
+            <ProfileNumberInput
+              label="Gravity Degree"
+              value={setupDraft.gravityDegree}
+              onChange={(value) => setSetupDraft((current) => ({ ...current, gravityDegree: value }))}
+            />
+            <ProfileNumberInput
+              label="Gravity Order"
+              value={setupDraft.gravityOrder}
+              onChange={(value) => setSetupDraft((current) => ({ ...current, gravityOrder: value }))}
+            />
+          </>
+        )}
         <button type="button" onClick={saveSetup} className="workspace-action">
           Save Propagation Setup
         </button>
       </div>
 
-      <div className="mt-3 grid grid-cols-3 gap-1.5">
-        <p className="col-span-3 font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">Force Models</p>
-        {forceModes.map((mode) => {
-          const checked = Boolean(profile[mode.key]);
-          return (
-            <button
-              key={mode.key}
-              type="button"
-              aria-pressed={checked}
-              onClick={() => {
-                void onUpdate({ [mode.key]: !checked });
-              }}
-              className={`border px-2 py-1.5 font-mono text-[10px] uppercase transition ${checked ? "border-lime-300 bg-lime-300/15 text-lime-100" : "border-white/10 text-zinc-500 hover:border-lime-300/60 hover:text-zinc-200"}`}
-            >
-              {mode.label}
-            </button>
-          );
-        })}
-        <button type="button" disabled className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-600" title="Future force model. Not currently sent to Orekit.">
-          Relativity Off
-        </button>
-        <button type="button" disabled className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-600" title="Future force model. Not currently sent to Orekit.">
-          Solid Tides Off
-        </button>
-        <button type="button" disabled className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-600" title="Future force model. Not currently sent to Orekit.">
-          Ocean Tides Off
-        </button>
-      </div>
+      {isNumericalDraft ? (
+        <div className="mt-3 grid grid-cols-3 gap-1.5">
+          <p className="col-span-3 font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">Force Models</p>
+          {forceModes.map((mode) => {
+            const checked = Boolean(profile[mode.key]);
+            return (
+              <button
+                key={mode.key}
+                type="button"
+                aria-pressed={checked}
+                onClick={() => {
+                  void onUpdate({ [mode.key]: !checked });
+                }}
+                className={`border px-2 py-1.5 font-mono text-[10px] uppercase transition ${checked ? "border-lime-300 bg-lime-300/15 text-lime-100" : "border-white/10 text-zinc-500 hover:border-lime-300/60 hover:text-zinc-200"}`}
+              >
+                {mode.label}
+              </button>
+            );
+          })}
+          <button type="button" disabled className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-600" title="Future force model. Not currently sent to Orekit.">
+            Relativity Off
+          </button>
+          <button type="button" disabled className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-600" title="Future force model. Not currently sent to Orekit.">
+            Solid Tides Off
+          </button>
+          <button type="button" disabled className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-600" title="Future force model. Not currently sent to Orekit.">
+            Ocean Tides Off
+          </button>
+        </div>
+      ) : (
+        <div className="mt-3 border border-white/10 bg-black/25 p-3">
+          <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">Force Models</p>
+          <p className="mt-2 text-xs leading-5 text-zinc-400">
+            {isKeplerianDraft && "Not applicable. Keplerian analytical propagation uses two-body motion and does not consume numerical gravity degree/order, drag, SRP, Sun, Moon, tides, or integrator controls."}
+            {isSgp4Draft && "Embedded in SGP4. TLE SGP4 uses the analytical model encoded by the TLE and does not consume numerical force-model or integrator controls."}
+          </p>
+        </div>
+      )}
 
       <div className="mt-3 flex flex-wrap gap-2">
         <button type="button" onClick={() => setShowAdvanced((value) => !value)} className="workspace-action">
           {showAdvanced ? "Hide Advanced" : "Advanced"}
         </button>
-        <button type="button" onClick={() => setShowExpert((value) => !value)} className="workspace-action">
-          {showExpert ? "Hide Expert" : "Expert"}
-        </button>
+        {isNumericalDraft && (
+          <button type="button" onClick={() => setShowExpert((value) => !value)} className="workspace-action">
+            {showExpert ? "Hide Expert" : "Expert"}
+          </button>
+        )}
       </div>
 
       {showAdvanced && (
@@ -5889,7 +5969,7 @@ function PropagationProfileEditor({
         </div>
       )}
 
-      {showExpert && (
+      {isNumericalDraft && showExpert && (
         <div className="mt-3 grid gap-2 md:grid-cols-4">
           <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500 md:col-span-4">Numerical Integrator Settings</p>
           {[
@@ -6288,7 +6368,6 @@ function MissionTimelinePanel({
   unavailableReason,
   subjectSummary,
   isTrajectoryLoading,
-  showComparison,
   trajectoryOverlay,
   trajectoryStale,
   propagationProfile,
@@ -6309,7 +6388,6 @@ function MissionTimelinePanel({
   onGenerateTrajectory,
   onTrajectoryCadenceChange,
   onUpdatePropagationProfile,
-  onToggleComparison,
   onDragEvent,
   onDropEvent,
   onScheduleEvent,
@@ -6322,7 +6400,6 @@ function MissionTimelinePanel({
   unavailableReason: string | null;
   subjectSummary: { label: string; detail: string };
   isTrajectoryLoading: boolean;
-  showComparison: boolean;
   trajectoryOverlay: MissionTrajectoryOverlay | null;
   trajectoryStale: boolean;
   propagationProfile: BackendPropagationProfile | null;
@@ -6343,7 +6420,6 @@ function MissionTimelinePanel({
   onGenerateTrajectory: () => void;
   onTrajectoryCadenceChange: (value: string) => void;
   onUpdatePropagationProfile: (request: UpdatePropagationProfileRequest) => Promise<void>;
-  onToggleComparison: () => void;
   onDragEvent: (eventId: string | null) => void;
   onDropEvent: (sourceEventId: string, targetEventId: string) => void;
   onScheduleEvent: (event: BackendMissionTimelineEvent, targetMetSeconds: number, snapMode: TimelineSnapMode) => void;
@@ -6358,9 +6434,12 @@ function MissionTimelinePanel({
     customVisibleSeconds: Math.max(60, Number(customZoomHours) * 3600 || 3 * 3600),
   }), [customZoomHours, snapMode, zoomPreset]);
   const analysis = useMemo(() => timelineAnalysis(mission, events), [events, mission]);
+  const hasEnabledFiniteBurns = events.some((event) => event.enabled && event.type === "FINITE_BURN");
   const trajectoryGenerationBlocker = !propagationProfile
     ? "Mission propagation profile is still loading. Configure propagation before generating trajectory."
-    : trajectoryCadenceError;
+    : propagationProfile.propagatorType !== "NUMERICAL" && hasEnabledFiniteBurns
+      ? `${propagationProfile.propagatorType.replaceAll("_", " ")} propagation cannot execute finite-burn mission events. Select Numerical or disable burn events.`
+      : trajectoryCadenceError;
   const layoutModel = useMemo(() => mission
     ? buildTimelineLayoutModel(mission, events, interactionModel, selectedEventId, simulationTimeIso)
     : null, [events, interactionModel, mission, selectedEventId, simulationTimeIso]);
@@ -6673,25 +6752,15 @@ function MissionTimelinePanel({
           >
             {isTrajectoryLoading ? "Generating" : trajectoryOverlay ? "Update Trajectory" : "Generate Trajectory"}
           </button>
-          <button
-            type="button"
-            disabled={!trajectoryOverlay}
-            aria-pressed={showComparison}
-            onClick={onToggleComparison}
-            className={`border px-3 py-2 font-mono text-[10px] uppercase transition ${
-              showComparison && trajectoryOverlay
-                ? "border-lime-300 bg-lime-300/15 text-lime-100"
-                : "border-white/10 text-zinc-500 hover:border-lime-300/60 hover:text-lime-100 disabled:cursor-not-allowed disabled:text-zinc-700"
-            }`}
-          >
-            {showComparison ? "Hide Overlay" : "Show Overlay"}
-          </button>
+          <div className="border border-white/10 px-3 py-2 font-mono text-[10px] uppercase text-zinc-500" title="Comparison overlays are disabled until explicit run labels and delta metrics are implemented.">
+            Comparison Disabled
+          </div>
         </div>
       )}
 
       {trajectoryOverlay && (
         <div className="mt-3 border border-lime-300/20 bg-lime-300/[0.04] px-3 py-2">
-          <p className="font-mono text-[10px] uppercase text-lime-200">{showComparison ? "Mission vs Legacy" : "Trajectory Ready"}</p>
+          <p className="font-mono text-[10px] uppercase text-lime-200">Trajectory Ready</p>
           <p className="mt-1 text-xs text-zinc-400">{trajectoryOverlay.message}</p>
         </div>
       )}
@@ -7488,94 +7557,6 @@ function TimelineField({
       </span>
       <span className="mt-1 block">{children}</span>
     </label>
-  );
-}
-
-function ManeuverPanel({
-  maneuverSnapshots,
-  selectedManeuverId,
-  showManeuvers,
-  disabled,
-  onSelectManeuver,
-  onToggleManeuvers,
-  onOpenManeuverModal,
-}: {
-  maneuverSnapshots: ManeuverSnapshot[];
-  selectedManeuverId: string | null;
-  showManeuvers: boolean;
-  disabled: boolean;
-  onSelectManeuver: (maneuverId: string) => void;
-  onToggleManeuvers: () => void;
-  onOpenManeuverModal: () => void;
-}) {
-  const selectedManeuver = maneuverSnapshots.find((snapshot) => snapshot.event.id === selectedManeuverId);
-  const handleToggleManeuvers = () => {
-    if (disabled) {
-      return;
-    }
-    if (!showManeuvers && !selectedManeuverId && maneuverSnapshots[0]) {
-      onSelectManeuver(maneuverSnapshots[0].event.id);
-    }
-
-    onToggleManeuvers();
-  };
-
-  return (
-    <HudPanel>
-      <div className="flex items-center justify-between gap-3">
-        <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Legacy Maneuver Events</p>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            aria-pressed={showManeuvers}
-            disabled={disabled}
-            onClick={handleToggleManeuvers}
-            className={`flex min-w-16 items-center gap-2 border px-2 py-1 font-mono text-[10px] uppercase transition ${
-              disabled
-                ? "cursor-not-allowed border-white/10 text-zinc-600 opacity-60"
-                : showManeuvers
-                  ? "border-fuchsia-300 bg-fuchsia-300/15 text-fuchsia-100"
-                  : "border-white/10 text-zinc-500 hover:border-fuchsia-300"
-            }`}
-          >
-            <span className={`h-2.5 w-2.5 rounded-full ${showManeuvers ? "bg-fuchsia-300" : "bg-zinc-600"}`} />
-            {showManeuvers ? "On" : "Off"}
-          </button>
-          <button
-            type="button"
-            disabled={maneuverSnapshots.length === 0}
-            onClick={onOpenManeuverModal}
-            className="grid h-8 w-8 place-items-center border border-fuchsia-300/35 text-fuchsia-100 transition hover:border-fuchsia-300 hover:bg-fuchsia-300/10 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-zinc-600 disabled:opacity-60"
-            aria-label="Open maneuver details"
-            title="Open maneuver details"
-          >
-            <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true">
-              <path d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
-            </svg>
-          </button>
-        </div>
-      </div>
-      <p className="mt-1 text-[11px] text-zinc-500">
-        {maneuverSnapshots.length === 0
-          ? "No legacy /api/maneuvers events found. Mission timeline burns are listed separately in the burn summary."
-          : showManeuvers
-            ? `${maneuverSnapshots.length} legacy event markers visible`
-            : "Enable to show legacy maneuver markers and event details."}
-      </p>
-      {showManeuvers && selectedManeuver && (
-        <button
-          type="button"
-          onClick={onOpenManeuverModal}
-          className="mt-3 w-full border border-fuchsia-300/25 bg-fuchsia-300/5 px-3 py-2 text-left transition hover:border-fuchsia-300/60"
-        >
-          <span className="block text-xs font-semibold text-white">{selectedManeuver.event.title}</span>
-          <span className="mt-1 flex items-center justify-between font-mono text-[11px] text-zinc-400">
-            <span>{selectedManeuver.satellite.name}</span>
-            <span>{formatNumber(selectedManeuver.event.deltaVMps, 2)} m/s</span>
-          </span>
-        </button>
-      )}
-    </HudPanel>
   );
 }
 
