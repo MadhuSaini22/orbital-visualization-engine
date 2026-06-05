@@ -3,7 +3,7 @@ import "cesium/Build/Cesium/Widgets/widgets.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "MOSAIC Phase 0 Orbital Viewer",
+  title: "MadVik Orbital Visualization",
   description: "A CesiumJS and SatelliteJS orbital visualization MVP.",
 };
 
