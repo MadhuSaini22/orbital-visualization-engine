@@ -3,6 +3,7 @@ package com.orbitvisualizationengine.server.service;
 import com.orbitvisualizationengine.server.domain.AnalysisPreset;
 import com.orbitvisualizationengine.server.domain.ManualOrbitRecord;
 import com.orbitvisualizationengine.server.domain.Mission;
+import com.orbitvisualizationengine.server.domain.NumericalIntegratorType;
 import com.orbitvisualizationengine.server.domain.PropagationProfile;
 import com.orbitvisualizationengine.server.domain.PropagationProfileOwnerType;
 import com.orbitvisualizationengine.server.domain.PropagatorType;
@@ -69,6 +70,7 @@ public class PropagationProfileService {
         source.thirdBodySunEnabled(),
         source.thirdBodyMoonEnabled(),
         source.maneuverModelEnabled(),
+        source.integratorType(),
         source.dryMassKg(),
         source.fuelMassKg(),
         source.dragAreaM2(),
@@ -138,6 +140,7 @@ public class PropagationProfileService {
         config.thirdBodySunEnabled(),
         config.thirdBodyMoonEnabled(),
         config.maneuverModelEnabled(),
+        NumericalIntegratorType.DORMAND_PRINCE_853,
         config.dryMassKg(),
         config.fuelMassKg(),
         config.dragAreaM2(),
@@ -172,6 +175,7 @@ public class PropagationProfileService {
         false,
         false,
         true,
+        NumericalIntegratorType.DORMAND_PRINCE_853,
         850.0,
         150.0,
         20.0,
@@ -205,6 +209,7 @@ public class PropagationProfileService {
         request.thirdBodySunEnabled() == null ? current.thirdBodySunEnabled() : request.thirdBodySunEnabled(),
         request.thirdBodyMoonEnabled() == null ? current.thirdBodyMoonEnabled() : request.thirdBodyMoonEnabled(),
         request.maneuverModelEnabled() == null ? current.maneuverModelEnabled() : request.maneuverModelEnabled(),
+        request.integratorType() == null ? current.integratorType() : request.integratorType(),
         request.dryMassKg() == null ? current.dryMassKg() : request.dryMassKg(),
         request.fuelMassKg() == null ? current.fuelMassKg() : request.fuelMassKg(),
         request.dragAreaM2() == null ? current.dragAreaM2() : request.dragAreaM2(),

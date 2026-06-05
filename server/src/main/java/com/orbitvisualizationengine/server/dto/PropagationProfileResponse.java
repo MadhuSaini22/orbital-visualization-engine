@@ -1,6 +1,7 @@
 package com.orbitvisualizationengine.server.dto;
 
 import com.orbitvisualizationengine.server.domain.AnalysisPreset;
+import com.orbitvisualizationengine.server.domain.NumericalIntegratorType;
 import com.orbitvisualizationengine.server.domain.PropagationProfile;
 import com.orbitvisualizationengine.server.domain.PropagationProfileOwnerType;
 import com.orbitvisualizationengine.server.domain.PropagatorType;
@@ -21,6 +22,7 @@ public record PropagationProfileResponse(
     boolean thirdBodySunEnabled,
     boolean thirdBodyMoonEnabled,
     boolean maneuverModelEnabled,
+    NumericalIntegratorType integratorType,
     double dryMassKg,
     double fuelMassKg,
     double dragAreaM2,
@@ -53,6 +55,7 @@ public record PropagationProfileResponse(
         profile.thirdBodySunEnabled(),
         profile.thirdBodyMoonEnabled(),
         profile.maneuverModelEnabled(),
+        profile.integratorType(),
         profile.dryMassKg(),
         profile.fuelMassKg(),
         profile.dragAreaM2(),

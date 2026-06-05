@@ -17,6 +17,7 @@ public record PropagationProfile(
     boolean thirdBodySunEnabled,
     boolean thirdBodyMoonEnabled,
     boolean maneuverModelEnabled,
+    NumericalIntegratorType integratorType,
     double dryMassKg,
     double fuelMassKg,
     double dragAreaM2,

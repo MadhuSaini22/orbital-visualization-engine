@@ -1,6 +1,7 @@
 package com.orbitvisualizationengine.server.repository;
 
 import com.orbitvisualizationengine.server.domain.AnalysisPreset;
+import com.orbitvisualizationengine.server.domain.NumericalIntegratorType;
 import com.orbitvisualizationengine.server.domain.PropagationProfile;
 import com.orbitvisualizationengine.server.domain.PropagationProfileOwnerType;
 import com.orbitvisualizationengine.server.domain.PropagatorType;
@@ -25,11 +26,11 @@ public class PropagationProfileRepository {
         insert into propagation_profiles(
           id, owner_type, owner_id, name, preset, propagator_type, gravity_enabled, gravity_degree, gravity_order,
           drag_enabled, solar_radiation_pressure_enabled, third_body_sun_enabled, third_body_moon_enabled,
-          maneuver_model_enabled, dry_mass_kg, fuel_mass_kg, drag_area_m2, drag_coefficient, srp_area_m2,
+          maneuver_model_enabled, integrator_type, dry_mass_kg, fuel_mass_kg, drag_area_m2, drag_coefficient, srp_area_m2,
           reflectivity_coefficient, nominal_thrust_n, nominal_isp_s, integrator_min_step, integrator_max_step,
           integrator_abs_tol, integrator_rel_tol, notes, created_at, updated_at
         )
-        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         on conflict (id) do update set
           owner_type = excluded.owner_type,
           owner_id = excluded.owner_id,
@@ -44,6 +45,7 @@ public class PropagationProfileRepository {
           third_body_sun_enabled = excluded.third_body_sun_enabled,
           third_body_moon_enabled = excluded.third_body_moon_enabled,
           maneuver_model_enabled = excluded.maneuver_model_enabled,
+          integrator_type = excluded.integrator_type,
           dry_mass_kg = excluded.dry_mass_kg,
           fuel_mass_kg = excluded.fuel_mass_kg,
           drag_area_m2 = excluded.drag_area_m2,
@@ -73,6 +75,7 @@ public class PropagationProfileRepository {
         profile.thirdBodySunEnabled(),
         profile.thirdBodyMoonEnabled(),
         profile.maneuverModelEnabled(),
+        profile.integratorType().name(),
         profile.dryMassKg(),
         profile.fuelMassKg(),
         profile.dragAreaM2(),
@@ -120,6 +123,7 @@ public class PropagationProfileRepository {
         rs.getBoolean("third_body_sun_enabled"),
         rs.getBoolean("third_body_moon_enabled"),
         rs.getBoolean("maneuver_model_enabled"),
+        NumericalIntegratorType.valueOf(rs.getString("integrator_type")),
         rs.getDouble("dry_mass_kg"),
         rs.getDouble("fuel_mass_kg"),
         rs.getDouble("drag_area_m2"),

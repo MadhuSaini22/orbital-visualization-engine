@@ -117,8 +117,52 @@ export type BackendPropagationResponse = {
 export type AnalysisPresetId = "FAST_PREVIEW" | "OPERATIONAL_REVIEW" | "HIGH_FIDELITY" | "MANEUVER_PLANNING";
 
 export type PropagatorTypeId = "TLE_SGP4" | "KEPLERIAN" | "NUMERICAL";
+export type NumericalIntegratorTypeId =
+  | "DORMAND_PRINCE_853"
+  | "DORMAND_PRINCE_54"
+  | "CLASSICAL_RUNGE_KUTTA"
+  | "GILL"
+  | "LUTHER"
+  | "MIDPOINT"
+  | "THREE_EIGHTHES"
+  | "ADAMS_BASHFORTH"
+  | "ADAMS_MOULTON"
+  | "GRAGG_BULIRSCH_STOER";
 export type MissionTimelineEventType = "COAST" | "FINITE_BURN" | "IMPULSIVE_BURN" | "VECTOR_BURN" | "STATION_KEEPING" | "PLANE_CHANGE" | "HOHMANN_TRANSFER";
 export type ManualOrbitType = "TLE" | "CLASSICAL_ELEMENTS" | "CARTESIAN_STATE";
+
+export type BackendCapabilityRegistry = {
+  propagators: Array<{
+    id: PropagatorTypeId;
+    label: string;
+    description: string;
+    supportsIntegrators: boolean;
+    supportsForceModels: boolean;
+    supportsManeuvers: boolean;
+    supportsSpacecraftParameters: boolean;
+  }>;
+  integrators: Array<{
+    id: NumericalIntegratorTypeId;
+    label: string;
+    description: string;
+    adaptiveStep: boolean;
+    backendClass: string;
+  }>;
+  forceModels: Array<{
+    id: string;
+    label: string;
+    description: string;
+    implemented: boolean;
+    numericalOnly: boolean;
+  }>;
+  maneuverSupport: {
+    finiteBurn: boolean;
+    impulsiveBurn: boolean;
+    vectorBurn: boolean;
+    notes: string;
+  };
+  spacecraftParameters: string[];
+};
 
 export type BackendMission = {
   id: string;
@@ -200,6 +244,7 @@ export type BackendPropagationProfile = Omit<BackendAnalysisConfig, "noradId"> &
   ownerType: "SATELLITE" | "MANUAL_ORBIT" | "MISSION";
   ownerId: string;
   name: string;
+  integratorType: NumericalIntegratorTypeId;
   integratorMinStep: number;
   integratorMaxStep: number;
   integratorAbsTol: number;
@@ -266,6 +311,10 @@ export async function refreshConjunctions() {
 
 export async function fetchAnalysisConfig(noradId: string | number) {
   return fetchJson<BackendAnalysisConfigResponse>(`/api/satellites/${noradId}/analysis-config`);
+}
+
+export async function fetchCapabilities() {
+  return fetchJson<BackendCapabilityRegistry>("/api/capabilities");
 }
 
 export async function fetchCurrentOrbitState(noradId: string | number, time: string, init?: RequestInit) {

@@ -84,6 +84,7 @@ create table if not exists propagation_profiles (
   third_body_sun_enabled boolean not null default false,
   third_body_moon_enabled boolean not null default false,
   maneuver_model_enabled boolean not null default true,
+  integrator_type text not null default 'DORMAND_PRINCE_853',
   dry_mass_kg double precision not null default 850.0,
   fuel_mass_kg double precision not null default 150.0,
   drag_area_m2 double precision not null default 20.0,
@@ -101,6 +102,7 @@ create table if not exists propagation_profiles (
   updated_at timestamptz not null default now(),
   constraint propagation_profiles_owner_type_valid check (owner_type in ('SATELLITE', 'MANUAL_ORBIT', 'MISSION')),
   constraint propagation_profiles_propagator_type_valid check (propagator_type in ('TLE_SGP4', 'KEPLERIAN', 'NUMERICAL')),
+  constraint propagation_profiles_integrator_type_valid check (integrator_type in ('DORMAND_PRINCE_853', 'DORMAND_PRINCE_54', 'CLASSICAL_RUNGE_KUTTA', 'GILL', 'LUTHER', 'MIDPOINT', 'THREE_EIGHTHES', 'ADAMS_BASHFORTH', 'ADAMS_MOULTON', 'GRAGG_BULIRSCH_STOER')),
   constraint propagation_profiles_gravity_degree_valid check (gravity_degree >= 2),
   constraint propagation_profiles_gravity_order_valid check (gravity_order >= 0 and gravity_order <= gravity_degree),
   constraint propagation_profiles_mass_valid check (dry_mass_kg >= 0 and fuel_mass_kg >= 0),
@@ -231,6 +233,7 @@ alter table mission_timeline_events
   add constraint mission_timeline_type_valid check (type in ('COAST', 'IMPULSIVE_BURN', 'VECTOR_BURN', 'FINITE_BURN', 'STATION_KEEPING', 'PLANE_CHANGE', 'HOHMANN_TRANSFER'));
 
 alter table propagation_profiles
+  add column if not exists integrator_type text not null default 'DORMAND_PRINCE_853',
   add column if not exists integrator_min_step double precision not null default 0.1,
   add column if not exists integrator_max_step double precision not null default 120.0,
   add column if not exists integrator_abs_tol double precision not null default 1.0,
@@ -247,6 +250,12 @@ alter table propagation_profiles
 
 alter table propagation_profiles
   add constraint propagation_profiles_propagator_type_valid check (propagator_type in ('TLE_SGP4', 'KEPLERIAN', 'NUMERICAL'));
+
+alter table propagation_profiles
+  drop constraint if exists propagation_profiles_integrator_type_valid;
+
+alter table propagation_profiles
+  add constraint propagation_profiles_integrator_type_valid check (integrator_type in ('DORMAND_PRINCE_853', 'DORMAND_PRINCE_54', 'CLASSICAL_RUNGE_KUTTA', 'GILL', 'LUTHER', 'MIDPOINT', 'THREE_EIGHTHES', 'ADAMS_BASHFORTH', 'ADAMS_MOULTON', 'GRAGG_BULIRSCH_STOER'));
 
 alter table propagation_profiles
   drop constraint if exists propagation_profiles_gravity_degree_valid;

@@ -8,7 +8,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
 import org.hipparchus.geometry.euclidean.threed.Vector3D;
+import org.hipparchus.ode.AbstractIntegrator;
+import org.hipparchus.ode.nonstiff.AdamsBashforthIntegrator;
+import org.hipparchus.ode.nonstiff.AdamsMoultonIntegrator;
+import org.hipparchus.ode.nonstiff.ClassicalRungeKuttaIntegrator;
+import org.hipparchus.ode.nonstiff.DormandPrince54Integrator;
 import org.hipparchus.ode.nonstiff.DormandPrince853Integrator;
+import org.hipparchus.ode.nonstiff.GillIntegrator;
+import org.hipparchus.ode.nonstiff.GraggBulirschStoerIntegrator;
+import org.hipparchus.ode.nonstiff.LutherIntegrator;
+import org.hipparchus.ode.nonstiff.MidpointIntegrator;
+import org.hipparchus.ode.nonstiff.ThreeEighthesIntegrator;
 import org.orekit.bodies.CelestialBodyFactory;
 import org.orekit.forces.ForceModel;
 import org.orekit.forces.drag.DragForce;
@@ -118,11 +128,7 @@ public class NumericalPropagator implements OrbitPropagator {
     SpacecraftState initialState = new SpacecraftState(initialOrbit, context.spacecraft().wetMassKg());
 
     NumericalIntegratorSettings settings = context.integratorSettings();
-    DormandPrince853Integrator integrator = new DormandPrince853Integrator(
-        settings.minStep(),
-        settings.maxStep(),
-        settings.absTolerance(),
-        settings.relTolerance());
+    AbstractIntegrator integrator = buildIntegrator(settings);
     org.orekit.propagation.numerical.NumericalPropagator propagator =
         new org.orekit.propagation.numerical.NumericalPropagator(integrator);
     propagator.setOrbitType(OrbitType.CARTESIAN);
@@ -132,6 +138,27 @@ public class NumericalPropagator implements OrbitPropagator {
 
     forceModels(context).forEach(propagator::addForceModel);
     return propagator;
+  }
+
+  private AbstractIntegrator buildIntegrator(NumericalIntegratorSettings settings) {
+    double fixedStep = settings.maxStep();
+    return switch (settings.type()) {
+      case DORMAND_PRINCE_853 -> new DormandPrince853Integrator(
+          settings.minStep(), settings.maxStep(), settings.absTolerance(), settings.relTolerance());
+      case DORMAND_PRINCE_54 -> new DormandPrince54Integrator(
+          settings.minStep(), settings.maxStep(), settings.absTolerance(), settings.relTolerance());
+      case CLASSICAL_RUNGE_KUTTA -> new ClassicalRungeKuttaIntegrator(fixedStep);
+      case GILL -> new GillIntegrator(fixedStep);
+      case LUTHER -> new LutherIntegrator(fixedStep);
+      case MIDPOINT -> new MidpointIntegrator(fixedStep);
+      case THREE_EIGHTHES -> new ThreeEighthesIntegrator(fixedStep);
+      case ADAMS_BASHFORTH -> new AdamsBashforthIntegrator(
+          4, settings.minStep(), settings.maxStep(), settings.absTolerance(), settings.relTolerance());
+      case ADAMS_MOULTON -> new AdamsMoultonIntegrator(
+          4, settings.minStep(), settings.maxStep(), settings.absTolerance(), settings.relTolerance());
+      case GRAGG_BULIRSCH_STOER -> new GraggBulirschStoerIntegrator(
+          settings.minStep(), settings.maxStep(), settings.absTolerance(), settings.relTolerance());
+    };
   }
 
   private Orbit initialOrbit(PropagationContext context) {

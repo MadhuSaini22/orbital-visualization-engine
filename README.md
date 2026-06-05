@@ -206,6 +206,7 @@ erDiagram
     boolean third_body_sun_enabled
     boolean third_body_moon_enabled
     boolean maneuver_model_enabled
+    text integrator_type
     double dry_mass_kg
     double fuel_mass_kg
     double integrator_min_step
@@ -317,8 +318,24 @@ Non-selected imported objects remain visible on the globe and available for rang
 
 Mission propagation profile selection is not cosmetic:
 
-- `NUMERICAL` exposes the backend-supported Dormand Prince 853 integrator, gravity degree/order, force-model toggles, spacecraft parameters, and expert integrator tolerances.
+- `NUMERICAL` exposes backend-supported integrators from `GET /api/capabilities`, gravity degree/order, force-model toggles, spacecraft parameters, and expert integrator tolerances.
 - `KEPLERIAN` hides numerical force-model and integrator controls. The Mission Summary reports force models and integrator as not applicable.
 - `TLE_SGP4` hides numerical controls. The Mission Summary reports force models as embedded in SGP4 and integrator as not applicable.
 
 Finite-burn mission events require `NUMERICAL` propagation. If enabled finite burns exist under `KEPLERIAN` or `TLE_SGP4`, the Mission Planner disables trajectory generation and explains the incompatibility.
+
+## Capability Registry
+
+The frontend does not hardcode the available propagators, integrators, or force-model support matrix. On startup it calls:
+
+```text
+GET /api/capabilities
+```
+
+The response advertises:
+
+- propagators: `NUMERICAL`, `KEPLERIAN`, `TLE_SGP4`.
+- integrators: `DORMAND_PRINCE_853`, `DORMAND_PRINCE_54`, `CLASSICAL_RUNGE_KUTTA`, `GILL`, `LUTHER`, `MIDPOINT`, `THREE_EIGHTHES`, `ADAMS_BASHFORTH`, `ADAMS_MOULTON`, `GRAGG_BULIRSCH_STOER`.
+- which propagators support integrators, force models, maneuvers, and spacecraft physical parameters.
+
+The Mission Planner and Analysis views render controls from this registry and read/write the same persisted mission propagation profile.
