@@ -1542,6 +1542,10 @@ function missionRunSignature(
   });
 }
 
+function profileWithPendingUpdate(profile: BackendPropagationProfile | null, pending: UpdatePropagationProfileRequest | null) {
+  return profile && pending ? { ...profile, ...pending } : profile;
+}
+
 function forceModelSummary(profile: BackendPropagationProfile | null) {
   if (!profile) {
     return "Profile not loaded";
@@ -1864,6 +1868,7 @@ export function OrbitalDashboard() {
   const [dynamicDataMessage, setDynamicDataMessage] = useState<string | null>(null);
   const [analysisConfig, setAnalysisConfig] = useState<BackendAnalysisConfigResponse | null>(null);
   const [missionPropagationProfile, setMissionPropagationProfile] = useState<BackendPropagationProfile | null>(null);
+  const [pendingMissionPropagationProfileUpdate, setPendingMissionPropagationProfileUpdate] = useState<UpdatePropagationProfileRequest | null>(null);
   const [capabilities, setCapabilities] = useState<BackendCapabilityRegistry>(fallbackCapabilities);
   const [propagationProfileStatus, setPropagationProfileStatus] = useState<string | null>(null);
   const [analysisMessage, setAnalysisMessage] = useState<string | null>(null);
@@ -2933,6 +2938,7 @@ export function OrbitalDashboard() {
   const refreshMissionPropagationProfile = useCallback(async (missionId: string) => {
     const profile = await fetchMissionPropagationProfile(missionId);
     setMissionPropagationProfile(profile);
+    setPendingMissionPropagationProfileUpdate(null);
     setPropagationProfileStatus("Mission propagation profile loaded.");
     return profile;
   }, []);
@@ -2959,6 +2965,7 @@ export function OrbitalDashboard() {
       setActiveOperationLabel("Saving propagation setup...");
       const updated = await updateMissionPropagationProfile(mission.id, request);
       setMissionPropagationProfile(updated);
+      setPendingMissionPropagationProfileUpdate(null);
       markMissionTrajectoryStale();
       setPropagationProfileStatus("Mission propagation profile updated.");
       toast.success("Propagation profile updated.");
@@ -2970,6 +2977,12 @@ export function OrbitalDashboard() {
       setActiveOperationLabel(null);
     }
   }, [markMissionTrajectoryStale, mission]);
+
+  const stageMissionPropagationProfileUpdate = useCallback((request: UpdatePropagationProfileRequest) => {
+    setPendingMissionPropagationProfileUpdate(request);
+    setPropagationProfileStatus("Propagation setup changes are staged. They will be saved when you update configuration or generate trajectory.");
+    markMissionTrajectoryStale();
+  }, [markMissionTrajectoryStale]);
 
   const openMissionSetup = useCallback(() => {
     if (missionSubjectOptions.length === 0 || (!selectedNoradId && !manualOrbitId && activeDataSource !== "endpoint")) {
@@ -3323,7 +3336,15 @@ export function OrbitalDashboard() {
     setActiveOperationLabel("Generating trajectory...");
     setTimelineStatus(`Generating mission trajectory at ${missionTrajectoryCadenceSeconds}s sample cadence...`);
     try {
-      const profileForRun = missionPropagationProfile ?? await refreshMissionPropagationProfile(mission.id);
+      let profileForRun = missionPropagationProfile ?? await refreshMissionPropagationProfile(mission.id);
+      if (pendingMissionPropagationProfileUpdate) {
+        setActiveOperationLabel("Saving propagation setup...");
+        profileForRun = await updateMissionPropagationProfile(mission.id, pendingMissionPropagationProfileUpdate);
+        setMissionPropagationProfile(profileForRun);
+        setPendingMissionPropagationProfileUpdate(null);
+        setPropagationProfileStatus("Mission propagation profile updated for trajectory run.");
+        setActiveOperationLabel("Generating trajectory...");
+      }
       const runSignature = missionRunSignature(mission, missionTimelineEvents, profileForRun, missionTrajectoryCadenceSeconds);
       const missionResponse = await fetchMissionTrajectory(mission.id, start.toISOString(), end.toISOString(), missionTrajectoryCadenceSeconds);
       const missionSatellite = missionOverlaySatellite(missionSubjectSnapshot.satellite, "mission");
@@ -3349,7 +3370,7 @@ export function OrbitalDashboard() {
       setIsMissionTrajectoryLoading(false);
       setActiveOperationLabel(null);
     }
-  }, [manualOrbitId, mission, missionPropagationProfile, missionSubjectSnapshot, missionTimelineEvents, missionTrajectoryCadenceSeconds, missionTrajectoryCadenceValidation, refreshMissionPropagationProfile, selectedNoradId, trajectoryAnchorTime]);
+  }, [manualOrbitId, mission, missionPropagationProfile, missionSubjectSnapshot, missionTimelineEvents, missionTrajectoryCadenceSeconds, missionTrajectoryCadenceValidation, pendingMissionPropagationProfileUpdate, refreshMissionPropagationProfile, selectedNoradId, trajectoryAnchorTime]);
 
   useEffect(() => {
     let ignore = false;
@@ -3975,7 +3996,7 @@ export function OrbitalDashboard() {
       )}
 
       {hasOrbitLoaded && (
-      <section className="pointer-events-auto absolute top-24 bottom-4 left-4 z-20 w-[360px] max-w-[calc(100vw-2rem)] space-y-3 overflow-y-auto pr-1 max-lg:relative max-lg:top-auto max-lg:bottom-auto max-lg:left-auto max-lg:mt-24 max-lg:ml-4 max-lg:max-h-[calc(100vh-7rem)]">
+      <section className="thin-scrollbar pointer-events-auto absolute top-24 bottom-4 left-4 z-20 w-[360px] max-w-[calc(100vw-2rem)] space-y-3 overflow-y-scroll pr-1 max-lg:relative max-lg:top-auto max-lg:bottom-auto max-lg:left-auto max-lg:mt-24 max-lg:ml-4 max-lg:max-h-[calc(100vh-7rem)]">
         {messages.length > 0 && (
           <HudPanel className="p-3">
             <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-300">System Message</p>
@@ -4033,7 +4054,7 @@ export function OrbitalDashboard() {
       )}
 
       {hasOrbitLoaded && (
-      <section className="thin-scrollbar pointer-events-auto absolute top-24 right-4 bottom-4 z-20 w-[340px] max-w-[calc(100vw-2rem)] space-y-3 overflow-y-auto pr-1 max-sm:hidden">
+      <section className="thin-scrollbar pointer-events-auto absolute top-24 right-4 bottom-4 z-20 w-[340px] max-w-[calc(100vw-2rem)] space-y-3 overflow-y-scroll pr-1 max-sm:hidden">
         <HudPanel>
           <div className="flex items-center justify-between gap-3">
             <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Sat Filter</p>
@@ -4066,7 +4087,7 @@ export function OrbitalDashboard() {
             <span>{effectiveShowRangeCheck ? "Selected range pair" : "Selected satellite"}</span>
             <span className="font-mono text-cyan-200">{selectedSatelliteIds.length}/{effectiveShowRangeCheck ? 2 : 1}</span>
           </div>
-          <div className="thin-scrollbar mt-3 max-h-[34vh] space-y-2 overflow-auto pr-1">
+          <div className="thin-scrollbar mt-3 max-h-[34vh] space-y-2 overflow-y-scroll pr-1">
             {snapshots.map((snapshot) => (
               <SatelliteControl
                 key={snapshot.satellite.id}
@@ -4309,7 +4330,7 @@ export function OrbitalDashboard() {
             isTrajectoryLoading={isMissionTrajectoryLoading}
             trajectoryOverlay={missionTrajectoryOverlay}
             trajectoryStale={missionTrajectoryIsStale}
-            propagationProfile={missionPropagationProfile}
+            propagationProfile={profileWithPendingUpdate(missionPropagationProfile, pendingMissionPropagationProfileUpdate)}
             capabilities={capabilities}
             propagationProfileStatus={propagationProfileStatus}
             trajectoryCadenceInput={missionTrajectoryCadenceInput}
@@ -4327,7 +4348,7 @@ export function OrbitalDashboard() {
             onSelectEvent={setSelectedTimelineEventId}
             onGenerateTrajectory={generateMissionTrajectory}
             onTrajectoryCadenceChange={setMissionTrajectoryCadenceInput}
-            onUpdatePropagationProfile={updateMissionPropagationProfileAction}
+            onStagePropagationProfile={stageMissionPropagationProfileUpdate}
             onDragEvent={setTimelineDragEventId}
             onDropEvent={reorderTimelineEvent}
             onScheduleEvent={updateTimelineEventSchedule}
@@ -4384,12 +4405,12 @@ export function OrbitalDashboard() {
       )}
 
       {activeCommandModal === "analysis" && (
-        <CommandModal title="Analysis" onClose={() => setActiveCommandModal(null)} size="wide">
+        <CommandModal title="Analysis" onClose={() => setActiveCommandModal(null)} size="analysis">
           <AnalysisModalContent
             selectedNoradId={selectedNoradId}
             canUseAnalysisConfig={canUseAnalysisConfig}
             analysisConfig={analysisConfig}
-            missionPropagationProfile={missionPropagationProfile}
+            missionPropagationProfile={profileWithPendingUpdate(missionPropagationProfile, pendingMissionPropagationProfileUpdate)}
             capabilities={capabilities}
             propagationProfileStatus={propagationProfileStatus}
             analysisMessage={analysisMessage}
@@ -4407,7 +4428,13 @@ export function OrbitalDashboard() {
             trajectoryOverlay={missionTrajectoryOverlay}
             onApplyPreset={applySelectedPreset}
             onToggleMode={toggleSelectedMode}
-            onUpdatePropagationProfile={updateMissionPropagationProfileAction}
+            pendingPropagationProfileUpdate={pendingMissionPropagationProfileUpdate}
+            onStagePropagationProfile={stageMissionPropagationProfileUpdate}
+            onCommitPropagationProfileDraft={() => {
+              if (pendingMissionPropagationProfileUpdate) {
+                void updateMissionPropagationProfileAction(pendingMissionPropagationProfileUpdate);
+              }
+            }}
             onToggleRangeCheck={toggleRangeCheck}
             onUpdateRangePrimary={updateRangePrimary}
             onUpdateRangeSecondary={updateRangeSecondary}
@@ -4601,18 +4628,26 @@ function CommandModal({
   title: string;
   children: ReactNode;
   onClose: () => void;
-  size?: "normal" | "wide" | "mission";
+  size?: "normal" | "wide" | "mission" | "analysis";
 }) {
-  const sizeClass = size === "mission"
-    ? "max-h-[94vh] w-[min(1400px,95vw)]"
+  const sizeClass = size === "analysis"
+    ? "h-[min(78vh,calc(100vh-2rem))] w-[min(1180px,90vw)]"
+    : size === "mission"
+    ? "max-h-[min(85vh,calc(100vh-2rem))] w-[min(1400px,95vw)]"
     : size === "wide"
-      ? "max-h-[90vh] w-[min(1180px,90vw)]"
-      : "max-h-[88vh] w-[min(760px,94vw)]";
+      ? "max-h-[min(85vh,calc(100vh-2rem))] w-[min(1180px,90vw)]"
+      : "max-h-[min(85vh,calc(100vh-2rem))] w-[min(760px,94vw)]";
+  const bodyClass = size === "analysis"
+    ? "thin-scrollbar always-scrollbar min-h-0 flex-1 overflow-y-scroll p-5"
+    : size === "mission"
+      ? "thin-scrollbar always-scrollbar min-h-0 overflow-y-scroll p-5"
+      : "thin-scrollbar min-h-0 overflow-y-auto p-5";
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
       <div className={`flex flex-col overflow-hidden border border-cyan-300/30 bg-[#071016]/96 shadow-2xl ${sizeClass}`}>
-        <div className="flex items-center justify-between border-b border-cyan-300/20 px-5 py-4">
+        <div className="shrink-0 border-b border-cyan-300/20 px-5 py-4">
+          <div className="flex items-center justify-between gap-4">
           <div>
             <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Command Center</p>
             <h2 className="mt-1 text-2xl font-semibold text-white">{title}</h2>
@@ -4622,8 +4657,9 @@ function CommandModal({
               <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
             </svg>
           </button>
+          </div>
         </div>
-        <div className="min-h-0 overflow-auto p-5">{children}</div>
+        <div className={bodyClass}>{children}</div>
       </div>
     </div>,
     document.body,
@@ -4802,8 +4838,8 @@ function OrbitSourceModal({
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
-      <div className="flex max-h-[88vh] w-[min(980px,94vw)] flex-col overflow-hidden border border-cyan-300/30 bg-[#071016]/96 shadow-2xl">
-        <div className="flex items-center justify-between border-b border-cyan-300/20 px-5 py-4">
+      <div className="flex max-h-[min(85vh,calc(100vh-2rem))] w-[min(980px,94vw)] flex-col overflow-hidden border border-cyan-300/30 bg-[#071016]/96 shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between border-b border-cyan-300/20 px-5 py-4">
           <div>
             <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Orbit Source Wizard</p>
             <h2 className="mt-1 text-2xl font-semibold text-white">{title}</h2>
@@ -4820,7 +4856,7 @@ function OrbitSourceModal({
             </svg>
           </button>
         </div>
-        <div className="min-h-0 overflow-auto p-5">
+        <div className="thin-scrollbar always-scrollbar min-h-0 overflow-y-scroll p-5">
           {source === "catalog" && (
             <CatalogOrbitFlow
               backendCatalogGroup={backendCatalogGroup}
@@ -4883,7 +4919,7 @@ function OrbitTemplateFlow({
             </div>
           </div>
         ) : (
-          <div className="max-h-[430px] overflow-auto p-3">
+          <div className="thin-scrollbar max-h-[430px] overflow-y-scroll p-3">
             <div className="space-y-2">
               {templates.map((template) => (
                 <button
@@ -5193,7 +5229,7 @@ function CatalogOrbitFlow({
             Load a catalog group to browse satellites.
           </div>
         ) : (
-          <div className="max-h-[430px] overflow-auto p-3">
+          <div className="thin-scrollbar max-h-[430px] overflow-y-scroll p-3">
             <div className="space-y-2">
               {filtered.map((satellite) => (
                 <button
@@ -5644,7 +5680,9 @@ function AnalysisModalContent({
   trajectoryOverlay,
   onApplyPreset,
   onToggleMode,
-  onUpdatePropagationProfile,
+  pendingPropagationProfileUpdate,
+  onStagePropagationProfile,
+  onCommitPropagationProfileDraft,
   onToggleRangeCheck,
   onUpdateRangePrimary,
   onUpdateRangeSecondary,
@@ -5672,27 +5710,29 @@ function AnalysisModalContent({
   trajectoryOverlay: MissionTrajectoryOverlay | null;
   onApplyPreset: (preset: AnalysisPresetId) => void;
   onToggleMode: (mode: string, enabled: boolean) => void;
-  onUpdatePropagationProfile: (request: UpdatePropagationProfileRequest) => Promise<void>;
+  pendingPropagationProfileUpdate: UpdatePropagationProfileRequest | null;
+  onStagePropagationProfile: (request: UpdatePropagationProfileRequest) => void;
+  onCommitPropagationProfileDraft: () => void;
   onToggleRangeCheck: () => void;
   onUpdateRangePrimary: (satelliteId: string) => void;
   onUpdateRangeSecondary: (satelliteId: string) => void;
   onSelectConjunction: (eventId: string) => void;
   onToggleConjunctions: () => void;
 }) {
-  const [tab, setTab] = useState<"trajectory" | "range" | "conjunction" | "maneuver" | "propagation">("trajectory");
+  const [tab, setTab] = useState<"trajectory" | "range" | "maneuver" | "propagation" | "conjunction">("trajectory");
   const missionBurnEvents = useMemo(() => missionEvents.filter((event) => event.type === "FINITE_BURN"), [missionEvents]);
   const totalBurnDuration = missionBurnEvents.reduce((sum, event) => sum + readNumberParameter(event.parameters ?? {}, "durationSeconds", 0), 0);
   const visiblePropagationConfig = missionPropagationProfile ?? analysisConfig?.config ?? null;
 
   return (
-    <div>
+    <div className="flex h-full min-h-0 flex-col">
       <div className="grid grid-cols-5 border border-cyan-300/20 max-sm:grid-cols-2">
         {[
           { id: "trajectory" as const, label: "Trajectory" },
           { id: "range" as const, label: "Range" },
-          { id: "conjunction" as const, label: "Conjunction" },
           { id: "maneuver" as const, label: "Maneuver" },
           { id: "propagation" as const, label: "Propagation" },
+          { id: "conjunction" as const, label: "Conjunction" },
         ].map((item) => (
           <button
             key={item.id}
@@ -5705,7 +5745,7 @@ function AnalysisModalContent({
         ))}
       </div>
 
-      <div className="mt-4">
+      <div className="thin-scrollbar mt-4 min-h-0 flex-1 overflow-y-scroll pr-1">
         {tab === "trajectory" && (
           <div className="grid gap-4 lg:grid-cols-2">
             <HudPanel>
@@ -5713,7 +5753,6 @@ function AnalysisModalContent({
               <p className="mt-2 text-sm text-zinc-300">{trajectoryOverlay ? trajectoryOverlay.message : "No mission trajectory generated yet."}</p>
               <div className="mt-3 grid grid-cols-2 gap-2">
                 <DetailMetric label="Mission Overlay" value={trajectoryOverlay?.mission ? "Ready" : "--"} />
-                <DetailMetric label="Comparison" value="Disabled pending run labels and delta metrics" />
                 <DetailMetric label="Generated" value={trajectoryOverlay ? compactIsoUtc(trajectoryOverlay.generatedAt) : "--"} />
                 <DetailMetric label="Cadence" value={trajectoryOverlay ? `${trajectoryOverlay.sampleCadenceSeconds}s` : "--"} />
               </div>
@@ -5823,7 +5862,7 @@ function AnalysisModalContent({
                 <DetailMetric label="Delta-V" value="Not computed" />
                 <DetailMetric label="Timeline" value={missionBurnEvents.length > 0 ? "Available" : "--"} />
               </div>
-              <div className="thin-scrollbar mt-3 max-h-[42vh] space-y-2 overflow-auto pr-1">
+              <div className="thin-scrollbar mt-3 max-h-[42vh] space-y-2 overflow-y-scroll pr-1">
                 {missionBurnEvents.length === 0 ? (
                   <p className="border border-white/10 bg-black/25 px-3 py-2 text-xs text-zinc-500">No finite-burn mission events found.</p>
                 ) : (
@@ -5858,7 +5897,7 @@ function AnalysisModalContent({
                 capabilities={capabilities}
                 status={propagationProfileStatus}
                 surface="analysis"
-                onUpdate={onUpdatePropagationProfile}
+                onDraftChange={onStagePropagationProfile}
               />
             ) : (
               <div className="border border-cyan-300/15 bg-black/20 p-3">
@@ -5877,6 +5916,18 @@ function AnalysisModalContent({
           </HudPanel>
         )}
       </div>
+      {tab === "propagation" && missionPropagationProfile && (
+        <div className="sticky bottom-0 z-20 mt-3 border-t border-cyan-300/20 bg-[#071016]/95 pt-3 backdrop-blur">
+          <button
+            type="button"
+            onClick={onCommitPropagationProfileDraft}
+            disabled={!pendingPropagationProfileUpdate}
+            className="w-full border border-cyan-300/70 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-300 hover:text-slate-950 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-zinc-600"
+          >
+            {trajectoryOverlay ? "Update Configuration" : "Save Configuration"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -5888,7 +5939,7 @@ function PropagationProfileEditor({
   surface = "analysis",
   defaultShowAdvanced = false,
   defaultShowExpert = false,
-  onUpdate,
+  onDraftChange,
 }: {
   profile: BackendPropagationProfile;
   capabilities: BackendCapabilityRegistry;
@@ -5896,11 +5947,12 @@ function PropagationProfileEditor({
   surface?: "planner" | "analysis";
   defaultShowAdvanced?: boolean;
   defaultShowExpert?: boolean;
-  onUpdate: (request: UpdatePropagationProfileRequest) => Promise<void>;
+  onDraftChange: (request: UpdatePropagationProfileRequest) => void;
 }) {
   const [showAdvanced, setShowAdvanced] = useState(defaultShowAdvanced);
   const [showExpert, setShowExpert] = useState(defaultShowExpert);
   const [setupDraft, setSetupDraft] = useState(() => propagationSetupDraftFromProfile(profile));
+  const [forceDraft, setForceDraft] = useState(() => forceDraftFromProfile(profile));
   const [advancedDraft, setAdvancedDraft] = useState(() => spacecraftDraftFromProfile(profile));
   const [expertDraft, setExpertDraft] = useState(() => integratorDraftFromProfile(profile));
   const isNumericalDraft = setupDraft.propagatorType === "NUMERICAL";
@@ -5917,35 +5969,37 @@ function PropagationProfileEditor({
     { key: "maneuverModelEnabled" as const, label: "Maneuver" },
   ];
 
-  const saveSetup = () => {
-    void onUpdate({
-      propagatorType: setupDraft.propagatorType,
-      integratorType: setupDraft.integratorType,
-      gravityDegree: Math.trunc(Math.max(0, numberFromDraft(setupDraft.gravityDegree, profile.gravityDegree))),
-      gravityOrder: Math.trunc(Math.max(0, numberFromDraft(setupDraft.gravityOrder, profile.gravityOrder))),
-    });
+  const emitDraft = (
+    nextSetup = setupDraft,
+    nextForce = forceDraft,
+    nextAdvanced = advancedDraft,
+    nextExpert = expertDraft,
+  ) => {
+    onDraftChange(propagationDraftUpdateFromParts(profile, nextSetup, nextForce, nextAdvanced, nextExpert));
   };
 
-  const saveAdvanced = () => {
-    void onUpdate({
-      dryMassKg: numberFromDraft(advancedDraft.dryMassKg, profile.dryMassKg),
-      fuelMassKg: numberFromDraft(advancedDraft.fuelMassKg, profile.fuelMassKg),
-      dragAreaM2: numberFromDraft(advancedDraft.dragAreaM2, profile.dragAreaM2),
-      dragCoefficient: numberFromDraft(advancedDraft.dragCoefficient, profile.dragCoefficient),
-      srpAreaM2: numberFromDraft(advancedDraft.srpAreaM2, profile.srpAreaM2),
-      reflectivityCoefficient: numberFromDraft(advancedDraft.reflectivityCoefficient, profile.reflectivityCoefficient),
-      nominalThrustN: numberFromDraft(advancedDraft.nominalThrustN, profile.nominalThrustN),
-      nominalIspS: numberFromDraft(advancedDraft.nominalIspS, profile.nominalIspS),
-    });
+  const updateSetupDraft = (patch: Partial<typeof setupDraft>) => {
+    const next = { ...setupDraft, ...patch };
+    setSetupDraft(next);
+    emitDraft(next, forceDraft, advancedDraft, expertDraft);
   };
 
-  const saveExpert = () => {
-    void onUpdate({
-      integratorMinStep: numberFromDraft(expertDraft.integratorMinStep, profile.integratorMinStep),
-      integratorMaxStep: numberFromDraft(expertDraft.integratorMaxStep, profile.integratorMaxStep),
-      integratorAbsTol: numberFromDraft(expertDraft.integratorAbsTol, profile.integratorAbsTol),
-      integratorRelTol: numberFromDraft(expertDraft.integratorRelTol, profile.integratorRelTol),
-    });
+  const updateForceDraft = (patch: Partial<typeof forceDraft>) => {
+    const next = { ...forceDraft, ...patch };
+    setForceDraft(next);
+    emitDraft(setupDraft, next, advancedDraft, expertDraft);
+  };
+
+  const updateAdvancedDraft = (key: keyof typeof advancedDraft, value: string) => {
+    const next = { ...advancedDraft, [key]: value };
+    setAdvancedDraft(next);
+    emitDraft(setupDraft, forceDraft, next, expertDraft);
+  };
+
+  const updateExpertDraft = (key: keyof typeof expertDraft, value: string) => {
+    const next = { ...expertDraft, [key]: value };
+    setExpertDraft(next);
+    emitDraft(setupDraft, forceDraft, advancedDraft, next);
   };
 
   return (
@@ -5971,7 +6025,7 @@ function PropagationProfileEditor({
           <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">Propagator Type</span>
           <select
             value={setupDraft.propagatorType}
-            onChange={(event) => setSetupDraft((current) => ({ ...current, propagatorType: event.target.value as PropagatorTypeId }))}
+            onChange={(event) => updateSetupDraft({ propagatorType: event.target.value as PropagatorTypeId })}
             className="mt-1 w-full border border-white/10 bg-black/35 px-2 py-1.5 text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
           >
             {capabilities.propagators.map((propagator) => (
@@ -5984,7 +6038,7 @@ function PropagationProfileEditor({
             <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">Integrator Type</span>
             <select
               value={setupDraft.integratorType}
-              onChange={(event) => setSetupDraft((current) => ({ ...current, integratorType: event.target.value as NumericalIntegratorTypeId }))}
+              onChange={(event) => updateSetupDraft({ integratorType: event.target.value as NumericalIntegratorTypeId })}
               className="mt-1 w-full border border-white/10 bg-black/35 px-2 py-1.5 text-xs text-zinc-100 outline-none transition focus:border-cyan-300"
             >
               {capabilities.integrators.map((integrator) => (
@@ -6003,33 +6057,28 @@ function PropagationProfileEditor({
             <ProfileNumberInput
               label="Gravity Degree"
               value={setupDraft.gravityDegree}
-              onChange={(value) => setSetupDraft((current) => ({ ...current, gravityDegree: value }))}
+              onChange={(value) => updateSetupDraft({ gravityDegree: value })}
             />
             <ProfileNumberInput
               label="Gravity Order"
               value={setupDraft.gravityOrder}
-              onChange={(value) => setSetupDraft((current) => ({ ...current, gravityOrder: value }))}
+              onChange={(value) => updateSetupDraft({ gravityOrder: value })}
             />
           </>
         )}
-        <button type="button" onClick={saveSetup} className="workspace-action">
-          Save Propagation Setup
-        </button>
       </div>
 
       {selectedPropagatorCapability?.supportsForceModels ? (
         <div className="mt-3 grid grid-cols-3 gap-1.5">
           <p className="col-span-3 font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">Force Models</p>
           {forceModes.map((mode) => {
-            const checked = Boolean(profile[mode.key]);
+            const checked = Boolean(forceDraft[mode.key]);
             return (
               <button
                 key={mode.key}
                 type="button"
                 aria-pressed={checked}
-                onClick={() => {
-                  void onUpdate({ [mode.key]: !checked });
-                }}
+                onClick={() => updateForceDraft({ [mode.key]: !checked })}
                 className={`border px-2 py-1.5 font-mono text-[10px] uppercase transition ${checked ? "border-lime-300 bg-lime-300/15 text-lime-100" : "border-white/10 text-zinc-500 hover:border-lime-300/60 hover:text-zinc-200"}`}
               >
                 {mode.label}
@@ -6086,12 +6135,9 @@ function PropagationProfileEditor({
               key={key}
               label={label}
               value={advancedDraft[key as keyof typeof advancedDraft]}
-              onChange={(value) => setAdvancedDraft((current) => ({ ...current, [key]: value }))}
+              onChange={(value) => updateAdvancedDraft(key as keyof typeof advancedDraft, value)}
             />
           ))}
-          <button type="button" onClick={saveAdvanced} className="workspace-action md:col-span-4">
-            Save Advanced
-          </button>
         </div>
       )}
 
@@ -6108,16 +6154,15 @@ function PropagationProfileEditor({
               key={key}
               label={label}
               value={expertDraft[key as keyof typeof expertDraft]}
-              onChange={(value) => setExpertDraft((current) => ({ ...current, [key]: value }))}
+              onChange={(value) => updateExpertDraft(key as keyof typeof expertDraft, value)}
             />
           ))}
-          <button type="button" onClick={saveExpert} className="workspace-action md:col-span-4">
-            Save Expert
-          </button>
         </div>
       )}
 
-      {status && <p className="mt-3 text-xs leading-5 text-zinc-500">{status}</p>}
+      <p className="mt-3 text-xs leading-5 text-zinc-500">
+        {status ?? "Edits are staged locally and saved by the Mission Planner trajectory action or the Analysis footer action."}
+      </p>
     </div>
   );
 }
@@ -6154,6 +6199,17 @@ function propagationSetupDraftFromProfile(profile: BackendPropagationProfile) {
   };
 }
 
+function forceDraftFromProfile(profile: BackendPropagationProfile) {
+  return {
+    gravityEnabled: profile.gravityEnabled,
+    dragEnabled: profile.dragEnabled,
+    solarRadiationPressureEnabled: profile.solarRadiationPressureEnabled,
+    thirdBodySunEnabled: profile.thirdBodySunEnabled,
+    thirdBodyMoonEnabled: profile.thirdBodyMoonEnabled,
+    maneuverModelEnabled: profile.maneuverModelEnabled,
+  };
+}
+
 function spacecraftDraftFromProfile(profile: BackendPropagationProfile) {
   return {
     dryMassKg: String(profile.dryMassKg),
@@ -6179,6 +6235,34 @@ function integratorDraftFromProfile(profile: BackendPropagationProfile) {
 function numberFromDraft(value: string, fallback: number) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function propagationDraftUpdateFromParts(
+  profile: BackendPropagationProfile,
+  setupDraft: ReturnType<typeof propagationSetupDraftFromProfile>,
+  forceDraft: ReturnType<typeof forceDraftFromProfile>,
+  advancedDraft: ReturnType<typeof spacecraftDraftFromProfile>,
+  expertDraft: ReturnType<typeof integratorDraftFromProfile>,
+): UpdatePropagationProfileRequest {
+  return {
+    propagatorType: setupDraft.propagatorType,
+    integratorType: setupDraft.integratorType,
+    gravityDegree: Math.trunc(Math.max(0, numberFromDraft(setupDraft.gravityDegree, profile.gravityDegree))),
+    gravityOrder: Math.trunc(Math.max(0, numberFromDraft(setupDraft.gravityOrder, profile.gravityOrder))),
+    ...forceDraft,
+    dryMassKg: numberFromDraft(advancedDraft.dryMassKg, profile.dryMassKg),
+    fuelMassKg: numberFromDraft(advancedDraft.fuelMassKg, profile.fuelMassKg),
+    dragAreaM2: numberFromDraft(advancedDraft.dragAreaM2, profile.dragAreaM2),
+    dragCoefficient: numberFromDraft(advancedDraft.dragCoefficient, profile.dragCoefficient),
+    srpAreaM2: numberFromDraft(advancedDraft.srpAreaM2, profile.srpAreaM2),
+    reflectivityCoefficient: numberFromDraft(advancedDraft.reflectivityCoefficient, profile.reflectivityCoefficient),
+    nominalThrustN: numberFromDraft(advancedDraft.nominalThrustN, profile.nominalThrustN),
+    nominalIspS: numberFromDraft(advancedDraft.nominalIspS, profile.nominalIspS),
+    integratorMinStep: numberFromDraft(expertDraft.integratorMinStep, profile.integratorMinStep),
+    integratorMaxStep: numberFromDraft(expertDraft.integratorMaxStep, profile.integratorMaxStep),
+    integratorAbsTol: numberFromDraft(expertDraft.integratorAbsTol, profile.integratorAbsTol),
+    integratorRelTol: numberFromDraft(expertDraft.integratorRelTol, profile.integratorRelTol),
+  };
 }
 
 function WorkspaceLibraryPanel({
@@ -6260,7 +6344,7 @@ function WorkspaceLibraryPanel({
 
       <div className="mt-3">
         <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Orbit Library</p>
-        <div className="mt-2 max-h-[30vh] space-y-2 overflow-auto pr-1">
+        <div className="thin-scrollbar mt-2 max-h-[30vh] space-y-2 overflow-y-scroll pr-1">
           {orbitLibrary.length === 0 ? (
             <p className="border border-white/10 bg-black/25 px-3 py-2 font-mono text-[10px] uppercase text-zinc-600">No saved orbits yet</p>
           ) : (
@@ -6369,7 +6453,7 @@ function TemplateLibraryPanel({
             <button type="button" onClick={onImportOrbitTemplate} className="workspace-action">Import</button>
           </div>
         </div>
-        <div className="mt-3 max-h-[58vh] space-y-2 overflow-auto pr-1">
+        <div className="thin-scrollbar mt-3 max-h-[58vh] space-y-2 overflow-y-scroll pr-1">
           {orbitTemplateLibrary.templates.length === 0 ? (
             <p className="border border-white/10 bg-black/25 px-3 py-2 font-mono text-[10px] uppercase text-zinc-600">No orbit templates yet</p>
           ) : (
@@ -6408,7 +6492,7 @@ function TemplateLibraryPanel({
             <button type="button" onClick={onImportTemplate} className="workspace-action">Import</button>
           </div>
         </div>
-        <div className="mt-3 max-h-[58vh] space-y-2 overflow-auto pr-1">
+        <div className="thin-scrollbar mt-3 max-h-[58vh] space-y-2 overflow-y-scroll pr-1">
           {templateLibrary.templates.length === 0 ? (
             <p className="border border-white/10 bg-black/25 px-3 py-2 font-mono text-[10px] uppercase text-zinc-600">No mission templates yet</p>
           ) : (
@@ -6515,7 +6599,7 @@ function MissionTimelinePanel({
   onSelectEvent,
   onGenerateTrajectory,
   onTrajectoryCadenceChange,
-  onUpdatePropagationProfile,
+  onStagePropagationProfile,
   onDragEvent,
   onDropEvent,
   onScheduleEvent,
@@ -6548,7 +6632,7 @@ function MissionTimelinePanel({
   onSelectEvent: (eventId: string) => void;
   onGenerateTrajectory: () => void;
   onTrajectoryCadenceChange: (value: string) => void;
-  onUpdatePropagationProfile: (request: UpdatePropagationProfileRequest) => Promise<void>;
+  onStagePropagationProfile: (request: UpdatePropagationProfileRequest) => void;
   onDragEvent: (eventId: string | null) => void;
   onDropEvent: (sourceEventId: string, targetEventId: string) => void;
   onScheduleEvent: (event: BackendMissionTimelineEvent, targetMetSeconds: number, snapMode: TimelineSnapMode) => void;
@@ -6564,11 +6648,14 @@ function MissionTimelinePanel({
   }), [customZoomHours, snapMode, zoomPreset]);
   const analysis = useMemo(() => timelineAnalysis(mission, events), [events, mission]);
   const hasEnabledFiniteBurns = events.some((event) => event.enabled && event.type === "FINITE_BURN");
+  const trajectoryCurrentBlocker = trajectoryOverlay && !trajectoryStale
+    ? "Trajectory is current. Change mission configuration, timeline, or cadence to update."
+    : null;
   const trajectoryGenerationBlocker = !propagationProfile
     ? "Mission propagation profile is still loading. Configure propagation before generating trajectory."
     : propagationProfile.propagatorType !== "NUMERICAL" && hasEnabledFiniteBurns
       ? `${propagationProfile.propagatorType.replaceAll("_", " ")} propagation cannot execute finite-burn mission events. Select Numerical or disable burn events.`
-      : trajectoryCadenceError;
+      : trajectoryCadenceError ?? trajectoryCurrentBlocker;
   const layoutModel = useMemo(() => mission
     ? buildTimelineLayoutModel(mission, events, interactionModel, selectedEventId, simulationTimeIso)
     : null, [events, interactionModel, mission, selectedEventId, simulationTimeIso]);
@@ -6591,14 +6678,6 @@ function MissionTimelinePanel({
                 Catalog
               </button>
             )}
-            <button
-              type="button"
-              disabled={!canUseMissionTimeline}
-              onClick={onInitializeMission}
-              className="border border-emerald-300/50 px-3 py-1.5 font-mono text-[10px] uppercase text-emerald-100 transition hover:border-emerald-300 hover:bg-emerald-300/10 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-zinc-600"
-            >
-              Create Mission
-            </button>
           </div>
         ) : (
           <div className="flex items-center gap-1.5">
@@ -6709,7 +6788,7 @@ function MissionTimelinePanel({
               surface="planner"
               defaultShowAdvanced
               defaultShowExpert
-              onUpdate={onUpdatePropagationProfile}
+              onDraftChange={onStagePropagationProfile}
             />
           ) : (
             <div className="border border-amber-300/25 bg-amber-300/[0.05] p-3">
@@ -6847,7 +6926,7 @@ function MissionTimelinePanel({
         </div>
       )}
 
-      <div className="thin-scrollbar mt-3 max-h-[34vh] space-y-2 overflow-auto pr-1">
+      <div className="thin-scrollbar mt-3 max-h-[34vh] space-y-2 overflow-y-scroll pr-1">
         {events.map((event, index) => (
           <TimelineEventCard
             key={event.id}
@@ -6872,19 +6951,16 @@ function MissionTimelinePanel({
       </div>
 
       {mission && (
-        <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
+        <div className="sticky bottom-0 z-20 mt-3 border-t border-cyan-300/20 bg-[#071016]/95 pt-3 backdrop-blur">
           <button
             type="button"
             onClick={onGenerateTrajectory}
             disabled={isTrajectoryLoading || Boolean(trajectoryGenerationBlocker)}
             title={trajectoryGenerationBlocker ?? "Generate trajectory using the displayed mission run configuration."}
-            className="border border-cyan-300 bg-cyan-300 px-3 py-2 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-950 transition hover:bg-cyan-200 disabled:cursor-wait disabled:opacity-60"
+            className={`w-full border border-cyan-300 bg-cyan-300 px-3 py-2 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-950 transition hover:bg-cyan-200 disabled:opacity-60 ${isTrajectoryLoading ? "disabled:cursor-wait" : "disabled:cursor-not-allowed"}`}
           >
             {isTrajectoryLoading ? "Generating" : trajectoryOverlay ? "Update Trajectory" : "Generate Trajectory"}
           </button>
-          <div className="border border-white/10 px-3 py-2 font-mono text-[10px] uppercase text-zinc-500" title="Comparison overlays are disabled until explicit run labels and delta metrics are implemented.">
-            Comparison Disabled
-          </div>
         </div>
       )}
 
@@ -6966,13 +7042,13 @@ function VisualMissionTimeline({
 
   return (
     <div className="mt-3 overflow-hidden border border-white/10 bg-black/30">
-      <div className="overflow-x-auto">
+      <div className="thin-scrollbar overflow-x-scroll pb-2">
         <div
           ref={trackRef}
           onPointerMove={updateDragPreview}
           onPointerUp={endDrag}
           onPointerCancel={() => setDragState(null)}
-          className="relative h-52 min-w-full border-b border-white/10 bg-[linear-gradient(90deg,rgba(103,232,249,0.12)_1px,transparent_1px)] bg-[length:80px_100%]"
+          className="relative h-52 min-w-[960px] border-b border-white/10 bg-[linear-gradient(90deg,rgba(103,232,249,0.12)_1px,transparent_1px)] bg-[length:80px_100%]"
           style={{ width: `${layout.trackWidthPercent}%` }}
         >
           <TimelineCursor positionPercent={layout.cursors.missionStart} label="Start" tone="cyan" />
@@ -7147,7 +7223,7 @@ function TimelineEventCard({
         </span>
         <span className="mt-2 block truncate text-xs text-zinc-400">{summary}</span>
       </button>
-      <div className="mt-3 grid grid-cols-4 gap-1.5">
+      <div className="mt-3 grid grid-cols-3 gap-1.5">
         <button
           type="button"
           onClick={onToggle}
@@ -7163,9 +7239,6 @@ function TimelineEventCard({
         <button type="button" onClick={onDelete} className="border border-white/10 px-2 py-1.5 font-mono text-[10px] uppercase text-zinc-300 transition hover:border-rose-300 hover:text-rose-100">
           Del
         </button>
-        <span className="grid place-items-center border border-white/10 font-mono text-[10px] uppercase text-zinc-600" title="Drag to reorder">
-          Move
-        </span>
       </div>
     </div>
   );
@@ -7222,8 +7295,8 @@ function MissionSetupModal({
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
-      <div className="flex max-h-[88vh] w-[min(720px,94vw)] flex-col overflow-hidden border border-cyan-300/30 bg-[#071016]/96 shadow-2xl">
-        <div className="flex items-center justify-between border-b border-cyan-300/20 px-5 py-4">
+      <div className="flex max-h-[min(85vh,calc(100vh-2rem))] w-[min(720px,94vw)] flex-col overflow-hidden border border-cyan-300/30 bg-[#071016]/96 shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between border-b border-cyan-300/20 px-5 py-4">
           <div>
             <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Mission Setup</p>
             <h2 className="mt-1 text-xl font-semibold text-white">Define Mission Window</h2>
@@ -7241,7 +7314,7 @@ function MissionSetupModal({
           </button>
         </div>
 
-        <div className="min-h-0 overflow-auto p-5">
+        <div className="thin-scrollbar always-scrollbar min-h-0 overflow-y-scroll p-5">
           <div className="grid gap-4">
             <div className="border border-cyan-300/15 bg-black/25 px-3 py-2">
               <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Mission Subject</p>
@@ -7249,7 +7322,7 @@ function MissionSetupModal({
                 Choose exactly one spacecraft for mission ownership. This subject is immutable after mission creation.
               </p>
               {subjectOptions.length > 1 ? (
-                <div className="thin-scrollbar mt-3 max-h-44 space-y-2 overflow-auto pr-1">
+                <div className="thin-scrollbar mt-3 max-h-44 space-y-2 overflow-y-scroll pr-1">
                   {subjectOptions.map((option) => (
                     <button
                       key={option.id}
@@ -7397,7 +7470,7 @@ function MissionSetupModal({
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t border-cyan-300/20 px-5 py-4">
+        <div className="flex shrink-0 items-center justify-end gap-2 border-t border-cyan-300/20 px-5 py-4">
           <button type="button" onClick={onClose} className="border border-white/10 px-4 py-2 font-mono text-xs uppercase text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100">
             Cancel
           </button>
@@ -7462,8 +7535,8 @@ function TimelineEventModal({
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
-      <div className="flex max-h-[88vh] w-[min(720px,94vw)] flex-col overflow-hidden border border-cyan-300/30 bg-[#071016]/96 shadow-2xl">
-        <div className="flex items-center justify-between border-b border-cyan-300/20 px-5 py-4">
+      <div className="flex max-h-[min(85vh,calc(100vh-2rem))] w-[min(720px,94vw)] flex-col overflow-hidden border border-cyan-300/30 bg-[#071016]/96 shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between border-b border-cyan-300/20 px-5 py-4">
           <div>
             <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Mission Timeline</p>
             <h2 className="mt-1 text-xl font-semibold text-white">{mode === "edit" ? "Edit Event" : "Create Event"}</h2>
@@ -7481,7 +7554,7 @@ function TimelineEventModal({
           </button>
         </div>
 
-        <div className="min-h-0 overflow-auto p-5">
+        <div className="thin-scrollbar min-h-0 overflow-y-auto p-5">
           <div className="grid grid-cols-2 gap-2">
             {(["COAST", "FINITE_BURN"] as const).map((type) => (
               <button
@@ -7762,7 +7835,7 @@ function ManeuverModal({
         </div>
 
         <div className="grid min-h-0 flex-1 grid-cols-[340px_1fr] gap-4 overflow-hidden p-5 max-lg:grid-cols-1">
-          <div className="min-h-0 overflow-auto border border-white/10 bg-black/25 p-3">
+          <div className="thin-scrollbar min-h-0 overflow-y-scroll border border-white/10 bg-black/25 p-3">
             <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-zinc-500">Event Timeline</p>
             <div className="mt-3 space-y-2">
               {maneuverSnapshots.map((snapshot) => {
@@ -7802,7 +7875,7 @@ function ManeuverModal({
           </div>
 
           {selectedManeuver ? (
-            <div className="min-h-0 overflow-auto border border-white/10 bg-black/25 p-5">
+            <div className="thin-scrollbar min-h-0 overflow-y-scroll border border-white/10 bg-black/25 p-5">
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <div>
                   <p className="font-mono text-xs uppercase tracking-[0.18em] text-fuchsia-200">Selected Maneuver</p>
