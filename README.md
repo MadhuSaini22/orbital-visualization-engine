@@ -12,35 +12,59 @@ The main screen is for situational awareness. Planning, analysis, workspace mana
 
 ## Screenshots
 
-### Orbit Source Selection
+### 1. Orbit Source Selection
 
 ![Orbit Source Selection](https://github.com/user-attachments/assets/f4e90259-1aa2-4fc4-a45c-7a87c1528079)
 
-Create spacecraft orbits using TLE catalogs, imported TLEs, orbital elements, Cartesian states, or reusable templates.
+Choose how spacecraft orbits are created using TLE catalogs, imported TLEs, orbital elements, Cartesian states, or templates.
 
 ---
 
-### TLE Import Workflow
+### 2. TLE Import Workflow
 
 ![TLE Import](https://github.com/user-attachments/assets/888de5c3-20ba-4cb2-8539-9810110a7a5d)
 
-Import one or more spacecraft from raw TLE data with validation, preview, and mission-ready initialization.
+Import one or more spacecraft directly from raw TLE data with validation and preview support.
 
 ---
 
-### Mission Planning & Timeline Design
+### 3. Mission Creation
 
-![Mission Planner](https://github.com/user-attachments/assets/8135062d-d285-40e5-aa34-35fb2f9cdc2b)
+![Mission Creation](https://github.com/user-attachments/assets/a1b2f350-6c8c-4b6e-a48b-6d86358ac8ca)
 
-Configure propagation settings, force models, finite burns, coast phases, and mission timelines before trajectory generation.
+Define mission ownership, mission window, duration presets, and timeline initialization settings.
 
 ---
 
-### Operational Visualization
+### 4. Mission Planner Configuration
+
+![Mission Planner Configuration](https://github.com/user-attachments/assets/0d8599b9-d9ea-4c68-a44e-e1dd14a0d557)
+
+Configure propagators, force models, spacecraft parameters, and maneuver planning settings.
+
+---
+
+### 5. Timeline & Burn Planning
+
+![Timeline Planning](https://github.com/user-attachments/assets/8135062d-d285-40e5-aa34-35fb2f9cdc2b)
+
+Build mission timelines with coast phases, finite burns, scheduling controls, and trajectory generation.
+
+---
+
+### 6. Mission Analysis
+
+![Mission Analysis](https://github.com/user-attachments/assets/e78885d8-5ca1-4285-9a96-3fbf28246ef8)
+
+Review generated trajectories, propagation results, maneuver analysis, and mission metrics.
+
+---
+
+### 7. Operational Visualization
 
 ![Operational Visualization](https://github.com/user-attachments/assets/10e655c8-0429-426e-b276-9d2b5e28366d)
 
-Visualize satellite trajectories in 3D, monitor mission status, and analyze generated mission plans in real time.
+Visualize satellites in a 3D Earth environment with mission status, telemetry summaries, and trajectory playback.
 
 
 ## Running Locally
