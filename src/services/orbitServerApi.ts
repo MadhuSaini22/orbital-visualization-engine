@@ -130,6 +130,7 @@ export type NumericalIntegratorTypeId =
   | "GRAGG_BULIRSCH_STOER";
 export type MissionTimelineEventType = "COAST" | "FINITE_BURN" | "IMPULSIVE_BURN" | "VECTOR_BURN" | "STATION_KEEPING" | "PLANE_CHANGE" | "HOHMANN_TRANSFER";
 export type ManualOrbitType = "TLE" | "CLASSICAL_ELEMENTS" | "CARTESIAN_STATE";
+export type ManeuverTemplateType = "CIRCULARIZATION" | "HOHMANN_TRANSFER";
 
 export type BackendCapabilityRegistry = {
   propagators: Array<{
@@ -208,6 +209,28 @@ export type CreateTimelineEventRequest = {
 };
 
 export type UpdateTimelineEventRequest = Partial<CreateTimelineEventRequest>;
+
+export type ManeuverTemplateRequest = {
+  type: ManeuverTemplateType;
+  targetAltitudeKm: number;
+  sequenceIndex?: number;
+};
+
+export type ManeuverTemplatePreview = {
+  type: ManeuverTemplateType;
+  templateInstanceId: string;
+  metadata: Record<string, unknown>;
+  warnings: string[];
+  events: CreateTimelineEventRequest[];
+};
+
+export type ManeuverTemplateApplyResponse = {
+  type: ManeuverTemplateType;
+  templateInstanceId: string;
+  metadata: Record<string, unknown>;
+  warnings: string[];
+  events: BackendMissionTimelineEvent[];
+};
 
 export type BackendAnalysisConfig = {
   noradId: number;
@@ -396,6 +419,26 @@ export async function reorderMissionTimelineEvents(missionId: string, eventIds: 
 export async function setMissionTimelineEventEnabled(missionId: string, eventId: string, enabled: boolean) {
   return fetchJson<BackendMissionTimelineEvent>(`/api/missions/${missionId}/timeline/events/${eventId}/${enabled ? "enable" : "disable"}`, {}, {
     method: "POST",
+  });
+}
+
+export async function previewManeuverTemplate(missionId: string, request: ManeuverTemplateRequest) {
+  return fetchJson<ManeuverTemplatePreview>(`/api/missions/${missionId}/maneuver-templates/preview`, {}, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function applyManeuverTemplate(missionId: string, request: ManeuverTemplateRequest) {
+  return fetchJson<ManeuverTemplateApplyResponse>(`/api/missions/${missionId}/maneuver-templates/apply`, {}, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
   });
 }
 

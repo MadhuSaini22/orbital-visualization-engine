@@ -29,6 +29,7 @@ export function MissionTimelinePanel({
   onOpenCatalog,
   onOpenWorkspace,
   onOpenTemplates,
+  onOpenManeuverTemplates,
   onCreateEvent,
   onEditEvent,
   onDeleteEvent,
@@ -62,6 +63,7 @@ export function MissionTimelinePanel({
   onOpenCatalog: () => void;
   onOpenWorkspace: () => void;
   onOpenTemplates: () => void;
+  onOpenManeuverTemplates: () => void;
   onCreateEvent: (type?: "COAST" | "FINITE_BURN" | "IMPULSIVE_BURN") => void;
   onEditEvent: (event: BackendMissionTimelineEvent) => void;
   onDeleteEvent: (event: BackendMissionTimelineEvent) => void;
@@ -118,6 +120,13 @@ export function MissionTimelinePanel({
           </div>
         ) : (
           <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={onOpenManeuverTemplates}
+              className="border border-cyan-300/45 px-2 py-1.5 font-mono text-[10px] uppercase text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-300/10"
+            >
+              Templates
+            </button>
             <button
               type="button"
               onClick={() => onCreateEvent("COAST")}

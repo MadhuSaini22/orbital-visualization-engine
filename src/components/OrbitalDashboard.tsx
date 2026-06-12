@@ -28,6 +28,7 @@ import {
 import { SatelliteJsPropagator } from "@/propagation/SatelliteJsPropagator";
 import {
   applyAnalysisPreset,
+  applyManeuverTemplate,
   createManualOrbit,
   createMission,
   createMissionTimelineEvent,
@@ -45,6 +46,7 @@ import {
   fetchManualOrbitTrajectory,
   fetchManeuvers,
   fetchOrbitTrajectory,
+  previewManeuverTemplate,
   reorderMissionTimelineEvents,
   setAnalysisMode,
   setMissionTimelineEventEnabled,
@@ -95,6 +97,8 @@ import type {
   BackendPropagationProfile,
   CreateTimelineEventRequest,
   CreateManualOrbitRequest,
+  ManeuverTemplatePreview,
+  ManeuverTemplateType,
   ManualOrbitType,
   PropagatorTypeId,
   UpdatePropagationProfileRequest,
@@ -139,6 +143,10 @@ type TimelineSnapMode = "FREE" | "ONE_MIN" | "FIVE_MIN" | "TEN_MIN" | "THIRTY_MI
 type MissionDurationPreset = "ONE_ORBIT" | "THREE_HOURS" | "TWELVE_HOURS" | "TWENTY_FOUR_HOURS" | "CUSTOM";
 type CommandModalId = "mission" | "analysis" | "workspace" | "templates";
 type TimelineEventDraftType = "COAST" | "FINITE_BURN" | "IMPULSIVE_BURN";
+type ManeuverTemplateDraft = {
+  type: ManeuverTemplateType;
+  targetAltitudeKm: string;
+};
 type TimelineEditorDraft = {
   type: TimelineEventDraftType;
   name: string;
@@ -246,6 +254,10 @@ const defaultTimelineDraft: TimelineEditorDraft = {
   deltaVxMps: "1",
   deltaVyMps: "0",
   deltaVzMps: "0",
+};
+const defaultManeuverTemplateDraft: ManeuverTemplateDraft = {
+  type: "CIRCULARIZATION",
+  targetAltitudeKm: "500",
 };
 const missionDurationPresets = [
   { id: "ONE_ORBIT", label: "1 orbit", seconds: 90 * 60 },
@@ -1738,6 +1750,10 @@ export function OrbitalDashboard() {
   const [selectedTimelineEventId, setSelectedTimelineEventId] = useState<string | null>(null);
   const [timelineModalMode, setTimelineModalMode] = useState<TimelineModalMode | null>(null);
   const [timelineDraft, setTimelineDraft] = useState<TimelineEditorDraft>(defaultTimelineDraft);
+  const [isManeuverTemplateOpen, setIsManeuverTemplateOpen] = useState(false);
+  const [maneuverTemplateDraft, setManeuverTemplateDraft] = useState<ManeuverTemplateDraft>(defaultManeuverTemplateDraft);
+  const [maneuverTemplatePreview, setManeuverTemplatePreview] = useState<ManeuverTemplatePreview | null>(null);
+  const [isManeuverTemplateLoading, setIsManeuverTemplateLoading] = useState(false);
   const [isMissionSetupOpen, setIsMissionSetupOpen] = useState(false);
   const [missionSetupDraft, setMissionSetupDraft] = useState<MissionSetupDraft>(
     () => missionSetupDraftFor(null, initialSimulationTime),
@@ -2185,6 +2201,8 @@ export function OrbitalDashboard() {
     setMissionTimelineEvents([]);
     setSelectedTimelineEventId(null);
     setTimelineModalMode(null);
+    setIsManeuverTemplateOpen(false);
+    setManeuverTemplatePreview(null);
     setTimelineStatus(null);
     setMissionTrajectoryOverlay(null);
     setMissionPropagationProfile(null);
@@ -3019,11 +3037,81 @@ export function OrbitalDashboard() {
     setTimelineModalMode("create");
   }, [mission]);
 
+  const openManeuverTemplateModal = useCallback(() => {
+    const altitudeKm = missionSubjectSnapshot?.state?.altitudeKm;
+    setManeuverTemplateDraft({
+      ...defaultManeuverTemplateDraft,
+      targetAltitudeKm: Number.isFinite(altitudeKm) ? String(Math.max(0, Math.round(altitudeKm ?? 500))) : "500",
+    });
+    setManeuverTemplatePreview(null);
+    setIsManeuverTemplateOpen(true);
+  }, [missionSubjectSnapshot]);
+
   const openEditTimelineModal = useCallback((event: BackendMissionTimelineEvent) => {
     setTimelineDraft(timelineDraftFromEvent(event, mission));
     setSelectedTimelineEventId(event.id);
     setTimelineModalMode("edit");
   }, [mission]);
+
+  const maneuverTemplateRequest = useCallback(() => {
+    const targetAltitudeKm = Number(maneuverTemplateDraft.targetAltitudeKm);
+    if (!Number.isFinite(targetAltitudeKm) || targetAltitudeKm < 0) {
+      throw new Error("Target altitude must be a number greater than or equal to zero.");
+    }
+    return {
+      type: maneuverTemplateDraft.type,
+      targetAltitudeKm,
+      sequenceIndex: missionTimelineEvents.length,
+    };
+  }, [maneuverTemplateDraft, missionTimelineEvents.length]);
+
+  const previewSelectedManeuverTemplate = useCallback(async () => {
+    if (!mission) {
+      toast.error("Create or open a mission before using maneuver templates.");
+      return;
+    }
+    setIsManeuverTemplateLoading(true);
+    setTimelineStatus("Previewing maneuver template...");
+    try {
+      const preview = await previewManeuverTemplate(mission.id, maneuverTemplateRequest());
+      setManeuverTemplatePreview(preview);
+      setTimelineStatus(`${preview.events.length} generated primitive event${preview.events.length === 1 ? "" : "s"} previewed.`);
+      toast.success("Maneuver template preview ready.");
+    } catch (error) {
+      const message = userErrorMessage(error, "Unable to preview maneuver template.");
+      setTimelineStatus(message);
+      toast.error(message);
+    } finally {
+      setIsManeuverTemplateLoading(false);
+    }
+  }, [maneuverTemplateRequest, mission]);
+
+  const applySelectedManeuverTemplate = useCallback(async () => {
+    if (!mission) {
+      toast.error("Create or open a mission before applying maneuver templates.");
+      return;
+    }
+    setIsManeuverTemplateLoading(true);
+    setTimelineStatus("Applying maneuver template...");
+    setActiveOperationLabel("Saving timeline event...");
+    try {
+      const response = await applyManeuverTemplate(mission.id, maneuverTemplateRequest());
+      const refreshed = await refreshMissionTimeline(mission.id);
+      setSelectedTimelineEventId(response.events[0]?.id ?? refreshed[0]?.id ?? null);
+      markMissionTrajectoryStale();
+      setIsManeuverTemplateOpen(false);
+      setManeuverTemplatePreview(null);
+      setTimelineStatus(`Applied ${response.events.length} generated primitive event${response.events.length === 1 ? "" : "s"} to the timeline.`);
+      toast.success("Maneuver template applied.");
+    } catch (error) {
+      const message = userErrorMessage(error, "Unable to apply maneuver template.");
+      setTimelineStatus(message);
+      toast.error(message);
+    } finally {
+      setActiveOperationLabel(null);
+      setIsManeuverTemplateLoading(false);
+    }
+  }, [maneuverTemplateRequest, markMissionTrajectoryStale, mission, refreshMissionTimeline]);
 
   const saveTimelineEvent = useCallback(async () => {
     if (!mission) {
@@ -4193,6 +4281,24 @@ export function OrbitalDashboard() {
         />
       )}
 
+      {isManeuverTemplateOpen && (
+        <ManeuverTemplateModal
+          draft={maneuverTemplateDraft}
+          preview={maneuverTemplatePreview}
+          loading={isManeuverTemplateLoading}
+          onDraftChange={(draft) => {
+            setManeuverTemplateDraft(draft);
+            setManeuverTemplatePreview(null);
+          }}
+          onPreview={previewSelectedManeuverTemplate}
+          onApply={applySelectedManeuverTemplate}
+          onClose={() => {
+            setIsManeuverTemplateOpen(false);
+            setManeuverTemplatePreview(null);
+          }}
+        />
+      )}
+
       {isMissionSetupOpen && (
           <MissionSetupModal
           draft={missionSetupDraft}
@@ -4230,6 +4336,7 @@ export function OrbitalDashboard() {
             onOpenCatalog={() => openOrbitSource("catalog")}
             onOpenWorkspace={() => setActiveCommandModal("workspace")}
             onOpenTemplates={() => setActiveCommandModal("templates")}
+            onOpenManeuverTemplates={openManeuverTemplateModal}
             onCreateEvent={openCreateTimelineModal}
             onEditEvent={openEditTimelineModal}
             onDeleteEvent={deleteTimelineEvent}
@@ -6062,6 +6169,196 @@ function MissionSetupModal({
       </div>
     </div>,
     document.body,
+  );
+}
+
+function ManeuverTemplateModal({
+  draft,
+  preview,
+  loading,
+  onDraftChange,
+  onPreview,
+  onApply,
+  onClose,
+}: {
+  draft: ManeuverTemplateDraft;
+  preview: ManeuverTemplatePreview | null;
+  loading: boolean;
+  onDraftChange: (draft: ManeuverTemplateDraft) => void;
+  onPreview: () => void;
+  onApply: () => void;
+  onClose: () => void;
+}) {
+  const targetAltitude = Number(draft.targetAltitudeKm);
+  const canPreview = Number.isFinite(targetAltitude) && targetAltitude >= 0 && !loading;
+  const applyBlocked = preview?.warnings.some((warning) => warning.includes("cannot be applied")) ?? false;
+  const canApply = Boolean(preview && preview.events.length > 0 && !loading && !applyBlocked);
+  const totalDeltaV = readNumberParameter(preview?.metadata ?? {}, "totalDeltaVMps", 0);
+  const transferTimeSeconds = readNumberParameter(preview?.metadata ?? {}, "transferTimeSeconds", 0);
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
+      <div className="flex max-h-[min(86vh,calc(100vh-2rem))] w-[min(820px,94vw)] flex-col overflow-hidden border border-cyan-300/30 bg-[#071016]/96 shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between border-b border-cyan-300/20 px-5 py-4">
+          <div>
+            <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Mission Planner</p>
+            <h2 className="mt-1 text-xl font-semibold text-white">Maneuver Templates</h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="grid h-9 w-9 place-items-center border border-white/15 text-zinc-200 transition hover:border-cyan-300 hover:text-white"
+            aria-label="Close maneuver template modal"
+            title="Close"
+          >
+            <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="square" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="thin-scrollbar min-h-0 overflow-y-auto p-5">
+          <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
+            {(["CIRCULARIZATION", "HOHMANN_TRANSFER"] as const).map((type) => (
+              <button
+                key={type}
+                type="button"
+                onClick={() => onDraftChange({ ...draft, type })}
+                className={`border px-3 py-2 text-left transition ${
+                  draft.type === type
+                    ? "border-cyan-300 bg-cyan-300 text-slate-950"
+                    : "border-white/10 text-zinc-300 hover:border-cyan-300/50"
+                }`}
+              >
+                <span className="block font-mono text-xs font-semibold uppercase">
+                  {type === "CIRCULARIZATION" ? "Circularization" : "Hohmann Transfer"}
+                </span>
+                <span className={`mt-1 block text-xs ${draft.type === type ? "text-slate-800" : "text-zinc-500"}`}>
+                  {type === "CIRCULARIZATION" ? "Generate one impulsive burn at the circularization point." : "Generate burn, transfer coast, and burn primitives."}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          <div className="mt-5 grid gap-4">
+            <TimelineField label={draft.type === "CIRCULARIZATION" ? "Target altitude km" : "Target orbit altitude km"}>
+              <input
+                value={draft.targetAltitudeKm}
+                onChange={(event) => onDraftChange({ ...draft, targetAltitudeKm: event.target.value })}
+                inputMode="decimal"
+                className="timeline-input"
+              />
+            </TimelineField>
+
+            <div className="border border-cyan-300/15 bg-black/25 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Generated Primitive Events</p>
+                  <p className="mt-1 text-xs text-zinc-500">Preview returns editable Coast and Impulsive Burn timeline events.</p>
+                </div>
+                {preview && (
+                  <span className="border border-cyan-300/35 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
+                    {preview.events.length} Events
+                  </span>
+                )}
+              </div>
+
+              {!preview ? (
+                <div className="mt-3 border border-white/10 bg-black/25 px-3 py-4 text-center font-mono text-[10px] uppercase text-zinc-600">
+                  No preview generated
+                </div>
+              ) : (
+                <>
+                  <div className="mt-3 grid gap-2 md:grid-cols-3">
+                    <TemplateMetric label="Template Instance" value={preview.templateInstanceId} />
+                    <TemplateMetric label="Total dV" value={`${formatNumber(totalDeltaV, 3)} m/s`} />
+                    <TemplateMetric label="Transfer Time" value={transferTimeSeconds > 0 ? secondsToDurationLabel(transferTimeSeconds) : "Not applicable"} />
+                  </div>
+                  <div className="mt-3 space-y-2">
+                    {preview.events.map((event, index) => (
+                      <ManeuverTemplatePreviewRow key={`${event.name}-${index}`} event={event} index={index} />
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {preview && preview.warnings.length > 0 && (
+                <div className="mt-3 border border-amber-300/25 bg-amber-300/[0.05] px-3 py-2">
+                  <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-amber-200">Template Warnings</p>
+                  <div className="mt-2 space-y-1">
+                    {preview.warnings.map((warning) => (
+                      <p key={warning} className="text-xs leading-5 text-amber-100">{warning}</p>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-cyan-300/20 px-5 py-4">
+          <button type="button" onClick={onClose} className="border border-white/10 px-4 py-2 font-mono text-xs uppercase text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100">
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onPreview}
+            disabled={!canPreview}
+            className="border border-cyan-300/55 px-4 py-2 font-mono text-xs font-semibold uppercase text-cyan-100 transition hover:bg-cyan-300/10 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-zinc-500"
+          >
+            {loading ? "Working" : "Preview Events"}
+          </button>
+          <button
+            type="button"
+            onClick={onApply}
+            disabled={!canApply}
+            title={applyBlocked ? "Extend the mission window before applying this preview." : "Apply generated primitive events to the timeline."}
+            className="border border-cyan-300 bg-cyan-300 px-4 py-2 font-mono text-xs font-semibold uppercase text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/10 disabled:text-zinc-500"
+          >
+            Apply To Timeline
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function TemplateMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-cyan-300/55">{label}</p>
+      <p className="mt-1 break-words font-mono text-xs font-semibold leading-5 text-zinc-100">{value}</p>
+    </div>
+  );
+}
+
+function ManeuverTemplatePreviewRow({ event, index }: { event: CreateTimelineEventRequest; index: number }) {
+  const parameters = event.parameters ?? {};
+  const role = readStringParameter(parameters, "templateRole", "GENERATED");
+  const deltaV = event.type === "IMPULSIVE_BURN"
+    ? Math.sqrt(
+        readNumberParameter(parameters, "deltaVxMps", 0) ** 2
+        + readNumberParameter(parameters, "deltaVyMps", 0) ** 2
+        + readNumberParameter(parameters, "deltaVzMps", 0) ** 2,
+      )
+    : 0;
+  const scheduleValue = readStringParameter(parameters, "scheduleValue", compactIsoUtc(event.executionTime));
+  return (
+    <div className="grid gap-2 border border-white/10 bg-black/25 p-3 md:grid-cols-[36px_1fr_110px_120px_100px] md:items-center">
+      <span className="font-mono text-[10px] uppercase text-zinc-500">#{index + 1}</span>
+      <span>
+        <span className="block text-sm font-semibold text-white">{event.name}</span>
+        <span className="mt-1 block font-mono text-[10px] uppercase text-zinc-500">{role.replaceAll("_", " ")}</span>
+      </span>
+      <span className={`border px-2 py-1 text-center font-mono text-[10px] uppercase ${
+        event.type === "IMPULSIVE_BURN" ? "border-amber-300/55 text-amber-100" : "border-sky-300/35 text-sky-100"
+      }`}>
+        {event.type === "IMPULSIVE_BURN" ? "Impulse" : "Coast"}
+      </span>
+      <span className="font-mono text-[10px] text-cyan-100">{scheduleValue}</span>
+      <span className="font-mono text-[10px] text-zinc-300">{event.type === "IMPULSIVE_BURN" ? `${formatNumber(deltaV, 3)} m/s` : "Timeline"}</span>
+    </div>
   );
 }
 
