@@ -15,6 +15,8 @@ import type { ManeuverEvent, ManeuverSnapshot } from "@/domain/maneuver";
 import { getManeuverTone } from "@/domain/maneuver";
 import { AnalysisModalContent } from "@/components/mission-planning/AnalysisModal";
 import { MissionTimelinePanel } from "@/components/mission-planning/MissionTimeline";
+import { OrbitSummaryPanel, orbitSummaryFromSnapshot } from "@/components/mission-planning/OrbitSummaryPanel";
+import type { OrbitSummary } from "@/components/mission-planning/OrbitSummaryPanel";
 import { parseSatelliteSource } from "@/domain/satelliteConfig";
 import { MAX_TLE_OBJECTS } from "@/domain/tle";
 import { distanceBetweenOrbitStatesKm } from "@/geometry/distance";
@@ -149,16 +151,6 @@ type ManeuverTemplateDraft = {
   targetAltitudeKm: string;
   inclinationChangeDeg: string;
   executionStrategy: PlaneChangeExecutionStrategy;
-};
-type ManeuverTemplateOrbitSummary = {
-  orbitType: string;
-  currentAltitudeKm: number | null;
-  localVelocityKmps: number | null;
-  perigeeAltitudeKm: number | null;
-  apogeeAltitudeKm: number | null;
-  semiMajorAxisKm: number | null;
-  inclinationDeg: number | null;
-  eccentricity: number | null;
 };
 type TimelineEditorDraft = {
   type: TimelineEventDraftType;
@@ -1715,74 +1707,7 @@ function userErrorMessage(error: unknown, fallback: string) {
   return message;
 }
 
-function vectorNorm(values: [number, number, number]) {
-  return Math.hypot(values[0], values[1], values[2]);
-}
-
-function vectorCross(left: [number, number, number], right: [number, number, number]): [number, number, number] {
-  return [
-    left[1] * right[2] - left[2] * right[1],
-    left[2] * right[0] - left[0] * right[2],
-    left[0] * right[1] - left[1] * right[0],
-  ];
-}
-
-function maneuverOrbitSummaryFromSnapshot(snapshot: SatelliteSnapshot | null | undefined): ManeuverTemplateOrbitSummary {
-  const satellite = snapshot?.satellite;
-  const state = snapshot?.state;
-  const base: ManeuverTemplateOrbitSummary = {
-    orbitType: satellite?.sourceType === "TLE"
-      ? "TLE"
-      : satellite?.sourceType === "MANUAL_STATE"
-        ? "Manual orbit"
-        : satellite?.sourceType ?? "Unknown",
-    currentAltitudeKm: typeof state?.altitudeKm === "number" && Number.isFinite(state.altitudeKm) ? state.altitudeKm : null,
-    localVelocityKmps: typeof state?.velocityKmps === "number" && Number.isFinite(state.velocityKmps) ? state.velocityKmps : null,
-    perigeeAltitudeKm: null,
-    apogeeAltitudeKm: null,
-    semiMajorAxisKm: null,
-    inclinationDeg: null,
-    eccentricity: null,
-  };
-  if (!state?.positionEciKm || !state.velocityEciKmps) {
-    return base;
-  }
-
-  const r = state.positionEciKm;
-  const v = state.velocityEciKmps;
-  const radiusKm = vectorNorm(r);
-  const speedKmps = vectorNorm(v);
-  const h = vectorCross(r, v);
-  const hNorm = vectorNorm(h);
-  if (!Number.isFinite(radiusKm) || radiusKm <= 0 || !Number.isFinite(speedKmps) || hNorm <= 0) {
-    return base;
-  }
-
-  const semiMajorAxisKm = 1.0 / ((2.0 / radiusKm) - ((speedKmps * speedKmps) / earthMuKm3S2));
-  const vxh = vectorCross(v, h);
-  const eccentricityVector: [number, number, number] = [
-    (vxh[0] / earthMuKm3S2) - (r[0] / radiusKm),
-    (vxh[1] / earthMuKm3S2) - (r[1] / radiusKm),
-    (vxh[2] / earthMuKm3S2) - (r[2] / radiusKm),
-  ];
-  const eccentricity = vectorNorm(eccentricityVector);
-  const inclinationDeg = Math.acos(Math.max(-1, Math.min(1, h[2] / hNorm))) * 180 / Math.PI;
-  const perigeeRadiusKm = semiMajorAxisKm * (1 - eccentricity);
-  const apogeeRadiusKm = semiMajorAxisKm * (1 + eccentricity);
-
-  return {
-    ...base,
-    currentAltitudeKm: radiusKm - earthRadiusKm,
-    localVelocityKmps: speedKmps,
-    perigeeAltitudeKm: Number.isFinite(perigeeRadiusKm) ? perigeeRadiusKm - earthRadiusKm : null,
-    apogeeAltitudeKm: Number.isFinite(apogeeRadiusKm) ? apogeeRadiusKm - earthRadiusKm : null,
-    semiMajorAxisKm: Number.isFinite(semiMajorAxisKm) ? semiMajorAxisKm : null,
-    inclinationDeg: Number.isFinite(inclinationDeg) ? inclinationDeg : null,
-    eccentricity: Number.isFinite(eccentricity) ? eccentricity : null,
-  };
-}
-
-function maneuverTemplateDraftEstimateMps(draft: ManeuverTemplateDraft, orbitSummary: ManeuverTemplateOrbitSummary) {
+function maneuverTemplateDraftEstimateMps(draft: ManeuverTemplateDraft, orbitSummary: OrbitSummary) {
   if (draft.type === "PLANE_CHANGE") {
     const inclinationChange = Number(draft.inclinationChangeDeg);
     if (!Number.isFinite(inclinationChange) || !orbitSummary.localVelocityKmps) {
@@ -1809,6 +1734,55 @@ function maneuverTemplateDraftEstimateMps(draft: ManeuverTemplateDraft, orbitSum
     return null;
   }
   return Math.abs(Math.sqrt(earthMuKm3S2 / currentRadiusKm) - localVelocityKmps) * 1000;
+}
+
+function predictedTemplateOrbitSummary(preview: ManeuverTemplatePreview | null, current: OrbitSummary): OrbitSummary | null {
+  if (!preview) {
+    return null;
+  }
+  const metadata = preview.metadata ?? {};
+  if (preview.type === "HOHMANN_TRANSFER") {
+    const targetAltitudeKm = readNumberParameter(metadata, "targetAltitudeKm", Number.NaN);
+    if (!Number.isFinite(targetAltitudeKm)) {
+      return null;
+    }
+    const radiusKm = earthRadiusKm + targetAltitudeKm;
+    return {
+      ...current,
+      classification: targetAltitudeKm < 2000 ? "LEO / Circular" : targetAltitudeKm < 30000 ? "MEO / Circular" : Math.abs(targetAltitudeKm - 35786) < 1500 ? "GEO / Circular" : "HEO / Circular",
+      currentAltitudeKm: targetAltitudeKm,
+      perigeeAltitudeKm: targetAltitudeKm,
+      apogeeAltitudeKm: targetAltitudeKm,
+      semiMajorAxisKm: radiusKm,
+      eccentricity: 0,
+      periodSeconds: 2 * Math.PI * Math.sqrt((radiusKm ** 3) / earthMuKm3S2),
+    };
+  }
+  if (preview.type === "CIRCULARIZATION") {
+    const burnRadiusKm = readNumberParameter(metadata, "burnRadiusKm", Number.NaN);
+    if (!Number.isFinite(burnRadiusKm)) {
+      return null;
+    }
+    const altitudeKm = burnRadiusKm - earthRadiusKm;
+    return {
+      ...current,
+      classification: altitudeKm < 2000 ? "LEO / Circular" : altitudeKm < 30000 ? "MEO / Circular" : Math.abs(altitudeKm - 35786) < 1500 ? "GEO / Circular" : "HEO / Circular",
+      currentAltitudeKm: altitudeKm,
+      perigeeAltitudeKm: altitudeKm,
+      apogeeAltitudeKm: altitudeKm,
+      semiMajorAxisKm: burnRadiusKm,
+      eccentricity: 0,
+      periodSeconds: 2 * Math.PI * Math.sqrt((burnRadiusKm ** 3) / earthMuKm3S2),
+    };
+  }
+  if (preview.type === "PLANE_CHANGE") {
+    const inclinationChangeDeg = readNumberParameter(metadata, "inclinationChangeDeg", 0);
+    return {
+      ...current,
+      inclinationDeg: current.inclinationDeg == null ? null : current.inclinationDeg + inclinationChangeDeg,
+    };
+  }
+  return null;
 }
 
 function getConjunctionStatusFromRisk(event: ConjunctionEvent, missDistanceKm: number) {
@@ -2102,7 +2076,7 @@ export function OrbitalDashboard() {
     ? snapshots.find((item) => item.satellite.id === importedMissionSpacecraftId) ?? selectedSnapshot
     : selectedSnapshot;
   const maneuverTemplateOrbitSummary = useMemo(
-    () => maneuverOrbitSummaryFromSnapshot(missionSubjectSnapshot),
+    () => orbitSummaryFromSnapshot(missionSubjectSnapshot),
     [missionSubjectSnapshot],
   );
   const selectedNoradId = activeDataSource === "manual" ? null : selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? null;
@@ -4473,13 +4447,14 @@ export function OrbitalDashboard() {
             isTrajectoryLoading={isMissionTrajectoryLoading}
             trajectoryOverlay={missionTrajectoryOverlay}
             trajectoryStale={missionTrajectoryIsStale}
-            propagationProfile={profileWithPendingUpdate(missionPropagationProfile, pendingMissionPropagationProfileUpdate)}
-            capabilities={capabilities}
-            propagationProfileStatus={propagationProfileStatus}
-            trajectoryCadenceInput={missionTrajectoryCadenceInput}
-            trajectoryCadenceError={missionTrajectoryCadenceValidation}
-            dragEventId={timelineDragEventId}
-            simulationTimeIso={simTime.toISOString()}
+          propagationProfile={profileWithPendingUpdate(missionPropagationProfile, pendingMissionPropagationProfileUpdate)}
+          capabilities={capabilities}
+          propagationProfileStatus={propagationProfileStatus}
+          trajectoryCadenceInput={missionTrajectoryCadenceInput}
+          trajectoryCadenceError={missionTrajectoryCadenceValidation}
+          orbitSummary={maneuverTemplateOrbitSummary}
+          dragEventId={timelineDragEventId}
+          simulationTimeIso={simTime.toISOString()}
             onInitializeMission={openMissionSetup}
             onOpenCatalog={() => openOrbitSource("catalog")}
             onOpenWorkspace={() => setActiveCommandModal("workspace")}
@@ -4565,6 +4540,7 @@ export function OrbitalDashboard() {
             effectiveShowRangeCheck={effectiveShowRangeCheck}
             rangeMeasurement={rangeMeasurement}
             missionEvents={missionTimelineEvents}
+            orbitSummary={maneuverTemplateOrbitSummary}
             conjunctionSnapshots={conjunctionSnapshots}
             selectedConjunctionId={selectedConjunction?.event.id ?? null}
             showConjunctions={effectiveShowConjunctions}
@@ -6333,7 +6309,7 @@ function ManeuverTemplateModal({
 }: {
   draft: ManeuverTemplateDraft;
   preview: ManeuverTemplatePreview | null;
-  orbitSummary: ManeuverTemplateOrbitSummary;
+  orbitSummary: OrbitSummary;
   loading: boolean;
   error: string | null;
   onDraftChange: (draft: ManeuverTemplateDraft) => void;
@@ -6368,7 +6344,9 @@ function ManeuverTemplateModal({
   const coastSeconds = readNumberParameter(preview?.metadata ?? {}, "coastSeconds", 0);
   const executionLocation = readStringParameter(preview?.metadata ?? {}, "executionLocation", "Not applicable");
   const executionStrategy = readStringParameter(preview?.metadata ?? {}, "executionStrategy", "Not applicable");
+  const estimatedPropellantKg = readNumberParameter(preview?.metadata ?? {}, "estimatedPropellantKg", 0);
   const draftEstimateMps = maneuverTemplateDraftEstimateMps(draft, orbitSummary);
+  const predictedOrbitSummary = predictedTemplateOrbitSummary(preview, orbitSummary);
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
@@ -6392,24 +6370,12 @@ function ManeuverTemplateModal({
         </div>
 
         <div className="thin-scrollbar min-h-0 overflow-y-auto p-5">
-          <div className="mb-5 border border-cyan-300/15 bg-black/25 p-3">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Current Orbit Summary</p>
-                <p className="mt-1 text-xs text-zinc-500">Template calculations use the current mission orbit state.</p>
-              </div>
-              <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
-                {orbitSummary.orbitType}
-              </span>
-            </div>
-            <div className="mt-3 grid gap-3 md:grid-cols-3">
-              <TemplateMetric label="Perigee Alt" value={formatTemplateNumber(orbitSummary.perigeeAltitudeKm, "km", 2)} />
-              <TemplateMetric label="Apogee Alt" value={formatTemplateNumber(orbitSummary.apogeeAltitudeKm, "km", 2)} />
-              <TemplateMetric label="Semi-Major Axis" value={formatTemplateNumber(orbitSummary.semiMajorAxisKm, "km", 2)} />
-              <TemplateMetric label="Inclination" value={formatTemplateNumber(orbitSummary.inclinationDeg, "deg", 3)} />
-              <TemplateMetric label="Eccentricity" value={formatTemplateNumber(orbitSummary.eccentricity, "", 6)} />
-              <TemplateMetric label="Current Alt" value={formatTemplateNumber(orbitSummary.currentAltitudeKm, "km", 2)} />
-            </div>
+          <div className="mb-5">
+            <OrbitSummaryPanel
+              summary={orbitSummary}
+              title="Current Orbit"
+              subtitle="Template calculations use the current mission orbit state."
+            />
           </div>
 
           <div className="grid grid-cols-3 gap-2 max-sm:grid-cols-1">
@@ -6454,6 +6420,7 @@ function ManeuverTemplateModal({
                     value={draft.executionStrategy}
                     onChange={(event) => onDraftChange({ ...draft, executionStrategy: event.target.value as PlaneChangeExecutionStrategy })}
                     className="timeline-input"
+                    title="Choose where the normal-axis burn is placed. Nodes change inclination without changing RAAN ambiguity; apoapsis usually lowers plane-change dV on elliptical orbits."
                   >
                     <option value="IMMEDIATE">Immediate</option>
                     <option value="ASCENDING_NODE">Ascending node</option>
@@ -6461,6 +6428,12 @@ function ManeuverTemplateModal({
                     <option value="APOAPSIS">Apoapsis</option>
                   </select>
                 </TimelineField>
+                <div className="col-span-2 grid gap-2 border border-white/10 bg-black/20 p-3 text-xs leading-5 text-zinc-400 max-sm:col-span-1">
+                  <p><span className="font-semibold text-cyan-100">Immediate:</span> execute at the current spacecraft position.</p>
+                  <p><span className="font-semibold text-cyan-100">Ascending node:</span> execute where the spacecraft crosses the equatorial plane northbound.</p>
+                  <p><span className="font-semibold text-cyan-100">Descending node:</span> execute where the spacecraft crosses the equatorial plane southbound.</p>
+                  <p><span className="font-semibold text-cyan-100">Apoapsis:</span> execute at the slowest point of an elliptical orbit to reduce plane-change cost.</p>
+                </div>
               </div>
             ) : (
               <TimelineField label={draft.type === "CIRCULARIZATION" ? "Target altitude km" : "Target orbit altitude km"}>
@@ -6532,9 +6505,20 @@ function ManeuverTemplateModal({
                   <div className="mt-3 grid gap-2 md:grid-cols-4">
                     <TemplateMetric label="Template Instance" value={preview.templateInstanceId} />
                     <TemplateMetric label="Total dV" value={`${formatNumber(totalDeltaV, 3)} m/s`} />
+                    <TemplateMetric label="Propellant" value={`${formatNumber(estimatedPropellantKg, 3)} kg`} />
+                    <TemplateMetric label="Burn Count" value={String(preview.events.filter((event) => event.type !== "COAST").length)} />
                     <TemplateMetric label={preview.type === "PLANE_CHANGE" ? "Coast Time" : "Transfer Time"} value={(preview.type === "PLANE_CHANGE" ? coastSeconds : transferTimeSeconds) > 0 ? secondsToDurationLabel(preview.type === "PLANE_CHANGE" ? coastSeconds : transferTimeSeconds) : "Not applicable"} />
                     <TemplateMetric label={preview.type === "PLANE_CHANGE" ? "Execution" : "Location"} value={preview.type === "PLANE_CHANGE" ? `${executionLocation} / ${executionStrategy.replaceAll("_", " ")}` : "Template-defined"} />
                   </div>
+                  {predictedOrbitSummary && (
+                    <div className="mt-3">
+                      <OrbitSummaryPanel
+                        summary={predictedOrbitSummary}
+                        title="Predicted Orbit"
+                        subtitle="First-order template target orbit before high-fidelity propagation."
+                      />
+                    </div>
+                  )}
                   <div className="mt-3 space-y-2">
                     {preview.events.map((event, index) => (
                       <ManeuverTemplatePreviewRow key={`${event.name}-${index}`} event={event} index={index} />
@@ -6594,14 +6578,6 @@ function TemplateMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function formatTemplateNumber(value: number | null, unit: string, fractionDigits: number) {
-  if (value == null || !Number.isFinite(value)) {
-    return "Unavailable";
-  }
-  const formatted = formatNumber(value, fractionDigits);
-  return unit ? `${formatted} ${unit}` : formatted;
-}
-
 function ManeuverTemplatePreviewRow({ event, index }: { event: CreateTimelineEventRequest; index: number }) {
   const parameters = event.parameters ?? {};
   const role = readStringParameter(parameters, "templateRole", "GENERATED");
@@ -6613,8 +6589,10 @@ function ManeuverTemplatePreviewRow({ event, index }: { event: CreateTimelineEve
       )
     : 0;
   const scheduleValue = readStringParameter(parameters, "scheduleValue", compactIsoUtc(event.executionTime));
+  const propellantKg = readNumberParameter(parameters, "estimatedPropellantKg", 0);
+  const generatedAt = readStringParameter(parameters, "generatedAt", "");
   return (
-    <div className="grid gap-2 border border-white/10 bg-black/25 p-3 md:grid-cols-[36px_1fr_110px_120px_100px] md:items-center">
+    <div className="grid gap-2 border border-white/10 bg-black/25 p-3 md:grid-cols-[36px_1fr_90px_110px_95px_95px_120px] md:items-center">
       <span className="font-mono text-[10px] uppercase text-zinc-500">#{index + 1}</span>
       <span>
         <span className="block text-sm font-semibold text-white">{event.name}</span>
@@ -6627,6 +6605,8 @@ function ManeuverTemplatePreviewRow({ event, index }: { event: CreateTimelineEve
       </span>
       <span className="font-mono text-[10px] text-cyan-100">{scheduleValue}</span>
       <span className="font-mono text-[10px] text-zinc-300">{event.type === "IMPULSIVE_BURN" ? `${formatNumber(deltaV, 3)} m/s` : "Timeline"}</span>
+      <span className="font-mono text-[10px] text-zinc-500">{event.type === "IMPULSIVE_BURN" ? `${formatNumber(propellantKg, 3)} kg` : "--"}</span>
+      <span className="font-mono text-[10px] text-zinc-600">{generatedAt ? compactIsoUtc(generatedAt) : "--"}</span>
     </div>
   );
 }

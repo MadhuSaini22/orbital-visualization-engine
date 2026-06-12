@@ -38,6 +38,9 @@ public class ManeuverTemplateService {
   private static final double SMALL_ECCENTRICITY = 1.0e-6;
   private static final double NEAR_CIRCULAR_ECCENTRICITY = 1.0e-3;
   private static final double INTERSECTION_TOLERANCE_KM = 1.0;
+  private static final double DEFAULT_TEMPLATE_WET_MASS_KG = 1000.0;
+  private static final double DEFAULT_TEMPLATE_ISP_SECONDS = 220.0;
+  private static final double STANDARD_GRAVITY_MPS2 = 9.80665;
 
   private final MissionService missions;
   private final MissionTimelineService timeline;
@@ -108,6 +111,7 @@ public class ManeuverTemplateService {
     metadata.put("burnRadiusKm", burnRadiusMeters / 1000.0);
     metadata.put("burnMagnitudeMps", Math.abs(deltaVMps));
     metadata.put("totalDeltaVMps", Math.abs(deltaVMps));
+    metadata.put("estimatedPropellantKg", estimatedPropellantKg(Math.abs(deltaVMps)));
     metadata.put("coastSeconds", point.coastSeconds());
 
     List<CreateTimelineEventRequest> events = new ArrayList<>();
@@ -126,6 +130,7 @@ public class ManeuverTemplateService {
         burnTime);
     burnMetadata.put("targetAltitudeKm", request.targetAltitudeKm());
     burnMetadata.put("computedDeltaVMps", Math.abs(deltaVMps));
+    burnMetadata.put("estimatedPropellantKg", estimatedPropellantKg(Math.abs(deltaVMps)));
     if (Math.abs(deltaVMps) < 1.0e-9) {
       burnMetadata.put("noBurnRequired", true);
       warnings.add("Circularization delta-v is effectively zero; generated burn is disabled.");
@@ -148,6 +153,7 @@ public class ManeuverTemplateService {
       String templateInstanceId,
       int sequenceIndex) {
     double initialRadiusMeters = orbit.getPosition().getNorm();
+    KeplerianOrbit keplerian = new KeplerianOrbit(orbit);
     double targetRadiusMeters = radiusMeters(request.targetAltitudeKm());
     if (Math.abs(targetRadiusMeters - initialRadiusMeters) < 1000.0) {
       throw new IllegalArgumentException("Target orbit altitude must differ from the current altitude by at least 1 km for a Hohmann transfer.");
@@ -165,6 +171,9 @@ public class ManeuverTemplateService {
     Instant coastTime = burn1Time.plusSeconds(1);
     Instant burn2Time = burn1Time.plusSeconds(Math.max(1, Math.round(transferTimeSeconds)));
     List<String> warnings = new ArrayList<>();
+    if (keplerian.getE() > 0.01) {
+      warnings.add("Hohmann transfer assumes a near-circular initial orbit; current eccentricity is non-trivial, so preview is first-order only.");
+    }
     warnIfOutsideMission(mission, burn2Time, "Hohmann transfer burn 2", warnings);
 
     Map<String, Object> metadata = templateMetadata(templateInstanceId, request.type(), "SUMMARY");
@@ -175,24 +184,30 @@ public class ManeuverTemplateService {
     metadata.put("burn1DeltaVMps", Math.abs(deltaV1Mps));
     metadata.put("burn2DeltaVMps", Math.abs(deltaV2Mps));
     metadata.put("totalDeltaVMps", Math.abs(deltaV1Mps) + Math.abs(deltaV2Mps));
+    metadata.put("estimatedPropellantKg", estimatedPropellantKg(Math.abs(deltaV1Mps) + Math.abs(deltaV2Mps)));
 
     Map<String, Object> burn1Metadata = withSchedule(
         templateMetadata(templateInstanceId, request.type(), "BURN_1"),
         mission,
         burn1Time);
     burn1Metadata.put("computedDeltaVMps", Math.abs(deltaV1Mps));
+    burn1Metadata.put("estimatedPropellantKg", estimatedPropellantKg(Math.abs(deltaV1Mps)));
+    burn1Metadata.put("targetAltitudeKm", request.targetAltitudeKm());
 
     Map<String, Object> coastMetadata = withSchedule(
         templateMetadata(templateInstanceId, request.type(), "TRANSFER_COAST"),
         mission,
         coastTime);
     coastMetadata.put("transferTimeSeconds", transferTimeSeconds);
+    coastMetadata.put("targetAltitudeKm", request.targetAltitudeKm());
 
     Map<String, Object> burn2Metadata = withSchedule(
         templateMetadata(templateInstanceId, request.type(), "BURN_2"),
         mission,
         burn2Time);
     burn2Metadata.put("computedDeltaVMps", Math.abs(deltaV2Mps));
+    burn2Metadata.put("estimatedPropellantKg", estimatedPropellantKg(Math.abs(deltaV2Mps)));
+    burn2Metadata.put("targetAltitudeKm", request.targetAltitudeKm());
 
     List<CreateTimelineEventRequest> events = List.of(
         new CreateTimelineEventRequest(
@@ -248,6 +263,7 @@ public class ManeuverTemplateService {
     metadata.put("computedDeltaV", deltaVMps);
     metadata.put("computedDeltaVMps", deltaVMps);
     metadata.put("totalDeltaVMps", deltaVMps);
+    metadata.put("estimatedPropellantKg", estimatedPropellantKg(deltaVMps));
     metadata.put("inclinationChange", inclinationChangeDeg);
     metadata.put("inclinationChangeDeg", inclinationChangeDeg);
     metadata.put("executionStrategy", strategy.name());
@@ -280,6 +296,7 @@ public class ManeuverTemplateService {
         burnTime);
     burnMetadata.put("computedDeltaV", deltaVMps);
     burnMetadata.put("computedDeltaVMps", deltaVMps);
+    burnMetadata.put("estimatedPropellantKg", estimatedPropellantKg(deltaVMps));
     burnMetadata.put("inclinationChange", inclinationChangeDeg);
     burnMetadata.put("inclinationChangeDeg", inclinationChangeDeg);
     burnMetadata.put("executionStrategy", strategy.name());
@@ -391,6 +408,7 @@ public class ManeuverTemplateService {
     metadata.put("templateType", templateType.name());
     metadata.put("templateRole", templateRole);
     metadata.put("generated", true);
+    metadata.put("generatedAt", Instant.now().toString());
     return metadata;
   }
 
@@ -407,7 +425,7 @@ public class ManeuverTemplateService {
   }
 
   private Map<String, Object> impulsiveParameters(Map<String, Object> metadata, double deltaVxMps, double deltaVyMps, double deltaVzMps) {
-    metadata.put("ispSeconds", 220.0);
+    metadata.put("ispSeconds", DEFAULT_TEMPLATE_ISP_SECONDS);
     metadata.put("directionFrame", "TNW");
     metadata.put("deltaVxMps", deltaVxMps);
     metadata.put("deltaVyMps", deltaVyMps);
@@ -417,6 +435,14 @@ public class ManeuverTemplateService {
 
   private double signedTangentialDeltaV(double deltaVMps) {
     return Math.abs(deltaVMps) < 1.0e-9 ? 0.0 : deltaVMps;
+  }
+
+  private double estimatedPropellantKg(double deltaVMps) {
+    if (!Double.isFinite(deltaVMps) || deltaVMps <= 0.0) {
+      return 0.0;
+    }
+    double exhaustVelocity = DEFAULT_TEMPLATE_ISP_SECONDS * STANDARD_GRAVITY_MPS2;
+    return DEFAULT_TEMPLATE_WET_MASS_KG * (1.0 - Math.exp(-deltaVMps / exhaustVelocity));
   }
 
   private double radiusMeters(Double altitudeKm) {

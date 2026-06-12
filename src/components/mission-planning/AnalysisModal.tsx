@@ -6,6 +6,8 @@ import { formatNumber, formatUtc } from "@/geometry/format";
 import type { AnalysisPresetId, BackendAnalysisConfigResponse, BackendCapabilityRegistry, BackendMissionTimelineEvent, BackendPropagationProfile, UpdatePropagationProfileRequest } from "@/services/orbitServerApi";
 import type { MissionTrajectoryOverlay } from "./types";
 import { PropagationProfileEditor } from "./PropagationProfileEditor";
+import { OrbitSummaryPanel } from "./OrbitSummaryPanel";
+import type { OrbitSummary } from "./OrbitSummaryPanel";
 import { DetailMetric, HudPanel } from "./ui";
 import { compactIsoUtc, estimatedEventDeltaVMps, readNumberParameter, readStringParameter, secondsToDurationLabel } from "./utils";
 
@@ -51,6 +53,7 @@ export function AnalysisModalContent({
   effectiveShowRangeCheck,
   rangeMeasurement,
   missionEvents,
+  orbitSummary,
   conjunctionSnapshots,
   selectedConjunctionId,
   showConjunctions,
@@ -81,6 +84,7 @@ export function AnalysisModalContent({
   effectiveShowRangeCheck: boolean;
   rangeMeasurement: { primary: SatelliteSnapshot; secondary: SatelliteSnapshot; distanceKm: number } | null;
   missionEvents: BackendMissionTimelineEvent[];
+  orbitSummary: OrbitSummary;
   conjunctionSnapshots: ConjunctionSnapshot[];
   selectedConjunctionId: string | null;
   showConjunctions: boolean;
@@ -197,6 +201,16 @@ export function AnalysisModalContent({
               )}
               {analysisMessage && <p className="mt-3 text-xs leading-5 text-cyan-100">{analysisMessage}</p>}
             </HudPanel>
+          </div>
+        )}
+
+        {tab === "maneuver" && (
+          <div className="mb-4">
+            <OrbitSummaryPanel
+              summary={orbitSummary}
+              title="Maneuver Orbit Context"
+              subtitle="Current orbit state used to interpret maneuver timing and energy."
+            />
           </div>
         )}
 

@@ -270,6 +270,91 @@ export function timelineAnalysis(mission: BackendMission | null, events: Backend
   };
 }
 
+export type MissionValidationResult = {
+  errors: string[];
+  warnings: string[];
+};
+
+export function validateMissionPlan(
+  mission: BackendMission | null,
+  events: BackendMissionTimelineEvent[],
+  profile: BackendPropagationProfile | null,
+): MissionValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  if (!mission) {
+    return { errors, warnings };
+  }
+  if (events.length === 0) {
+    warnings.push("Timeline is empty; trajectory will propagate the initial orbit without mission events.");
+  }
+
+  const resolved = resolveEventMetOffsets(mission, events);
+  const missionDuration = missionDurationSeconds(mission);
+  const ordered = events.toSorted((a, b) => (resolved.offsets.get(a.id) ?? Number.POSITIVE_INFINITY) - (resolved.offsets.get(b.id) ?? Number.POSITIVE_INFINITY));
+  ordered.forEach((event, index) => {
+    const offsetSeconds = resolved.offsets.get(event.id);
+    if (offsetSeconds == null) {
+      errors.push(`${event.name} has unresolved schedule metadata.`);
+      return;
+    }
+    if (offsetSeconds < 0 || offsetSeconds > missionDuration) {
+      errors.push(`${event.name} executes outside the mission window at ${metOffsetLabelFromSeconds(offsetSeconds)}.`);
+    }
+    if (event.type === "FINITE_BURN") {
+      const durationSeconds = readNumberParameter(event.parameters ?? {}, "durationSeconds", 0);
+      if (durationSeconds <= 0) {
+        errors.push(`${event.name} has non-positive finite-burn duration.`);
+      }
+      const nextBurn = ordered.slice(index + 1).find((candidate) => candidate.type === "FINITE_BURN" || candidate.type === "IMPULSIVE_BURN");
+      const nextOffset = nextBurn ? resolved.offsets.get(nextBurn.id) : null;
+      if (nextOffset != null && offsetSeconds + durationSeconds > nextOffset) {
+        errors.push(`${event.name} overlaps ${nextBurn?.name}; burn windows must not overlap.`);
+      }
+    }
+    if (event.type === "COAST") {
+      const nextOffset = ordered[index + 1] ? resolved.offsets.get(ordered[index + 1].id) : missionDuration;
+      if (nextOffset != null && nextOffset < offsetSeconds) {
+        errors.push(`${event.name} has negative coast duration because the next event occurs earlier.`);
+      }
+    }
+    const templateType = readStringParameter(event.parameters ?? {}, "templateType", "");
+    if (templateType === "PLANE_CHANGE") {
+      const inclinationChange = Math.abs(readNumberParameter(event.parameters ?? {}, "inclinationChangeDeg", 0));
+      if (inclinationChange > 30) {
+        warnings.push(`${event.name} requests a ${inclinationChange.toFixed(1)} deg plane change; verify combined or split maneuvers because pure plane changes are expensive.`);
+      }
+    }
+    if (templateType === "CIRCULARIZATION" && estimatedEventDeltaVMps(event) < 0.1) {
+      warnings.push(`${event.name} has near-zero circularization dV; current orbit may already be circular.`);
+    }
+    if (templateType === "HOHMANN_TRANSFER" && estimatedEventDeltaVMps(event) < 0.1) {
+      warnings.push(`${event.name} has near-zero Hohmann dV; verify target altitude differs from the current orbit.`);
+    }
+  });
+
+  const totalPropellantKg = events.reduce((sum, event) => {
+    const metadataPropellant = readNumberParameter(event.parameters ?? {}, "estimatedPropellantKg", Number.NaN);
+    if (Number.isFinite(metadataPropellant)) {
+      return sum + metadataPropellant;
+    }
+    if (!profile || event.type === "COAST") {
+      return sum;
+    }
+    return sum + estimatePropellantKg(estimatedEventDeltaVMps(event), profile.dryMassKg + profile.fuelMassKg, profile.nominalIspS);
+  }, 0);
+  if (profile && totalPropellantKg > profile.fuelMassKg) {
+    errors.push(`Estimated propellant ${totalPropellantKg.toFixed(2)} kg exceeds available fuel ${profile.fuelMassKg.toFixed(2)} kg.`);
+  } else if (profile && totalPropellantKg > profile.fuelMassKg * 0.8) {
+    warnings.push(`Estimated propellant ${totalPropellantKg.toFixed(2)} kg uses more than 80% of available fuel.`);
+  }
+
+  return {
+    errors: [...new Set(errors)],
+    warnings: [...new Set([...resolved.warnings, ...warnings])],
+  };
+}
+
 export function estimatedEventDeltaVMps(event: BackendMissionTimelineEvent) {
   const parameters = event.parameters ?? {};
   if (event.type === "IMPULSIVE_BURN") {
@@ -284,6 +369,14 @@ export function estimatedEventDeltaVMps(event: BackendMissionTimelineEvent) {
     return thrust > 0 && duration > 0 ? thrust * duration / 1000 : 0;
   }
   return 0;
+}
+
+export function estimatePropellantKg(deltaVMps: number, wetMassKg: number, ispSeconds: number) {
+  if (!Number.isFinite(deltaVMps) || deltaVMps <= 0 || !Number.isFinite(wetMassKg) || wetMassKg <= 0 || !Number.isFinite(ispSeconds) || ispSeconds <= 0) {
+    return 0;
+  }
+  const exhaustVelocity = ispSeconds * 9.80665;
+  return wetMassKg * (1 - Math.exp(-deltaVMps / exhaustVelocity));
 }
 
 export function forceModelSummary(profile: BackendPropagationProfile | null) {

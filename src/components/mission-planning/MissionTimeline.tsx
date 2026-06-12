@@ -3,9 +3,11 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 import type { BackendCapabilityRegistry, BackendMission, BackendMissionTimelineEvent, BackendPropagationProfile, UpdatePropagationProfileRequest } from "@/services/orbitServerApi";
 import { formatNumber, formatUtc } from "@/geometry/format";
 import { PropagationProfileEditor } from "./PropagationProfileEditor";
+import { OrbitSummaryPanel } from "./OrbitSummaryPanel";
+import type { OrbitSummary } from "./OrbitSummaryPanel";
 import { DetailMetric, HudPanel } from "./ui";
 import type { MissionTrajectoryOverlay, TimelineLayoutModel, TimelineSnapMode, TimelineTimeMode, TimelineZoomPreset, TimelineInteractionModel } from "./types";
-import { buildTimelineLayoutModel, compactIsoUtc, defaultMissionTrajectoryWindowMinutes, displayTimelineTime, estimatedEventDeltaVMps, eventScheduleMode, forceModelSummary, integratorSummary, metOffsetLabelFromSeconds, missionDurationSeconds, missionTrajectoryMaxStepSeconds, missionTrajectoryMinStepSeconds, readNumberParameter, readStringParameter, secondsToDurationLabel, timelineAnalysis, timelineSnapOptions, timelineZoomOptions } from "./utils";
+import { buildTimelineLayoutModel, compactIsoUtc, defaultMissionTrajectoryWindowMinutes, displayTimelineTime, estimatedEventDeltaVMps, eventScheduleMode, forceModelSummary, integratorSummary, metOffsetLabelFromSeconds, missionDurationSeconds, missionTrajectoryMaxStepSeconds, missionTrajectoryMinStepSeconds, readNumberParameter, readStringParameter, secondsToDurationLabel, timelineAnalysis, timelineSnapOptions, timelineZoomOptions, validateMissionPlan } from "./utils";
 
 export function MissionTimelinePanel({
   mission,
@@ -23,6 +25,7 @@ export function MissionTimelinePanel({
   propagationProfileStatus,
   trajectoryCadenceInput,
   trajectoryCadenceError,
+  orbitSummary,
   dragEventId,
   simulationTimeIso,
   onInitializeMission,
@@ -57,6 +60,7 @@ export function MissionTimelinePanel({
   propagationProfileStatus: string | null;
   trajectoryCadenceInput: string;
   trajectoryCadenceError: string | null;
+  orbitSummary: OrbitSummary;
   dragEventId: string | null;
   simulationTimeIso: string;
   onInitializeMission: () => void;
@@ -86,6 +90,8 @@ export function MissionTimelinePanel({
     customVisibleSeconds: Math.max(60, Number(customZoomHours) * 3600 || 3 * 3600),
   }), [customZoomHours, snapMode, zoomPreset]);
   const analysis = useMemo(() => timelineAnalysis(mission, events), [events, mission]);
+  const templateGroups = useMemo(() => templateEventGroups(events), [events]);
+  const missionValidation = useMemo(() => validateMissionPlan(mission, events, propagationProfile), [events, mission, propagationProfile]);
   const hasEnabledManeuverEvents = events.some((event) => event.enabled && (event.type === "FINITE_BURN" || event.type === "IMPULSIVE_BURN"));
   const trajectoryCurrentBlocker = trajectoryOverlay && !trajectoryStale
     ? "Trajectory is current. Change mission configuration, timeline, or cadence to update."
@@ -94,7 +100,7 @@ export function MissionTimelinePanel({
     ? "Mission propagation profile is still loading. Configure propagation before generating trajectory."
     : propagationProfile.propagatorType !== "NUMERICAL" && hasEnabledManeuverEvents
       ? `${propagationProfile.propagatorType.replaceAll("_", " ")} propagation cannot execute maneuver mission events. Select Numerical or disable burn events.`
-      : trajectoryCadenceError ?? trajectoryCurrentBlocker;
+      : missionValidation.errors[0] ?? trajectoryCadenceError ?? trajectoryCurrentBlocker;
   const layoutModel = useMemo(() => mission
     ? buildTimelineLayoutModel(mission, events, interactionModel, selectedEventId, simulationTimeIso)
     : null, [events, interactionModel, mission, selectedEventId, simulationTimeIso]);
@@ -231,6 +237,35 @@ export function MissionTimelinePanel({
       )}
 
       {mission && (
+        <div className="mt-3">
+          <OrbitSummaryPanel
+            summary={orbitSummary}
+            title="Current Orbit"
+            subtitle="Mission planner context for transfer, circularization, and plane-change decisions."
+          />
+        </div>
+      )}
+
+      {mission && templateGroups.length > 0 && (
+        <div className="mt-3 border border-cyan-300/15 bg-black/25 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Generated Maneuver Sequences</p>
+              <p className="mt-1 text-[11px] leading-5 text-zinc-500">Events sharing a template instance are grouped for traceability; generated events remain editable below.</p>
+            </div>
+            <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
+              {templateGroups.length} Sequences
+            </span>
+          </div>
+          <div className="mt-3 grid gap-2">
+            {templateGroups.map((group) => (
+              <TemplateGroupSummary key={group.templateInstanceId} group={group} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {mission && (
         <div className="mt-3 border border-cyan-300/15 bg-black/25 p-3">
           {propagationProfile ? (
             <PropagationProfileEditor
@@ -299,6 +334,21 @@ export function MissionTimelinePanel({
           {trajectoryStale && (
             <div className="mt-3 border border-amber-300/30 bg-amber-300/[0.06] px-3 py-2 text-xs text-amber-100">
               Mission configuration changed. Regenerate trajectory.
+            </div>
+          )}
+          {(missionValidation.errors.length > 0 || missionValidation.warnings.length > 0) && (
+            <div className={`mt-3 border px-3 py-2 ${missionValidation.errors.length > 0 ? "border-rose-300/30 bg-rose-300/[0.06]" : "border-amber-300/30 bg-amber-300/[0.06]"}`}>
+              <p className={`font-mono text-[10px] uppercase tracking-[0.14em] ${missionValidation.errors.length > 0 ? "text-rose-100" : "text-amber-100"}`}>
+                Mission Validation
+              </p>
+              <div className="mt-2 space-y-1">
+                {missionValidation.errors.map((message) => (
+                  <p key={message} className="text-xs leading-5 text-rose-100">{message}</p>
+                ))}
+                {missionValidation.warnings.map((message) => (
+                  <p key={message} className="text-xs leading-5 text-amber-100">{message}</p>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -514,6 +564,8 @@ function VisualMissionTimeline({
           {layout.blocks.map(({ event, offsetSeconds, durationSeconds, widthPercent }) => {
           const isFiniteBurn = event.type === "FINITE_BURN";
           const isImpulsiveBurn = event.type === "IMPULSIVE_BURN";
+          const templateType = readStringParameter(event.parameters ?? {}, "templateType", "");
+          const templateRole = readStringParameter(event.parameters ?? {}, "templateRole", "");
           const scheduleMode = eventScheduleMode(event);
           const dependencyId = readStringParameter(event.parameters ?? {}, "scheduleDependencyId", "");
           const dependencyName = dependencyId ? eventNameById.get(dependencyId) ?? dependencyId : "";
@@ -567,6 +619,11 @@ function VisualMissionTimeline({
                   {isFiniteBurn ? "Finite" : isImpulsiveBurn ? "Impulse" : "Coast"}
                 </span>
               </span>
+              {templateType && (
+                <span className="mt-1 block truncate font-mono text-[9px] uppercase text-cyan-100">
+                  {templateType.replaceAll("_", " ")} / {templateRole.replaceAll("_", " ")}
+                </span>
+              )}
               <span className="mt-2 block font-mono text-[10px] text-cyan-100">
                 {displayTimelineTime(timeMode, mission, displayExecutionTime)}
               </span>
@@ -636,6 +693,75 @@ function TimelineMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
+type TemplateEventGroup = {
+  templateInstanceId: string;
+  templateType: string;
+  generatedAt: string;
+  events: BackendMissionTimelineEvent[];
+  totalDeltaVMps: number;
+  coastSeconds: number;
+};
+
+function templateEventGroups(events: BackendMissionTimelineEvent[]) {
+  const groups = new Map<string, TemplateEventGroup>();
+  events.forEach((event) => {
+    const parameters = event.parameters ?? {};
+    const generated = parameters.generated === true;
+    const templateInstanceId = readStringParameter(parameters, "templateInstanceId", "");
+    if (!generated || !templateInstanceId) {
+      return;
+    }
+    const current = groups.get(templateInstanceId) ?? {
+      templateInstanceId,
+      templateType: readStringParameter(parameters, "templateType", "Generated"),
+      generatedAt: readStringParameter(parameters, "generatedAt", event.createdAt),
+      events: [],
+      totalDeltaVMps: 0,
+      coastSeconds: 0,
+    };
+    current.events.push(event);
+    current.totalDeltaVMps += estimatedEventDeltaVMps(event);
+    if (event.type === "COAST") {
+      current.coastSeconds += readNumberParameter(parameters, "transferTimeSeconds", readNumberParameter(parameters, "coastSeconds", 0));
+    }
+    groups.set(templateInstanceId, current);
+  });
+  return [...groups.values()].map((group) => ({
+    ...group,
+    events: group.events.toSorted((a, b) => a.sequenceIndex - b.sequenceIndex),
+  })).toSorted((a, b) => (a.events[0]?.sequenceIndex ?? 0) - (b.events[0]?.sequenceIndex ?? 0));
+}
+
+function TemplateGroupSummary({ group }: { group: TemplateEventGroup }) {
+  return (
+    <div className="border border-cyan-300/15 bg-black/25 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-white">{group.templateType.replaceAll("_", " ")}</p>
+          <p className="mt-1 font-mono text-[10px] text-zinc-500">{group.templateInstanceId}</p>
+        </div>
+        <span className="border border-cyan-300/30 px-2 py-0.5 font-mono text-[10px] uppercase text-cyan-100">
+          Generated
+        </span>
+      </div>
+      <div className="mt-3 grid gap-2 md:grid-cols-4">
+        <DetailMetric label="Events" value={String(group.events.length)} />
+        <DetailMetric label="Burns" value={String(group.events.filter((event) => event.type !== "COAST").length)} />
+        <DetailMetric label="Delta-V" value={`${formatNumber(group.totalDeltaVMps, 2)} m/s`} />
+        <DetailMetric label="Coast" value={group.coastSeconds > 0 ? secondsToDurationLabel(group.coastSeconds) : "None"} />
+      </div>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {group.events.map((event) => (
+          <span key={event.id} className="border border-white/10 px-2 py-1 font-mono text-[10px] uppercase text-zinc-300">
+            {readStringParameter(event.parameters ?? {}, "templateRole", event.type)}
+          </span>
+        ))}
+      </div>
+      <p className="mt-2 font-mono text-[10px] text-zinc-600">Generated {compactIsoUtc(group.generatedAt)}</p>
+    </div>
+  );
+}
+
 function TimelineEventCard({
   event,
   index,
@@ -664,6 +790,12 @@ function TimelineEventCard({
   const parameters = event.parameters ?? {};
   const isFiniteBurn = event.type === "FINITE_BURN";
   const isImpulsiveBurn = event.type === "IMPULSIVE_BURN";
+  const templateType = readStringParameter(parameters, "templateType", "");
+  const templateRole = readStringParameter(parameters, "templateRole", "");
+  const templateInstanceId = readStringParameter(parameters, "templateInstanceId", "");
+  const generatedAt = readStringParameter(parameters, "generatedAt", event.createdAt);
+  const executionStrategy = readStringParameter(parameters, "executionStrategy", "");
+  const estimatedPropellantKg = readNumberParameter(parameters, "estimatedPropellantKg", 0);
   const summary = isFiniteBurn
     ? `${readNumberParameter(parameters, "durationSeconds", 0)}s, ${readNumberParameter(parameters, "thrustNewton", 0)} N, ${readStringParameter(parameters, "directionFrame", "TNW")}`
     : isImpulsiveBurn
@@ -694,6 +826,29 @@ function TimelineEventCard({
           </span>
         </span>
         <span className="mt-2 block truncate text-xs text-zinc-400">{summary}</span>
+        {templateType && (
+          <span className="mt-2 grid gap-2 border border-cyan-300/10 bg-cyan-300/[0.03] p-2">
+            <span className="flex flex-wrap items-center gap-1.5">
+              <span className="border border-cyan-300/30 px-2 py-0.5 font-mono text-[9px] uppercase text-cyan-100">
+                {templateType.replaceAll("_", " ")}
+              </span>
+              <span className="border border-white/10 px-2 py-0.5 font-mono text-[9px] uppercase text-zinc-300">
+                {templateRole.replaceAll("_", " ")}
+              </span>
+              {executionStrategy && (
+                <span className="border border-amber-300/25 px-2 py-0.5 font-mono text-[9px] uppercase text-amber-100">
+                  {executionStrategy.replaceAll("_", " ")}
+                </span>
+              )}
+            </span>
+            <span className="grid gap-1 font-mono text-[10px] text-zinc-500 md:grid-cols-2">
+              <span className="truncate">Instance {templateInstanceId}</span>
+              <span>Generated {compactIsoUtc(generatedAt)}</span>
+              <span>dV {formatNumber(estimatedEventDeltaVMps(event), 2)} m/s</span>
+              <span>Prop {estimatedPropellantKg > 0 ? `${formatNumber(estimatedPropellantKg, 3)} kg` : "n/a"}</span>
+            </span>
+          </span>
+        )}
       </button>
       <div className="mt-3 grid grid-cols-3 gap-1.5">
         <button
