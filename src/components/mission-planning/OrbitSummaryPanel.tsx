@@ -16,6 +16,8 @@ export type OrbitSummary = {
   semiMajorAxisKm: number | null;
   inclinationDeg: number | null;
   eccentricity: number | null;
+  raanDeg: number | null;
+  argumentOfPerigeeDeg: number | null;
   periodSeconds: number | null;
 };
 
@@ -71,6 +73,8 @@ export function orbitSummaryFromSnapshot(snapshot: SatelliteSnapshot | null | un
     semiMajorAxisKm: null,
     inclinationDeg: null,
     eccentricity: null,
+    raanDeg: null,
+    argumentOfPerigeeDeg: null,
     periodSeconds: null,
   };
   if (!state?.positionEciKm || !state.velocityEciKmps) {
@@ -96,6 +100,18 @@ export function orbitSummaryFromSnapshot(snapshot: SatelliteSnapshot | null | un
   ];
   const eccentricity = vectorNorm(eccentricityVector);
   const inclinationDeg = Math.acos(Math.max(-1, Math.min(1, h[2] / hNorm))) * 180 / Math.PI;
+  const nodeVector: [number, number, number] = [-h[1], h[0], 0];
+  const nodeNorm = vectorNorm(nodeVector);
+  const raanRad = nodeNorm > 1.0e-10 ? Math.atan2(nodeVector[1], nodeVector[0]) : Number.NaN;
+  const argumentOfPerigeeCosine = nodeNorm > 1.0e-10 && eccentricity > 1.0e-8
+    ? (nodeVector[0] * eccentricityVector[0] + nodeVector[1] * eccentricityVector[1] + nodeVector[2] * eccentricityVector[2]) / (nodeNorm * eccentricity)
+    : Number.NaN;
+  const argumentOfPerigeeBaseRad = Number.isFinite(argumentOfPerigeeCosine)
+    ? Math.acos(Math.max(-1, Math.min(1, argumentOfPerigeeCosine)))
+    : Number.NaN;
+  const argumentOfPerigeeRad = Number.isFinite(argumentOfPerigeeBaseRad) && eccentricityVector[2] < 0
+    ? (2 * Math.PI) - argumentOfPerigeeBaseRad
+    : argumentOfPerigeeBaseRad;
   const perigeeRadiusKm = semiMajorAxisKm * (1 - eccentricity);
   const apogeeRadiusKm = semiMajorAxisKm * (1 + eccentricity);
   const periodSeconds = semiMajorAxisKm > 0 ? 2 * Math.PI * Math.sqrt((semiMajorAxisKm ** 3) / earthMuKm3S2) : null;
@@ -111,6 +127,8 @@ export function orbitSummaryFromSnapshot(snapshot: SatelliteSnapshot | null | un
     semiMajorAxisKm: Number.isFinite(semiMajorAxisKm) ? semiMajorAxisKm : null,
     inclinationDeg: Number.isFinite(inclinationDeg) ? inclinationDeg : null,
     eccentricity: Number.isFinite(eccentricity) ? eccentricity : null,
+    raanDeg: Number.isFinite(raanRad) ? ((raanRad * 180 / Math.PI) + 360) % 360 : null,
+    argumentOfPerigeeDeg: Number.isFinite(argumentOfPerigeeRad) ? ((argumentOfPerigeeRad * 180 / Math.PI) + 360) % 360 : null,
     periodSeconds: periodSeconds != null && Number.isFinite(periodSeconds) ? periodSeconds : null,
     classification: classifyOrbit(perigeeAltitudeKm, apogeeAltitudeKm, eccentricity),
   };
@@ -155,6 +173,8 @@ export function OrbitSummaryPanel({
         <DetailMetric label="Semi-Major Axis" value={formatOrbitValue(summary.semiMajorAxisKm, "km", 2)} />
         <DetailMetric label="Eccentricity" value={formatOrbitValue(summary.eccentricity, "", 6)} />
         <DetailMetric label="Inclination" value={formatOrbitValue(summary.inclinationDeg, "deg", 3)} />
+        <DetailMetric label="RAAN" value={formatOrbitValue(summary.raanDeg, "deg", 3)} />
+        <DetailMetric label="Arg Perigee" value={formatOrbitValue(summary.argumentOfPerigeeDeg, "deg", 3)} />
         <DetailMetric label="Period" value={summary.periodSeconds == null ? "Unavailable" : secondsToDurationLabel(summary.periodSeconds)} />
         <DetailMetric label="Current Alt" value={formatOrbitValue(summary.currentAltitudeKm, "km", 2)} />
         <DetailMetric label="Velocity" value={formatOrbitValue(summary.localVelocityKmps, "km/s", 4)} />

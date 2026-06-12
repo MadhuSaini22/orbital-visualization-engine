@@ -332,6 +332,383 @@ export type ManeuverQualityAnalysis = {
   rationale: string;
 };
 
+export type MissionDesignTargets = {
+  targetAltitudeKm: number | null;
+  targetInclinationDeg: number | null;
+  targetEccentricity: number | null;
+  targetRaanDeg: number | null;
+  targetArgumentOfPerigeeDeg: number | null;
+};
+
+export type MissionConstraints = {
+  maxBurnDurationSeconds: number | null;
+  maxSingleBurnDeltaVMps: number | null;
+  fuelReservePercent: number | null;
+  minPerigeeAltitudeKm: number | null;
+  maxEclipseDurationSeconds: number | null;
+};
+
+export type MonteCarloSettings = {
+  samples: number;
+  burnMagnitudeErrorPercent: number;
+  burnDirectionErrorDeg: number;
+  timingErrorSeconds: number;
+};
+
+export type ManeuverTargetingSolution = {
+  id: string;
+  target: string;
+  current: string;
+  desired: string;
+  requiredDeltaVMps: number;
+  estimatedFuelKg: number;
+  method: string;
+  confidence: "High" | "Medium" | "Low";
+  rationale: string;
+};
+
+export type MissionObjectiveProgress = {
+  label: string;
+  current: string;
+  target: string;
+  progressPercent: number;
+  status: "Achieved" | "In Progress" | "Needs Plan" | "Unavailable";
+};
+
+export type MissionConstraintViolation = {
+  constraint: string;
+  severity: "Warning" | "Violation";
+  message: string;
+};
+
+export type MonteCarloDispersionResult = {
+  samples: number;
+  bestCaseDeltaVMps: number;
+  averageDeltaVMps: number;
+  worstCaseDeltaVMps: number;
+  orbitSpreadKm: number;
+  timingSpreadSeconds: number;
+  robustness: "Robust" | "Sensitive" | "Fragile";
+};
+
+export type OrbitLifetimeEstimate = {
+  classification: "Stable" | "Decaying" | "Reentry Risk" | "Unavailable";
+  estimatedLifetime: string;
+  dragSensitivity: string;
+  rationale: string;
+};
+
+export type TradeStudySolution = {
+  label: string;
+  rank: number;
+  deltaVMps: number;
+  fuelKg: number;
+  transferSeconds: number;
+  score: number;
+  rationale: string;
+};
+
+const earthMuKm3S2 = 398600.4418;
+const earthRadiusKm = 6378.137;
+
+function formatSignedDegrees(value: number | null) {
+  return value == null || !Number.isFinite(value) ? "Unavailable" : `${value.toFixed(3)} deg`;
+}
+
+function wetMass(profile: BackendPropagationProfile | null) {
+  return profile ? profile.dryMassKg + profile.fuelMassKg : 1000;
+}
+
+export function missionTargetingSolutions(
+  orbitSummary: OrbitSummary,
+  targets: MissionDesignTargets,
+  profile: BackendPropagationProfile | null,
+): ManeuverTargetingSolution[] {
+  const solutions: ManeuverTargetingSolution[] = [];
+  const currentRadiusKm = orbitSummary.currentAltitudeKm == null ? null : orbitSummary.currentAltitudeKm + earthRadiusKm;
+  const speedMps = (orbitSummary.localVelocityKmps ?? 0) * 1000;
+
+  if (targets.targetAltitudeKm != null && currentRadiusKm != null && orbitSummary.currentAltitudeKm != null) {
+    const targetRadiusKm = targets.targetAltitudeKm + earthRadiusKm;
+    const transferA = (currentRadiusKm + targetRadiusKm) / 2;
+    const circularCurrent = Math.sqrt(earthMuKm3S2 / currentRadiusKm) * 1000;
+    const circularTarget = Math.sqrt(earthMuKm3S2 / targetRadiusKm) * 1000;
+    const transferStart = Math.sqrt(earthMuKm3S2 * ((2 / currentRadiusKm) - (1 / transferA))) * 1000;
+    const transferEnd = Math.sqrt(earthMuKm3S2 * ((2 / targetRadiusKm) - (1 / transferA))) * 1000;
+    const deltaV = Math.abs(transferStart - circularCurrent) + Math.abs(circularTarget - transferEnd);
+    solutions.push({
+      id: "target-altitude",
+      target: "Target altitude",
+      current: `${orbitSummary.currentAltitudeKm.toFixed(2)} km`,
+      desired: `${targets.targetAltitudeKm.toFixed(2)} km`,
+      requiredDeltaVMps: deltaV,
+      estimatedFuelKg: estimatePropellantKg(deltaV, wetMass(profile), profile?.nominalIspS ?? 220),
+      method: "Two-impulse Hohmann targeting",
+      confidence: orbitSummary.eccentricity != null && orbitSummary.eccentricity < 0.02 ? "High" : "Medium",
+      rationale: "Altitude targeting is estimated with vis-viva and a coplanar Hohmann transfer.",
+    });
+  }
+
+  if (targets.targetInclinationDeg != null && orbitSummary.inclinationDeg != null && speedMps > 0) {
+    const deltaI = Math.abs(targets.targetInclinationDeg - orbitSummary.inclinationDeg);
+    const deltaV = 2 * speedMps * Math.sin((deltaI * Math.PI / 180) / 2);
+    solutions.push({
+      id: "target-inclination",
+      target: "Target inclination",
+      current: formatSignedDegrees(orbitSummary.inclinationDeg),
+      desired: formatSignedDegrees(targets.targetInclinationDeg),
+      requiredDeltaVMps: deltaV,
+      estimatedFuelKg: estimatePropellantKg(deltaV, wetMass(profile), profile?.nominalIspS ?? 220),
+      method: "Pure plane-change targeting",
+      confidence: deltaI <= 10 ? "High" : "Medium",
+      rationale: "Inclination targeting uses dv = 2v sin(delta-i/2); node execution is preferred for operational plans.",
+    });
+  }
+
+  if (targets.targetEccentricity != null && orbitSummary.eccentricity != null && speedMps > 0) {
+    const deltaE = Math.abs(targets.targetEccentricity - orbitSummary.eccentricity);
+    const deltaV = speedMps * Math.min(0.25, deltaE);
+    solutions.push({
+      id: "target-eccentricity",
+      target: "Target eccentricity",
+      current: orbitSummary.eccentricity.toFixed(6),
+      desired: targets.targetEccentricity.toFixed(6),
+      requiredDeltaVMps: deltaV,
+      estimatedFuelKg: estimatePropellantKg(deltaV, wetMass(profile), profile?.nominalIspS ?? 220),
+      method: "Apsis-shaping estimate",
+      confidence: "Low",
+      rationale: "Eccentricity targeting is a first-order apsis-shaping estimate; high-fidelity targeting should solve for burn location and final elements.",
+    });
+  }
+
+  if (targets.targetRaanDeg != null && orbitSummary.raanDeg != null && speedMps > 0) {
+    const delta = angularSeparationDeg(targets.targetRaanDeg, orbitSummary.raanDeg);
+    solutions.push({
+      id: "target-raan",
+      target: "Target RAAN",
+      current: formatSignedDegrees(orbitSummary.raanDeg),
+      desired: formatSignedDegrees(targets.targetRaanDeg),
+      requiredDeltaVMps: 2 * speedMps * Math.sin((delta * Math.PI / 180) / 2),
+      estimatedFuelKg: estimatePropellantKg(2 * speedMps * Math.sin((delta * Math.PI / 180) / 2), wetMass(profile), profile?.nominalIspS ?? 220),
+      method: "Plane rotation estimate",
+      confidence: "Low",
+      rationale: "RAAN targeting generally requires nodal targeting and may exploit natural J2 drift; this estimate is conservative.",
+    });
+  }
+
+  if (targets.targetArgumentOfPerigeeDeg != null && orbitSummary.argumentOfPerigeeDeg != null && speedMps > 0) {
+    const delta = angularSeparationDeg(targets.targetArgumentOfPerigeeDeg, orbitSummary.argumentOfPerigeeDeg);
+    const deltaV = speedMps * Math.sin((delta * Math.PI / 180) / 2) * Math.max(orbitSummary.eccentricity ?? 0.01, 0.01);
+    solutions.push({
+      id: "target-argument-of-perigee",
+      target: "Target argument of perigee",
+      current: formatSignedDegrees(orbitSummary.argumentOfPerigeeDeg),
+      desired: formatSignedDegrees(targets.targetArgumentOfPerigeeDeg),
+      requiredDeltaVMps: deltaV,
+      estimatedFuelKg: estimatePropellantKg(deltaV, wetMass(profile), profile?.nominalIspS ?? 220),
+      method: "Apse-line rotation estimate",
+      confidence: "Low",
+      rationale: "Argument-of-perigee targeting is sensitive to eccentricity and burn phasing; use as a screening estimate.",
+    });
+  }
+
+  return solutions.toSorted((a, b) => b.requiredDeltaVMps - a.requiredDeltaVMps);
+}
+
+function angularSeparationDeg(left: number, right: number) {
+  const delta = Math.abs(((left - right + 180) % 360) - 180);
+  return Number.isFinite(delta) ? delta : 0;
+}
+
+export function monteCarloDispersion(
+  analytics: MissionTimelineAnalytics,
+  settings: MonteCarloSettings,
+): MonteCarloDispersionResult {
+  const samples = Math.max(10, Math.round(settings.samples));
+  const baseDeltaV = analytics.totalDeltaVMps;
+  const magnitude = Math.max(0, settings.burnMagnitudeErrorPercent) / 100;
+  const direction = Math.max(0, settings.burnDirectionErrorDeg) * Math.PI / 180;
+  const timing = Math.max(0, settings.timingErrorSeconds);
+  const sampledDeltaVs = Array.from({ length: samples }, (_, index) => {
+    const magnitudeError = deterministicUnitSample(index, 1) * magnitude;
+    const directionPenalty = Math.abs(deterministicUnitSample(index, 2)) * direction;
+    const timingPenalty = Math.abs(deterministicUnitSample(index, 3)) * (timing / 3600);
+    return Math.max(0, baseDeltaV * (1 + magnitudeError + directionPenalty + timingPenalty * 0.15));
+  });
+  const bestCaseDeltaVMps = Math.min(...sampledDeltaVs);
+  const worstCaseDeltaVMps = Math.max(...sampledDeltaVs);
+  const averageDeltaVMps = sampledDeltaVs.reduce((sum, value) => sum + value, 0) / sampledDeltaVs.length;
+  const standardDeviation = Math.sqrt(sampledDeltaVs.reduce((sum, value) => sum + ((value - averageDeltaVMps) ** 2), 0) / sampledDeltaVs.length);
+  const orbitSpreadKm = (worstCaseDeltaVMps - bestCaseDeltaVMps + standardDeviation) * 0.8;
+  const combinedSigma = Math.sqrt(magnitude * magnitude + direction * direction + (timing / 3600) ** 2);
+  const robustness = orbitSpreadKm > 25 || combinedSigma > 0.08 ? "Fragile" : orbitSpreadKm > 5 || combinedSigma > 0.03 ? "Sensitive" : "Robust";
+  return {
+    samples,
+    bestCaseDeltaVMps,
+    averageDeltaVMps,
+    worstCaseDeltaVMps,
+    orbitSpreadKm,
+    timingSpreadSeconds: timing * 2,
+    robustness,
+  };
+}
+
+function deterministicUnitSample(index: number, salt: number) {
+  const value = Math.sin((index + 1) * (12.9898 + salt * 7.233)) * 43758.5453;
+  return ((value - Math.floor(value)) * 2) - 1;
+}
+
+export function missionConstraintViolations(
+  events: BackendMissionTimelineEvent[],
+  analytics: MissionTimelineAnalytics,
+  orbitSummary: OrbitSummary,
+  orbitMarkers: MissionOrbitEventMarker[],
+  constraints: MissionConstraints,
+): MissionConstraintViolation[] {
+  const violations: MissionConstraintViolation[] = [];
+  events.filter((event) => event.enabled && (event.type === "FINITE_BURN" || event.type === "IMPULSIVE_BURN")).forEach((event) => {
+    const deltaV = estimatedEventDeltaVMps(event);
+    if (constraints.maxSingleBurnDeltaVMps != null && deltaV > constraints.maxSingleBurnDeltaVMps) {
+      violations.push({ constraint: "Max single-burn dV", severity: "Violation", message: `${event.name} requires ${deltaV.toFixed(2)} m/s, above ${constraints.maxSingleBurnDeltaVMps.toFixed(2)} m/s.` });
+    }
+    const duration = readNumberParameter(event.parameters ?? {}, "durationSeconds", 0);
+    if (event.type === "FINITE_BURN" && constraints.maxBurnDurationSeconds != null && duration > constraints.maxBurnDurationSeconds) {
+      violations.push({ constraint: "Max burn duration", severity: "Violation", message: `${event.name} duration ${duration.toFixed(0)}s exceeds ${constraints.maxBurnDurationSeconds.toFixed(0)}s.` });
+    }
+  });
+  if (constraints.fuelReservePercent != null && analytics.fuelBudget.fuelMarginPercent != null && analytics.fuelBudget.fuelMarginPercent < constraints.fuelReservePercent) {
+    violations.push({ constraint: "Fuel reserve", severity: analytics.fuelBudget.fuelMarginPercent < 0 ? "Violation" : "Warning", message: `Fuel margin ${analytics.fuelBudget.fuelMarginPercent.toFixed(1)}% is below reserve ${constraints.fuelReservePercent.toFixed(1)}%.` });
+  }
+  if (constraints.minPerigeeAltitudeKm != null && orbitSummary.perigeeAltitudeKm != null && orbitSummary.perigeeAltitudeKm < constraints.minPerigeeAltitudeKm) {
+    violations.push({ constraint: "Minimum perigee", severity: "Violation", message: `Perigee ${orbitSummary.perigeeAltitudeKm.toFixed(2)} km is below ${constraints.minPerigeeAltitudeKm.toFixed(2)} km.` });
+  }
+  const eclipseDurations = eclipseDurationsSeconds(orbitMarkers);
+  const maxEclipse = Math.max(0, ...eclipseDurations);
+  if (constraints.maxEclipseDurationSeconds != null && maxEclipse > constraints.maxEclipseDurationSeconds) {
+    violations.push({ constraint: "Eclipse duration", severity: "Warning", message: `Detected eclipse duration ${maxEclipse.toFixed(0)}s exceeds ${constraints.maxEclipseDurationSeconds.toFixed(0)}s.` });
+  }
+  return violations;
+}
+
+function eclipseDurationsSeconds(markers: MissionOrbitEventMarker[]) {
+  const durations: number[] = [];
+  let entry: MissionOrbitEventMarker | null = null;
+  markers.forEach((marker) => {
+    if (marker.type === "ECLIPSE_ENTRY") {
+      entry = marker;
+    }
+    if (marker.type === "ECLIPSE_EXIT" && entry) {
+      durations.push(Math.max(0, Math.round((new Date(marker.timeUtc).getTime() - new Date(entry.timeUtc).getTime()) / 1000)));
+      entry = null;
+    }
+  });
+  return durations;
+}
+
+export function orbitLifetimeEstimate(orbitSummary: OrbitSummary): OrbitLifetimeEstimate {
+  const perigee = orbitSummary.perigeeAltitudeKm;
+  if (perigee == null) {
+    return { classification: "Unavailable", estimatedLifetime: "Unavailable", dragSensitivity: "Unknown", rationale: "Perigee altitude is unavailable." };
+  }
+  if (perigee < 180) {
+    return { classification: "Reentry Risk", estimatedLifetime: "Hours to days", dragSensitivity: "Extreme", rationale: "Perigee is inside the dense upper atmosphere; decay is rapid and solar activity sensitive." };
+  }
+  if (perigee < 300) {
+    return { classification: "Reentry Risk", estimatedLifetime: "Days to weeks", dragSensitivity: "High", rationale: "Very-low LEO perigee produces strong drag losses and short lifetime." };
+  }
+  if (perigee < 450) {
+    return { classification: "Decaying", estimatedLifetime: "Months to a few years", dragSensitivity: "High", rationale: "LEO drag can dominate lifetime; atmospheric density and ballistic coefficient matter." };
+  }
+  if (perigee < 650) {
+    return { classification: "Decaying", estimatedLifetime: "Years", dragSensitivity: "Medium", rationale: "Orbit is above the highest-drag regime but still sensitive to solar-cycle density." };
+  }
+  return { classification: "Stable", estimatedLifetime: "Many years", dragSensitivity: "Low", rationale: "Perigee is high enough that atmospheric drag is not expected to dominate short mission planning." };
+}
+
+export function missionObjectiveProgress(orbitSummary: OrbitSummary, targets: MissionDesignTargets): MissionObjectiveProgress[] {
+  const objectives: MissionObjectiveProgress[] = [];
+  if (targets.targetAltitudeKm != null) {
+    objectives.push(progressMetric("Reach target altitude", orbitSummary.currentAltitudeKm, targets.targetAltitudeKm, "km", 50));
+  }
+  if (targets.targetInclinationDeg != null) {
+    objectives.push(progressMetric("Reach target inclination", orbitSummary.inclinationDeg, targets.targetInclinationDeg, "deg", 1));
+  }
+  if (targets.targetEccentricity != null) {
+    objectives.push(progressMetric("Reach target eccentricity", orbitSummary.eccentricity, targets.targetEccentricity, "", 0.005));
+  }
+  return objectives;
+}
+
+function progressMetric(label: string, current: number | null, target: number, unit: string, tolerance: number): MissionObjectiveProgress {
+  if (current == null || !Number.isFinite(current)) {
+    return { label, current: "Unavailable", target: `${target}${unit ? ` ${unit}` : ""}`, progressPercent: 0, status: "Unavailable" };
+  }
+  const error = Math.abs(current - target);
+  const scale = Math.max(Math.abs(target), tolerance * 10);
+  const progressPercent = Math.max(0, Math.min(100, (1 - (error / scale)) * 100));
+  return {
+    label,
+    current: `${current.toFixed(unit === "" ? 6 : 2)}${unit ? ` ${unit}` : ""}`,
+    target: `${target.toFixed(unit === "" ? 6 : 2)}${unit ? ` ${unit}` : ""}`,
+    progressPercent,
+    status: error <= tolerance ? "Achieved" : progressPercent > 50 ? "In Progress" : "Needs Plan",
+  };
+}
+
+export function tradeStudySolutions(
+  targetingSolutions: ManeuverTargetingSolution[],
+  analytics: MissionTimelineAnalytics,
+): TradeStudySolution[] {
+  const totalTargetDeltaV = targetingSolutions.reduce((sum, solution) => sum + solution.requiredDeltaVMps, 0);
+  const totalTargetFuel = targetingSolutions.reduce((sum, solution) => sum + solution.estimatedFuelKg, 0);
+  const baselineTime = Math.max(analytics.totalCoastSeconds, 1);
+  const candidates: TradeStudySolution[] = [
+    {
+      label: "Lowest dV",
+      rank: 0,
+      deltaVMps: totalTargetDeltaV * 0.9,
+      fuelKg: totalTargetFuel * 0.9,
+      transferSeconds: baselineTime * 1.4,
+      score: 0,
+      rationale: "Prioritizes energy efficiency with longer coast arcs and apsis/node placement.",
+    },
+    {
+      label: "Fastest Transfer",
+      rank: 0,
+      deltaVMps: totalTargetDeltaV * 1.25,
+      fuelKg: totalTargetFuel * 1.25,
+      transferSeconds: baselineTime * 0.65,
+      score: 0,
+      rationale: "Accepts higher burn cost to reduce transfer time.",
+    },
+    {
+      label: "Lowest Fuel",
+      rank: 0,
+      deltaVMps: totalTargetDeltaV * 0.95,
+      fuelKg: totalTargetFuel * 0.85,
+      transferSeconds: baselineTime * 1.2,
+      score: 0,
+      rationale: "Favors propellant margin and conservative execution.",
+    },
+    {
+      label: "Balanced",
+      rank: 0,
+      deltaVMps: totalTargetDeltaV,
+      fuelKg: totalTargetFuel,
+      transferSeconds: baselineTime,
+      score: 0,
+      rationale: "Balances burn cost, propellant use, and schedule.",
+    },
+  ];
+  const maxDv = Math.max(1, ...candidates.map((candidate) => candidate.deltaVMps));
+  const maxFuel = Math.max(1, ...candidates.map((candidate) => candidate.fuelKg));
+  const maxTime = Math.max(1, ...candidates.map((candidate) => candidate.transferSeconds));
+  return candidates.map((candidate) => ({
+    ...candidate,
+    score: (candidate.deltaVMps / maxDv) * 0.4 + (candidate.fuelKg / maxFuel) * 0.4 + (candidate.transferSeconds / maxTime) * 0.2,
+  })).toSorted((a, b) => a.score - b.score).map((candidate, index) => ({ ...candidate, rank: index + 1 }));
+}
+
 export function missionFuelBudget(events: BackendMissionTimelineEvent[], profile: BackendPropagationProfile | null): MissionFuelBudget {
   const warnings: string[] = [];
   const consumedFuelKg = events.reduce((sum, event) => {
@@ -643,6 +1020,9 @@ export function buildMissionReport({
   profile,
   trajectoryOverlay,
   validation,
+  targets,
+  constraints,
+  monteCarloSettings,
 }: {
   mission: BackendMission | null;
   events: BackendMissionTimelineEvent[];
@@ -650,9 +1030,13 @@ export function buildMissionReport({
   profile: BackendPropagationProfile | null;
   trajectoryOverlay: MissionTrajectoryOverlay | null;
   validation: MissionValidationResult;
+  targets?: MissionDesignTargets;
+  constraints?: MissionConstraints;
+  monteCarloSettings?: MonteCarloSettings;
 }) {
   const analytics = missionTimelineAnalytics(mission, events, profile);
   const markers = detectOrbitEventMarkers(trajectoryOverlay?.mission?.trajectory);
+  const targeting = targets ? missionTargetingSolutions(orbitSummary, targets, profile) : [];
   return {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -677,6 +1061,18 @@ export function buildMissionReport({
     spacecraftPerformance: spacecraftPerformanceStatus(analytics.fuelBudget),
     timelineAnalytics: analytics,
     orbitEvents: markers,
+    targeting: {
+      targets: targets ?? null,
+      solutions: targeting,
+      tradeStudy: tradeStudySolutions(targeting, analytics),
+    },
+    monteCarlo: monteCarloSettings ? monteCarloDispersion(analytics, monteCarloSettings) : null,
+    constraints: {
+      definition: constraints ?? null,
+      findings: constraints ? missionConstraintViolations(events, analytics, orbitSummary, markers, constraints) : [],
+    },
+    objectives: targets ? missionObjectiveProgress(orbitSummary, targets) : [],
+    lifetime: orbitLifetimeEstimate(orbitSummary),
     validation,
   };
 }
