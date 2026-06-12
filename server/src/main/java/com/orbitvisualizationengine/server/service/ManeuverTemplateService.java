@@ -70,6 +70,9 @@ public class ManeuverTemplateService {
       case CIRCULARIZATION -> circularizationPreview(mission, request, orbit, templateInstanceId, sequenceIndex);
       case HOHMANN_TRANSFER -> hohmannPreview(mission, request, orbit, templateInstanceId, sequenceIndex);
       case PLANE_CHANGE -> planeChangePreview(mission, request, orbit, templateInstanceId, sequenceIndex);
+      case APOGEE_RAISE -> apogeeRaisePreview(mission, request, orbit, templateInstanceId, sequenceIndex);
+      case PERIGEE_RAISE -> perigeeRaisePreview(mission, request, orbit, templateInstanceId, sequenceIndex);
+      case DEORBIT_BURN -> deorbitBurnPreview(mission, request, orbit, templateInstanceId, sequenceIndex);
     };
   }
 
@@ -317,6 +320,180 @@ public class ManeuverTemplateService {
     return new ManeuverTemplatePreview(request.type(), templateInstanceId, metadata, warnings, events);
   }
 
+  private ManeuverTemplatePreview apogeeRaisePreview(
+      Mission mission,
+      ManeuverTemplateRequest request,
+      Orbit orbit,
+      String templateInstanceId,
+      int sequenceIndex) {
+    KeplerianOrbit keplerian = new KeplerianOrbit(orbit);
+    double burnRadiusMeters = orbit.getPosition().getNorm();
+    double targetApogeeRadiusMeters = radiusMeters(request.targetAltitudeKm());
+    if (targetApogeeRadiusMeters <= burnRadiusMeters + 1000.0) {
+      throw new IllegalArgumentException("Target apogee altitude must be at least 1 km above the current altitude.");
+    }
+    double transferSemiMajorAxisMeters = (burnRadiusMeters + targetApogeeRadiusMeters) / 2.0;
+    double currentSpeedMps = speedAtRadius(keplerian.getA(), burnRadiusMeters);
+    double transferSpeedMps = speedAtRadius(transferSemiMajorAxisMeters, burnRadiusMeters);
+    double deltaVMps = transferSpeedMps - currentSpeedMps;
+    double transferTimeSeconds = Math.PI * Math.sqrt(Math.pow(transferSemiMajorAxisMeters, 3.0) / MU);
+    Instant burnTime = mission.scenarioStart();
+
+    List<String> warnings = new ArrayList<>();
+    if (keplerian.getE() > 0.02) {
+      warnings.add("Apogee raise assumes a burn near periapsis; current orbit is noticeably elliptical, so preview is first-order only.");
+    }
+
+    Map<String, Object> metadata = templateMetadata(templateInstanceId, request.type(), "SUMMARY");
+    metadata.put("targetAltitudeKm", request.targetAltitudeKm());
+    metadata.put("burnRadiusKm", burnRadiusMeters / 1000.0);
+    metadata.put("targetApogeeAltitudeKm", request.targetAltitudeKm());
+    metadata.put("predictedPerigeeAltitudeKm", burnRadiusMeters / 1000.0 - EARTH_RADIUS_KM);
+    metadata.put("predictedApogeeAltitudeKm", request.targetAltitudeKm());
+    metadata.put("transferTimeSeconds", transferTimeSeconds);
+    metadata.put("burnMagnitudeMps", Math.abs(deltaVMps));
+    metadata.put("totalDeltaVMps", Math.abs(deltaVMps));
+    metadata.put("estimatedPropellantKg", estimatedPropellantKg(Math.abs(deltaVMps)));
+
+    Map<String, Object> burnMetadata = withSchedule(
+        templateMetadata(templateInstanceId, request.type(), "APOGEE_RAISE_BURN"),
+        mission,
+        burnTime);
+    burnMetadata.put("targetAltitudeKm", request.targetAltitudeKm());
+    burnMetadata.put("computedDeltaVMps", Math.abs(deltaVMps));
+    burnMetadata.put("estimatedPropellantKg", estimatedPropellantKg(Math.abs(deltaVMps)));
+    burnMetadata.put("targetApogeeAltitudeKm", request.targetAltitudeKm());
+    burnMetadata.put("predictedPerigeeAltitudeKm", burnRadiusMeters / 1000.0 - EARTH_RADIUS_KM);
+    burnMetadata.put("predictedApogeeAltitudeKm", request.targetAltitudeKm());
+
+    List<CreateTimelineEventRequest> events = List.of(new CreateTimelineEventRequest(
+        sequenceIndex,
+        TimelineEventType.IMPULSIVE_BURN,
+        "Apogee Raise Burn",
+        true,
+        burnTime,
+        impulsiveParameters(burnMetadata, signedTangentialDeltaV(deltaVMps))));
+
+    return new ManeuverTemplatePreview(request.type(), templateInstanceId, metadata, warnings, events);
+  }
+
+  private ManeuverTemplatePreview perigeeRaisePreview(
+      Mission mission,
+      ManeuverTemplateRequest request,
+      Orbit orbit,
+      String templateInstanceId,
+      int sequenceIndex) {
+    KeplerianOrbit keplerian = new KeplerianOrbit(orbit);
+    double targetPerigeeRadiusMeters = radiusMeters(request.targetAltitudeKm());
+    double apogeeRadiusMeters = keplerian.getA() * (1.0 + keplerian.getE());
+    if (targetPerigeeRadiusMeters >= apogeeRadiusMeters - 1000.0) {
+      throw new IllegalArgumentException("Target perigee altitude must remain at least 1 km below the current apogee altitude.");
+    }
+
+    double coastSeconds = timeToTrueAnomalySeconds(keplerian, Math.PI);
+    Instant burnTime = mission.scenarioStart().plusSeconds(Math.max(0, Math.round(coastSeconds)));
+    List<String> warnings = new ArrayList<>();
+    if (keplerian.getE() < NEAR_CIRCULAR_ECCENTRICITY) {
+      warnings.add("Current orbit is near-circular; perigee raise is weakly defined and preview uses the osculating apoapsis.");
+    }
+    warnIfOutsideMission(mission, burnTime, "Perigee raise burn", warnings);
+
+    double transferSemiMajorAxisMeters = (apogeeRadiusMeters + targetPerigeeRadiusMeters) / 2.0;
+    double currentSpeedMps = speedAtRadius(keplerian.getA(), apogeeRadiusMeters);
+    double transferSpeedMps = speedAtRadius(transferSemiMajorAxisMeters, apogeeRadiusMeters);
+    double deltaVMps = transferSpeedMps - currentSpeedMps;
+
+    Map<String, Object> metadata = templateMetadata(templateInstanceId, request.type(), "SUMMARY");
+    metadata.put("targetAltitudeKm", request.targetAltitudeKm());
+    metadata.put("targetPerigeeAltitudeKm", request.targetAltitudeKm());
+    metadata.put("predictedPerigeeAltitudeKm", request.targetAltitudeKm());
+    metadata.put("predictedApogeeAltitudeKm", apogeeRadiusMeters / 1000.0 - EARTH_RADIUS_KM);
+    metadata.put("coastSeconds", coastSeconds);
+    metadata.put("burnMagnitudeMps", Math.abs(deltaVMps));
+    metadata.put("totalDeltaVMps", Math.abs(deltaVMps));
+    metadata.put("estimatedPropellantKg", estimatedPropellantKg(Math.abs(deltaVMps)));
+
+    List<CreateTimelineEventRequest> events = new ArrayList<>();
+    if (coastSeconds > 1.0) {
+      events.add(new CreateTimelineEventRequest(
+          sequenceIndex++,
+          TimelineEventType.COAST,
+          "Perigee Raise Coast",
+          true,
+          mission.scenarioStart(),
+          withSchedule(templateMetadata(templateInstanceId, request.type(), "COAST_TO_APOAPSIS"), mission, mission.scenarioStart())));
+    }
+
+    Map<String, Object> burnMetadata = withSchedule(
+        templateMetadata(templateInstanceId, request.type(), "PERIGEE_RAISE_BURN"),
+        mission,
+        burnTime);
+    burnMetadata.put("targetAltitudeKm", request.targetAltitudeKm());
+    burnMetadata.put("computedDeltaVMps", Math.abs(deltaVMps));
+    burnMetadata.put("estimatedPropellantKg", estimatedPropellantKg(Math.abs(deltaVMps)));
+    burnMetadata.put("targetPerigeeAltitudeKm", request.targetAltitudeKm());
+    burnMetadata.put("predictedPerigeeAltitudeKm", request.targetAltitudeKm());
+    burnMetadata.put("predictedApogeeAltitudeKm", apogeeRadiusMeters / 1000.0 - EARTH_RADIUS_KM);
+    events.add(new CreateTimelineEventRequest(
+        sequenceIndex,
+        TimelineEventType.IMPULSIVE_BURN,
+        "Perigee Raise Burn",
+        true,
+        burnTime,
+        impulsiveParameters(burnMetadata, signedTangentialDeltaV(deltaVMps))));
+
+    return new ManeuverTemplatePreview(request.type(), templateInstanceId, metadata, warnings, events);
+  }
+
+  private ManeuverTemplatePreview deorbitBurnPreview(
+      Mission mission,
+      ManeuverTemplateRequest request,
+      Orbit orbit,
+      String templateInstanceId,
+      int sequenceIndex) {
+    KeplerianOrbit keplerian = new KeplerianOrbit(orbit);
+    double burnRadiusMeters = orbit.getPosition().getNorm();
+    double targetPerigeeRadiusMeters = radiusMeters(request.targetAltitudeKm());
+    if (targetPerigeeRadiusMeters >= burnRadiusMeters - 1000.0) {
+      throw new IllegalArgumentException("Deorbit target altitude must be at least 1 km below the current altitude.");
+    }
+    double transferSemiMajorAxisMeters = (burnRadiusMeters + targetPerigeeRadiusMeters) / 2.0;
+    double currentSpeedMps = speedAtRadius(keplerian.getA(), burnRadiusMeters);
+    double transferSpeedMps = speedAtRadius(transferSemiMajorAxisMeters, burnRadiusMeters);
+    double deltaVMps = transferSpeedMps - currentSpeedMps;
+    Instant burnTime = mission.scenarioStart();
+
+    Map<String, Object> metadata = templateMetadata(templateInstanceId, request.type(), "SUMMARY");
+    metadata.put("targetAltitudeKm", request.targetAltitudeKm());
+    metadata.put("targetPerigeeAltitudeKm", request.targetAltitudeKm());
+    metadata.put("predictedPerigeeAltitudeKm", request.targetAltitudeKm());
+    metadata.put("predictedApogeeAltitudeKm", burnRadiusMeters / 1000.0 - EARTH_RADIUS_KM);
+    metadata.put("burnMagnitudeMps", Math.abs(deltaVMps));
+    metadata.put("totalDeltaVMps", Math.abs(deltaVMps));
+    metadata.put("estimatedPropellantKg", estimatedPropellantKg(Math.abs(deltaVMps)));
+
+    Map<String, Object> burnMetadata = withSchedule(
+        templateMetadata(templateInstanceId, request.type(), "DEORBIT_BURN"),
+        mission,
+        burnTime);
+    burnMetadata.put("targetAltitudeKm", request.targetAltitudeKm());
+    burnMetadata.put("computedDeltaVMps", Math.abs(deltaVMps));
+    burnMetadata.put("estimatedPropellantKg", estimatedPropellantKg(Math.abs(deltaVMps)));
+    burnMetadata.put("targetPerigeeAltitudeKm", request.targetAltitudeKm());
+    burnMetadata.put("predictedPerigeeAltitudeKm", request.targetAltitudeKm());
+    burnMetadata.put("predictedApogeeAltitudeKm", burnRadiusMeters / 1000.0 - EARTH_RADIUS_KM);
+
+    List<CreateTimelineEventRequest> events = List.of(new CreateTimelineEventRequest(
+        sequenceIndex,
+        TimelineEventType.IMPULSIVE_BURN,
+        "Deorbit Burn",
+        true,
+        burnTime,
+        impulsiveParameters(burnMetadata, signedTangentialDeltaV(deltaVMps))));
+
+    return new ManeuverTemplatePreview(request.type(), templateInstanceId, metadata, List.of(), events);
+  }
+
   private Orbit orbitAtMissionStart(Mission mission) {
     if (mission.subjectNoradId() == null && mission.subjectOrbitId() == null) {
       throw new IllegalArgumentException("Maneuver template preview requires a mission subject.");
@@ -491,7 +668,7 @@ public class ManeuverTemplateService {
       throw new IllegalArgumentException("Maneuver template type is required.");
     }
     switch (request.type()) {
-      case CIRCULARIZATION, HOHMANN_TRANSFER -> radiusMeters(request.targetAltitudeKm());
+      case CIRCULARIZATION, HOHMANN_TRANSFER, APOGEE_RAISE, PERIGEE_RAISE, DEORBIT_BURN -> radiusMeters(request.targetAltitudeKm());
       case PLANE_CHANGE -> requiredFinite(request.inclinationChangeDeg(), "Inclination change");
     }
   }

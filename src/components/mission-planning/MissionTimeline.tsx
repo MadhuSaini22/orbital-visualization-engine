@@ -7,7 +7,7 @@ import { OrbitSummaryPanel } from "./OrbitSummaryPanel";
 import type { OrbitSummary } from "./OrbitSummaryPanel";
 import { DetailMetric, HudPanel } from "./ui";
 import type { MissionTrajectoryOverlay, TimelineLayoutModel, TimelineSnapMode, TimelineTimeMode, TimelineZoomPreset, TimelineInteractionModel } from "./types";
-import { buildTimelineLayoutModel, compactIsoUtc, defaultMissionTrajectoryWindowMinutes, displayTimelineTime, estimatedEventDeltaVMps, eventScheduleMode, forceModelSummary, integratorSummary, metOffsetLabelFromSeconds, missionDurationSeconds, missionTrajectoryMaxStepSeconds, missionTrajectoryMinStepSeconds, readNumberParameter, readStringParameter, secondsToDurationLabel, timelineAnalysis, timelineSnapOptions, timelineZoomOptions, validateMissionPlan } from "./utils";
+import { buildTimelineLayoutModel, compactIsoUtc, defaultMissionTrajectoryWindowMinutes, displayTimelineTime, estimatedEventDeltaVMps, eventScheduleMode, forceModelSummary, integratorSummary, metOffsetLabelFromSeconds, missionDurationSeconds, missionTimelineAnalytics, missionTrajectoryMaxStepSeconds, missionTrajectoryMinStepSeconds, readNumberParameter, readStringParameter, secondsToDurationLabel, timelineAnalysis, timelineSnapOptions, timelineZoomOptions, validateMissionPlan } from "./utils";
 
 export function MissionTimelinePanel({
   mission,
@@ -90,8 +90,10 @@ export function MissionTimelinePanel({
     customVisibleSeconds: Math.max(60, Number(customZoomHours) * 3600 || 3 * 3600),
   }), [customZoomHours, snapMode, zoomPreset]);
   const analysis = useMemo(() => timelineAnalysis(mission, events), [events, mission]);
+  const missionAnalytics = useMemo(() => missionTimelineAnalytics(mission, events, propagationProfile), [events, mission, propagationProfile]);
   const templateGroups = useMemo(() => templateEventGroups(events), [events]);
   const missionValidation = useMemo(() => validateMissionPlan(mission, events, propagationProfile), [events, mission, propagationProfile]);
+  const validationStatus = missionValidation.errors.length > 0 ? "Blocked" : missionValidation.warnings.length > 0 ? "Review" : "Ready";
   const hasEnabledManeuverEvents = events.some((event) => event.enabled && (event.type === "FINITE_BURN" || event.type === "IMPULSIVE_BURN"));
   const trajectoryCurrentBlocker = trajectoryOverlay && !trajectoryStale
     ? "Trajectory is current. Change mission configuration, timeline, or cadence to update."
@@ -209,6 +211,43 @@ export function MissionTimelinePanel({
       )}
 
       {mission && (
+        <div className="mt-3 border border-cyan-300/15 bg-black/25 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Mission Summary</p>
+              <p className="mt-1 text-[11px] leading-5 text-zinc-500">High-level mission cost, timeline, and validation state before trajectory generation.</p>
+            </div>
+            <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${
+              validationStatus === "Blocked"
+                ? "border-rose-300/40 text-rose-100"
+                : validationStatus === "Review"
+                  ? "border-amber-300/40 text-amber-100"
+                  : "border-lime-300/40 text-lime-100"
+            }`}>
+              {validationStatus}
+            </span>
+          </div>
+          <div className="mt-3 grid gap-2 md:grid-cols-4">
+            <DetailMetric label="Mission Duration" value={secondsToDurationLabel(analysis.missionDuration)} />
+            <DetailMetric label="Events" value={`${analysis.eventCount} total`} />
+            <DetailMetric label="Burns" value={`${missionAnalytics.burnCount} burns`} />
+            <DetailMetric label="Total Delta-V" value={`${formatNumber(missionAnalytics.totalDeltaVMps, 2)} m/s`} />
+            <DetailMetric label="Estimated Fuel Used" value={`${formatNumber(missionAnalytics.fuelBudget.consumedFuelKg, 3)} kg`} />
+            <DetailMetric label="Fuel Remaining" value={missionAnalytics.fuelBudget.remainingFuelKg == null ? "Profile not loaded" : `${formatNumber(missionAnalytics.fuelBudget.remainingFuelKg, 3)} kg`} />
+            <DetailMetric label="Remaining Delta-V" value={missionAnalytics.fuelBudget.remainingDeltaVMps == null ? "Profile not loaded" : `${formatNumber(missionAnalytics.fuelBudget.remainingDeltaVMps, 2)} m/s`} />
+            <DetailMetric label="Orbit Class" value={orbitSummary.classification} />
+          </div>
+          {missionAnalytics.fuelBudget.warnings.length > 0 && (
+            <div className="mt-3 border border-amber-300/25 bg-amber-300/[0.05] px-3 py-2">
+              {missionAnalytics.fuelBudget.warnings.map((warning) => (
+                <p key={warning} className="text-xs leading-5 text-amber-100">{warning}</p>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {mission && (
         <div className="mt-3 grid gap-2 border border-cyan-300/15 bg-black/25 px-3 py-2 text-xs">
           <div className="flex items-center justify-between gap-3">
             <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Subject</span>
@@ -311,6 +350,8 @@ export function MissionTimelinePanel({
             <DetailMetric label="Spacecraft" value={propagationProfile ? `Dry ${propagationProfile.dryMassKg} kg · Fuel ${propagationProfile.fuelMassKg} kg` : "Profile not loaded"} />
             <DetailMetric label="Mission Window" value={`${compactIsoUtc(mission.scenarioStart)} -> ${compactIsoUtc(mission.scenarioEnd)}`} />
             <DetailMetric label="Timeline" value={`${analysis.burnCount} Burns · ${analysis.coastCount} Coasts · ${analysis.eventCount} Events`} />
+            <DetailMetric label="Fuel Budget" value={missionAnalytics.fuelBudget.initialFuelKg == null ? "Profile not loaded" : `${formatNumber(missionAnalytics.fuelBudget.consumedFuelKg, 3)} / ${formatNumber(missionAnalytics.fuelBudget.initialFuelKg, 3)} kg`} />
+            <DetailMetric label="Fuel Margin" value={missionAnalytics.fuelBudget.fuelMarginPercent == null ? "Profile not loaded" : `${formatNumber(missionAnalytics.fuelBudget.fuelMarginPercent, 1)}%`} />
           </div>
           <div className="mt-3 grid gap-2 md:grid-cols-[1fr_1fr]">
             <label className="grid gap-1">
@@ -417,6 +458,11 @@ export function MissionTimelinePanel({
             <TimelineMetric label="Impulsive" value={String(analysis.impulsiveBurnCount)} />
             <TimelineMetric label="Est dV" value={`${formatNumber(analysis.cumulativeDeltaVMps, 2)} m/s`} />
             <TimelineMetric label="Coasts" value={String(analysis.coastCount)} />
+            <TimelineMetric label="Coast Time" value={secondsToDurationLabel(missionAnalytics.totalCoastSeconds)} />
+            <TimelineMetric label="Burn Time" value={secondsToDurationLabel(missionAnalytics.totalBurnTimeSeconds)} />
+            <TimelineMetric label="Avg dV/Burn" value={`${formatNumber(missionAnalytics.averageDeltaVMps, 2)} m/s`} />
+            <TimelineMetric label="Fuel Used" value={`${formatNumber(missionAnalytics.fuelBudget.consumedFuelKg, 3)} kg`} />
+            <TimelineMetric label="Rem dV" value={missionAnalytics.fuelBudget.remainingDeltaVMps == null ? "--" : `${formatNumber(missionAnalytics.fuelBudget.remainingDeltaVMps, 1)} m/s`} />
           </div>
 
           {analysis.warnings.length > 0 && (

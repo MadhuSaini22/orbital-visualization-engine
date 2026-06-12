@@ -1729,11 +1729,73 @@ function maneuverTemplateDraftEstimateMps(draft: ManeuverTemplateDraft, orbitSum
     const transferApoapsisSpeed = Math.sqrt(earthMuKm3S2 * ((2 / targetRadiusKm) - (1 / transferSemiMajorAxisKm)));
     return (Math.abs(transferPeriapsisSpeed - circularSpeedInitial) + Math.abs(circularSpeedTarget - transferApoapsisSpeed)) * 1000;
   }
+  if (draft.type === "APOGEE_RAISE") {
+    if (targetRadiusKm <= currentRadiusKm) {
+      return null;
+    }
+    const transferSemiMajorAxisKm = (currentRadiusKm + targetRadiusKm) / 2;
+    const currentSpeedKmps = orbitSummary.localVelocityKmps ?? Math.sqrt(earthMuKm3S2 / currentRadiusKm);
+    const transferSpeedKmps = Math.sqrt(earthMuKm3S2 * ((2 / currentRadiusKm) - (1 / transferSemiMajorAxisKm)));
+    return Math.abs(transferSpeedKmps - currentSpeedKmps) * 1000;
+  }
+  if (draft.type === "DEORBIT_BURN") {
+    if (targetRadiusKm >= currentRadiusKm) {
+      return null;
+    }
+    const transferSemiMajorAxisKm = (currentRadiusKm + targetRadiusKm) / 2;
+    const currentSpeedKmps = orbitSummary.localVelocityKmps ?? Math.sqrt(earthMuKm3S2 / currentRadiusKm);
+    const transferSpeedKmps = Math.sqrt(earthMuKm3S2 * ((2 / currentRadiusKm) - (1 / transferSemiMajorAxisKm)));
+    return Math.abs(transferSpeedKmps - currentSpeedKmps) * 1000;
+  }
+  if (draft.type === "PERIGEE_RAISE") {
+    const apogeeAltitudeKm = orbitSummary.apogeeAltitudeKm;
+    if (apogeeAltitudeKm == null || targetAltitudeKm >= apogeeAltitudeKm) {
+      return null;
+    }
+    return null;
+  }
   const localVelocityKmps = orbitSummary.localVelocityKmps;
   if (!localVelocityKmps || Math.abs(targetRadiusKm - currentRadiusKm) > 1) {
     return null;
   }
   return Math.abs(Math.sqrt(earthMuKm3S2 / currentRadiusKm) - localVelocityKmps) * 1000;
+}
+
+function classifyPreviewOrbit(perigeeAltitudeKm: number, apogeeAltitudeKm: number, eccentricity: number) {
+  const shape = eccentricity < 0.01 ? "Circular" : "Elliptical";
+  if (perigeeAltitudeKm < 2000 && apogeeAltitudeKm < 2000) {
+    return `LEO / ${shape}`;
+  }
+  if (perigeeAltitudeKm < 2000 && apogeeAltitudeKm > 30000) {
+    return "GTO / Elliptical";
+  }
+  if (Math.abs(perigeeAltitudeKm - 35786) < 1500 && Math.abs(apogeeAltitudeKm - 35786) < 1500) {
+    return `GEO / ${shape}`;
+  }
+  if (perigeeAltitudeKm >= 2000 && apogeeAltitudeKm < 30000) {
+    return `MEO / ${shape}`;
+  }
+  if (apogeeAltitudeKm >= 30000) {
+    return `HEO / ${shape}`;
+  }
+  return shape;
+}
+
+function orbitSummaryFromApsides(current: OrbitSummary, perigeeAltitudeKm: number, apogeeAltitudeKm: number): OrbitSummary {
+  const perigeeRadiusKm = earthRadiusKm + perigeeAltitudeKm;
+  const apogeeRadiusKm = earthRadiusKm + apogeeAltitudeKm;
+  const semiMajorAxisKm = (perigeeRadiusKm + apogeeRadiusKm) / 2;
+  const eccentricity = (apogeeRadiusKm - perigeeRadiusKm) / (apogeeRadiusKm + perigeeRadiusKm);
+  return {
+    ...current,
+    classification: classifyPreviewOrbit(perigeeAltitudeKm, apogeeAltitudeKm, eccentricity),
+    currentAltitudeKm: perigeeAltitudeKm,
+    perigeeAltitudeKm,
+    apogeeAltitudeKm,
+    semiMajorAxisKm,
+    eccentricity,
+    periodSeconds: 2 * Math.PI * Math.sqrt((semiMajorAxisKm ** 3) / earthMuKm3S2),
+  };
 }
 
 function predictedTemplateOrbitSummary(preview: ManeuverTemplatePreview | null, current: OrbitSummary): OrbitSummary | null {
@@ -1782,7 +1844,64 @@ function predictedTemplateOrbitSummary(preview: ManeuverTemplatePreview | null, 
       inclinationDeg: current.inclinationDeg == null ? null : current.inclinationDeg + inclinationChangeDeg,
     };
   }
+  if (preview.type === "APOGEE_RAISE" || preview.type === "PERIGEE_RAISE" || preview.type === "DEORBIT_BURN") {
+    const predictedPerigeeAltitudeKm = readNumberParameter(metadata, "predictedPerigeeAltitudeKm", Number.NaN);
+    const predictedApogeeAltitudeKm = readNumberParameter(metadata, "predictedApogeeAltitudeKm", Number.NaN);
+    if (!Number.isFinite(predictedPerigeeAltitudeKm) || !Number.isFinite(predictedApogeeAltitudeKm)) {
+      return null;
+    }
+    return orbitSummaryFromApsides(current, predictedPerigeeAltitudeKm, predictedApogeeAltitudeKm);
+  }
   return null;
+}
+
+function maneuverTemplateLabel(type: ManeuverTemplateType) {
+  return type
+    .toLowerCase()
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function maneuverTemplateGuidance(type: ManeuverTemplateType) {
+  switch (type) {
+    case "CIRCULARIZATION":
+      return {
+        what: "Convert an elliptical orbit into a circular orbit using a single tangential burn.",
+        when: "Use near apoapsis or periapsis after an insertion or transfer arc.",
+        effect: "Perigee and apogee converge toward the burn altitude.",
+      };
+    case "HOHMANN_TRANSFER":
+      return {
+        what: "Transfer between two near-circular coplanar orbits with two impulses and a coast.",
+        when: "Use for energy-efficient altitude changes when timing is flexible.",
+        effect: "Creates a transfer ellipse, then circularizes at the target altitude.",
+      };
+    case "PLANE_CHANGE":
+      return {
+        what: "Rotate the orbital plane with a normal or anti-normal impulse.",
+        when: "Use at nodes for inclination targeting, or at apoapsis on elliptical orbits to reduce cost.",
+        effect: "Changes inclination while approximately preserving orbit size.",
+      };
+    case "APOGEE_RAISE":
+      return {
+        what: "Raise apogee with a prograde tangential burn.",
+        when: "Use near perigee/current low point to create a higher elliptical transfer orbit.",
+        effect: "Apogee increases while perigee remains near the burn altitude.",
+      };
+    case "PERIGEE_RAISE":
+      return {
+        what: "Raise perigee with a prograde burn at apoapsis.",
+        when: "Use after apogee insertion to lift the low point and reduce reentry risk.",
+        effect: "Perigee increases while apogee remains near the burn altitude.",
+      };
+    case "DEORBIT_BURN":
+      return {
+        what: "Lower perigee with a retrograde burn.",
+        when: "Use for disposal planning or controlled reentry targeting.",
+        effect: "Perigee drops while apogee remains near the burn altitude.",
+      };
+  }
 }
 
 function getConjunctionStatusFromRisk(event: ConjunctionEvent, missDistanceKm: number) {
@@ -6334,6 +6453,15 @@ function ManeuverTemplateModal({
     if (draft.type === "HOHMANN_TRANSFER" && Number.isFinite(targetAltitude) && orbitSummary.currentAltitudeKm != null && Math.abs(targetAltitude - orbitSummary.currentAltitudeKm) < 1) {
       validationMessages.push({ tone: "error", message: "Target orbit altitude must differ from the current altitude by at least 1 km." });
     }
+    if (draft.type === "APOGEE_RAISE" && Number.isFinite(targetAltitude) && orbitSummary.currentAltitudeKm != null && targetAltitude <= orbitSummary.currentAltitudeKm + 1) {
+      validationMessages.push({ tone: "error", message: "Target apogee altitude must be above the current altitude by at least 1 km." });
+    }
+    if (draft.type === "PERIGEE_RAISE" && Number.isFinite(targetAltitude) && orbitSummary.apogeeAltitudeKm != null && targetAltitude >= orbitSummary.apogeeAltitudeKm - 1) {
+      validationMessages.push({ tone: "error", message: "Target perigee altitude must remain below the current apogee altitude." });
+    }
+    if (draft.type === "DEORBIT_BURN" && Number.isFinite(targetAltitude) && orbitSummary.currentAltitudeKm != null && targetAltitude >= orbitSummary.currentAltitudeKm - 1) {
+      validationMessages.push({ tone: "error", message: "Deorbit target altitude must be below the current altitude by at least 1 km." });
+    }
   }
   const hasBlockingValidation = validationMessages.some((item) => item.tone === "error");
   const canPreview = !hasBlockingValidation && !loading;
@@ -6347,6 +6475,8 @@ function ManeuverTemplateModal({
   const estimatedPropellantKg = readNumberParameter(preview?.metadata ?? {}, "estimatedPropellantKg", 0);
   const draftEstimateMps = maneuverTemplateDraftEstimateMps(draft, orbitSummary);
   const predictedOrbitSummary = predictedTemplateOrbitSummary(preview, orbitSummary);
+  const selectedGuidance = maneuverTemplateGuidance(draft.type);
+  const templateTypes: ManeuverTemplateType[] = ["CIRCULARIZATION", "HOHMANN_TRANSFER", "PLANE_CHANGE", "APOGEE_RAISE", "PERIGEE_RAISE", "DEORBIT_BURN"];
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
@@ -6379,7 +6509,9 @@ function ManeuverTemplateModal({
           </div>
 
           <div className="grid grid-cols-3 gap-2 max-sm:grid-cols-1">
-            {(["CIRCULARIZATION", "HOHMANN_TRANSFER", "PLANE_CHANGE"] as const).map((type) => (
+            {templateTypes.map((type) => {
+              const guidance = maneuverTemplateGuidance(type);
+              return (
               <button
                 key={type}
                 type="button"
@@ -6391,20 +6523,21 @@ function ManeuverTemplateModal({
                 }`}
               >
                 <span className="block font-mono text-xs font-semibold uppercase">
-                  {type === "CIRCULARIZATION" ? "Circularization" : type === "HOHMANN_TRANSFER" ? "Hohmann Transfer" : "Plane Change"}
+                  {maneuverTemplateLabel(type)}
                 </span>
                 <span className={`mt-1 block text-xs ${draft.type === type ? "text-slate-800" : "text-zinc-500"}`}>
-                  {type === "CIRCULARIZATION"
-                    ? "Convert an elliptical orbit into a circular orbit using a single burn."
-                    : type === "HOHMANN_TRANSFER"
-                      ? "Transfer between two circular orbits using two burns and a coast phase."
-                      : "Change orbital inclination by rotating the orbital plane."}
+                  {guidance.what}
                 </span>
               </button>
-            ))}
+            );})}
           </div>
 
           <div className="mt-5 grid gap-4">
+            <div className="grid gap-2 border border-cyan-300/15 bg-black/25 p-3 text-xs leading-5 text-zinc-400 md:grid-cols-3">
+              <p><span className="font-semibold text-cyan-100">What:</span> {selectedGuidance.what}</p>
+              <p><span className="font-semibold text-cyan-100">When:</span> {selectedGuidance.when}</p>
+              <p><span className="font-semibold text-cyan-100">Effect:</span> {selectedGuidance.effect}</p>
+            </div>
             {draft.type === "PLANE_CHANGE" ? (
               <div className="grid grid-cols-2 gap-3 max-sm:grid-cols-1">
                 <TimelineField label="Inclination change deg">
@@ -6436,7 +6569,15 @@ function ManeuverTemplateModal({
                 </div>
               </div>
             ) : (
-              <TimelineField label={draft.type === "CIRCULARIZATION" ? "Target altitude km" : "Target orbit altitude km"}>
+              <TimelineField label={
+                draft.type === "CIRCULARIZATION"
+                  ? "Target circularization altitude km"
+                  : draft.type === "APOGEE_RAISE"
+                    ? "Target apogee altitude km"
+                    : draft.type === "PERIGEE_RAISE" || draft.type === "DEORBIT_BURN"
+                      ? "Target perigee altitude km"
+                      : "Target orbit altitude km"
+              }>
                 <input
                   value={draft.targetAltitudeKm}
                   onChange={(event) => onDraftChange({ ...draft, targetAltitudeKm: event.target.value })}
@@ -6456,7 +6597,11 @@ function ManeuverTemplateModal({
               <div className="border border-white/10 bg-black/20 p-3">
                 <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Generated Primitives</p>
                 <p className="mt-1 text-xs leading-5 text-zinc-400">
-                  {draft.type === "HOHMANN_TRANSFER" ? "Impulsive burn, coast, impulsive burn." : draft.type === "PLANE_CHANGE" ? "Optional coast, impulsive burn." : "Optional coast, impulsive burn."}
+                  {draft.type === "HOHMANN_TRANSFER"
+                    ? "Impulsive burn, coast, impulsive burn."
+                    : draft.type === "PERIGEE_RAISE" || draft.type === "PLANE_CHANGE" || draft.type === "CIRCULARIZATION"
+                      ? "Optional coast, impulsive burn."
+                      : "Impulsive burn."}
                 </p>
               </div>
             </div>
@@ -6511,11 +6656,17 @@ function ManeuverTemplateModal({
                     <TemplateMetric label={preview.type === "PLANE_CHANGE" ? "Execution" : "Location"} value={preview.type === "PLANE_CHANGE" ? `${executionLocation} / ${executionStrategy.replaceAll("_", " ")}` : "Template-defined"} />
                   </div>
                   {predictedOrbitSummary && (
-                    <div className="mt-3">
+                    <div className="mt-3 grid gap-3">
                       <OrbitSummaryPanel
                         summary={predictedOrbitSummary}
                         title="Predicted Orbit"
                         subtitle="First-order template target orbit before high-fidelity propagation."
+                      />
+                      <OrbitComparisonPanel before={orbitSummary} after={predictedOrbitSummary} />
+                      <ManeuverAnalysisPanel
+                        preview={preview}
+                        before={orbitSummary}
+                        after={predictedOrbitSummary}
                       />
                     </div>
                   )}
@@ -6576,6 +6727,95 @@ function TemplateMetric({ label, value }: { label: string; value: string }) {
       <p className="mt-1 break-words font-mono text-xs font-semibold leading-5 text-zinc-100">{value}</p>
     </div>
   );
+}
+
+function OrbitComparisonPanel({ before, after }: { before: OrbitSummary; after: OrbitSummary }) {
+  const rows = [
+    { label: "Perigee", before: before.perigeeAltitudeKm, after: after.perigeeAltitudeKm, unit: "km", digits: 2 },
+    { label: "Apogee", before: before.apogeeAltitudeKm, after: after.apogeeAltitudeKm, unit: "km", digits: 2 },
+    { label: "Inclination", before: before.inclinationDeg, after: after.inclinationDeg, unit: "deg", digits: 3 },
+    { label: "Eccentricity", before: before.eccentricity, after: after.eccentricity, unit: "", digits: 6 },
+  ];
+  return (
+    <div className="border border-cyan-300/15 bg-black/25 p-3">
+      <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Visual Orbit Comparison</p>
+      <div className="mt-3 grid gap-2">
+        {rows.map((row) => {
+          const changed = row.before != null && row.after != null && Math.abs(row.after - row.before) > (row.unit === "" ? 1.0e-6 : 0.01);
+          return (
+            <div key={row.label} className="grid grid-cols-[110px_1fr_1fr_90px] items-center gap-2 border border-white/10 bg-black/20 px-3 py-2 text-xs max-sm:grid-cols-2">
+              <span className="font-mono text-[10px] uppercase text-zinc-500">{row.label}</span>
+              <span className="font-mono text-zinc-300">{formatComparisonValue(row.before, row.unit, row.digits)}</span>
+              <span className={`font-mono ${changed ? "text-cyan-100" : "text-zinc-400"}`}>{formatComparisonValue(row.after, row.unit, row.digits)}</span>
+              <span className={`font-mono text-[10px] uppercase ${changed ? "text-lime-100" : "text-zinc-600"}`}>
+                {changed && row.before != null && row.after != null ? signedDelta(row.after - row.before, row.unit, row.digits) : "No change"}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ManeuverAnalysisPanel({
+  preview,
+  before,
+  after,
+}: {
+  preview: ManeuverTemplatePreview;
+  before: OrbitSummary;
+  after: OrbitSummary;
+}) {
+  const totalDeltaV = readNumberParameter(preview.metadata ?? {}, "totalDeltaVMps", 0);
+  const estimatedPropellantKg = readNumberParameter(preview.metadata ?? {}, "estimatedPropellantKg", 0);
+  const transferDuration = readNumberParameter(preview.metadata ?? {}, "transferTimeSeconds", readNumberParameter(preview.metadata ?? {}, "coastSeconds", 0));
+  const inclinationChange = readNumberParameter(preview.metadata ?? {}, "inclinationChangeDeg", (after.inclinationDeg ?? 0) - (before.inclinationDeg ?? 0));
+  const altitudeChange = after.apogeeAltitudeKm != null && before.apogeeAltitudeKm != null
+    ? after.apogeeAltitudeKm - before.apogeeAltitudeKm
+    : after.currentAltitudeKm != null && before.currentAltitudeKm != null
+      ? after.currentAltitudeKm - before.currentAltitudeKm
+      : null;
+  const burnDurations = preview.events
+    .filter((event) => event.type !== "COAST")
+    .map((event) => readNumberParameter(event.parameters ?? {}, "durationSeconds", 0));
+
+  return (
+    <div className="border border-lime-300/15 bg-lime-300/[0.03] p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-lime-200">Maneuver Analysis</p>
+          <p className="mt-1 text-xs leading-5 text-zinc-500">First-order mission impact from the generated primitive events.</p>
+        </div>
+        <span className="border border-lime-300/25 px-2 py-1 font-mono text-[10px] uppercase text-lime-100">
+          {maneuverTemplateLabel(preview.type)}
+        </span>
+      </div>
+      <div className="mt-3 grid gap-2 md:grid-cols-4">
+        <TemplateMetric label="Total dV" value={`${formatNumber(totalDeltaV, 3)} m/s`} />
+        <TemplateMetric label="Propellant" value={`${formatNumber(estimatedPropellantKg, 3)} kg`} />
+        <TemplateMetric label="Burns" value={String(preview.events.filter((event) => event.type !== "COAST").length)} />
+        <TemplateMetric label="Transfer/Coast" value={transferDuration > 0 ? secondsToDurationLabel(transferDuration) : "Immediate"} />
+        <TemplateMetric label="Inclination Change" value={`${formatNumber(inclinationChange, 3)} deg`} />
+        <TemplateMetric label="Altitude Change" value={altitudeChange == null ? "Unavailable" : signedDelta(altitudeChange, "km", 2)} />
+        <TemplateMetric label="Before Orbit" value={before.classification} />
+        <TemplateMetric label="Result Orbit" value={after.classification} />
+        <TemplateMetric label="Burn Durations" value={burnDurations.length === 0 ? "None" : burnDurations.map((seconds) => seconds > 0 ? secondsToDurationLabel(seconds) : "Impulse").join(", ")} />
+      </div>
+    </div>
+  );
+}
+
+function formatComparisonValue(value: number | null, unit: string, digits: number) {
+  if (value == null || !Number.isFinite(value)) {
+    return "--";
+  }
+  return `${formatNumber(value, digits)}${unit ? ` ${unit}` : ""}`;
+}
+
+function signedDelta(value: number, unit: string, digits: number) {
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${formatNumber(value, digits)}${unit ? ` ${unit}` : ""}`;
 }
 
 function ManeuverTemplatePreviewRow({ event, index }: { event: CreateTimelineEventRequest; index: number }) {

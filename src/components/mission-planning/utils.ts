@@ -270,6 +270,113 @@ export function timelineAnalysis(mission: BackendMission | null, events: Backend
   };
 }
 
+export type MissionFuelBudget = {
+  initialMassKg: number | null;
+  dryMassKg: number | null;
+  initialFuelKg: number | null;
+  consumedFuelKg: number;
+  remainingFuelKg: number | null;
+  fuelMarginPercent: number | null;
+  remainingDeltaVMps: number | null;
+  warnings: string[];
+};
+
+export type MissionTimelineAnalytics = {
+  totalCoastSeconds: number;
+  totalBurnTimeSeconds: number;
+  burnCount: number;
+  finiteBurnCount: number;
+  impulsiveBurnCount: number;
+  averageDeltaVMps: number;
+  totalDeltaVMps: number;
+  fuelBudget: MissionFuelBudget;
+};
+
+export function missionFuelBudget(events: BackendMissionTimelineEvent[], profile: BackendPropagationProfile | null): MissionFuelBudget {
+  const warnings: string[] = [];
+  const consumedFuelKg = events.reduce((sum, event) => {
+    if (!event.enabled || event.type === "COAST") {
+      return sum;
+    }
+    if (profile) {
+      return sum + estimatePropellantKg(estimatedEventDeltaVMps(event), profile.dryMassKg + profile.fuelMassKg, profile.nominalIspS);
+    }
+    const metadataPropellant = readNumberParameter(event.parameters ?? {}, "estimatedPropellantKg", Number.NaN);
+    if (Number.isFinite(metadataPropellant)) {
+      return sum + Math.max(0, metadataPropellant);
+    }
+    return sum;
+  }, 0);
+
+  if (!profile) {
+    return {
+      initialMassKg: null,
+      dryMassKg: null,
+      initialFuelKg: null,
+      consumedFuelKg,
+      remainingFuelKg: null,
+      fuelMarginPercent: null,
+      remainingDeltaVMps: null,
+      warnings,
+    };
+  }
+
+  const initialMassKg = profile.dryMassKg + profile.fuelMassKg;
+  const remainingFuelKg = profile.fuelMassKg - consumedFuelKg;
+  const usableRemainingFuelKg = Math.max(0, remainingFuelKg);
+  const fuelMarginPercent = profile.fuelMassKg > 0 ? (remainingFuelKg / profile.fuelMassKg) * 100 : null;
+  const remainingDeltaVMps = profile.nominalIspS > 0 && profile.dryMassKg > 0
+    ? profile.nominalIspS * 9.80665 * Math.log((profile.dryMassKg + usableRemainingFuelKg) / profile.dryMassKg)
+    : null;
+
+  if (remainingFuelKg < 0) {
+    warnings.push(`Planned maneuvers exceed available fuel by ${Math.abs(remainingFuelKg).toFixed(2)} kg.`);
+  } else if (fuelMarginPercent != null && fuelMarginPercent < 10) {
+    warnings.push(`Fuel margin is ${fuelMarginPercent.toFixed(1)}%; reserve is below the 10% planning threshold.`);
+  }
+
+  return {
+    initialMassKg,
+    dryMassKg: profile.dryMassKg,
+    initialFuelKg: profile.fuelMassKg,
+    consumedFuelKg,
+    remainingFuelKg,
+    fuelMarginPercent,
+    remainingDeltaVMps,
+    warnings,
+  };
+}
+
+export function missionTimelineAnalytics(
+  mission: BackendMission | null,
+  events: BackendMissionTimelineEvent[],
+  profile: BackendPropagationProfile | null,
+): MissionTimelineAnalytics {
+  const resolved = resolveEventMetOffsets(mission, events);
+  const ordered = events
+    .filter((event) => event.enabled)
+    .toSorted((a, b) => (resolved.offsets.get(a.id) ?? Number.POSITIVE_INFINITY) - (resolved.offsets.get(b.id) ?? Number.POSITIVE_INFINITY) || a.sequenceIndex - b.sequenceIndex);
+  const totalCoastSeconds = ordered.reduce((sum, event, index) => {
+    return event.type === "COAST" ? sum + timelineEventDurationSeconds(event, ordered[index + 1] ?? null, mission) : sum;
+  }, 0);
+  const totalBurnTimeSeconds = ordered.reduce((sum, event) => {
+    return event.type === "FINITE_BURN" ? sum + readNumberParameter(event.parameters ?? {}, "durationSeconds", 0) : sum;
+  }, 0);
+  const burnEvents = ordered.filter((event) => event.type === "FINITE_BURN" || event.type === "IMPULSIVE_BURN");
+  const totalDeltaVMps = burnEvents.reduce((sum, event) => sum + estimatedEventDeltaVMps(event), 0);
+
+  return {
+    totalCoastSeconds,
+    totalBurnTimeSeconds,
+    burnCount: burnEvents.length,
+    finiteBurnCount: burnEvents.filter((event) => event.type === "FINITE_BURN").length,
+    impulsiveBurnCount: burnEvents.filter((event) => event.type === "IMPULSIVE_BURN").length,
+    averageDeltaVMps: burnEvents.length > 0 ? totalDeltaVMps / burnEvents.length : 0,
+    totalDeltaVMps,
+    fuelBudget: missionFuelBudget(events, profile),
+  };
+}
+
 export type MissionValidationResult = {
   errors: string[];
   warnings: string[];
@@ -334,14 +441,14 @@ export function validateMissionPlan(
   });
 
   const totalPropellantKg = events.reduce((sum, event) => {
+    if (profile && event.type !== "COAST") {
+      return sum + estimatePropellantKg(estimatedEventDeltaVMps(event), profile.dryMassKg + profile.fuelMassKg, profile.nominalIspS);
+    }
     const metadataPropellant = readNumberParameter(event.parameters ?? {}, "estimatedPropellantKg", Number.NaN);
     if (Number.isFinite(metadataPropellant)) {
       return sum + metadataPropellant;
     }
-    if (!profile || event.type === "COAST") {
-      return sum;
-    }
-    return sum + estimatePropellantKg(estimatedEventDeltaVMps(event), profile.dryMassKg + profile.fuelMassKg, profile.nominalIspS);
+    return sum;
   }, 0);
   if (profile && totalPropellantKg > profile.fuelMassKg) {
     errors.push(`Estimated propellant ${totalPropellantKg.toFixed(2)} kg exceeds available fuel ${profile.fuelMassKg.toFixed(2)} kg.`);
