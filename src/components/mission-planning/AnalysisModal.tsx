@@ -7,7 +7,7 @@ import type { AnalysisPresetId, BackendAnalysisConfigResponse, BackendCapability
 import type { MissionTrajectoryOverlay } from "./types";
 import { PropagationProfileEditor } from "./PropagationProfileEditor";
 import { DetailMetric, HudPanel } from "./ui";
-import { compactIsoUtc, readNumberParameter, readStringParameter, secondsToDurationLabel } from "./utils";
+import { compactIsoUtc, estimatedEventDeltaVMps, readNumberParameter, readStringParameter, secondsToDurationLabel } from "./utils";
 
 const analysisPresetOptions = [
   { id: "FAST_PREVIEW", label: "Fast" },
@@ -98,8 +98,14 @@ export function AnalysisModalContent({
   onToggleConjunctions: () => void;
 }) {
   const [tab, setTab] = useState<"trajectory" | "range" | "maneuver" | "propagation" | "conjunction">("trajectory");
-  const missionBurnEvents = useMemo(() => missionEvents.filter((event) => event.type === "FINITE_BURN"), [missionEvents]);
+  const missionBurnEvents = useMemo(
+    () => missionEvents.filter((event) => event.type === "FINITE_BURN" || event.type === "IMPULSIVE_BURN"),
+    [missionEvents],
+  );
+  const finiteBurnCount = missionBurnEvents.filter((event) => event.type === "FINITE_BURN").length;
+  const impulsiveBurnCount = missionBurnEvents.filter((event) => event.type === "IMPULSIVE_BURN").length;
   const totalBurnDuration = missionBurnEvents.reduce((sum, event) => sum + readNumberParameter(event.parameters ?? {}, "durationSeconds", 0), 0);
+  const totalDeltaVMps = missionBurnEvents.reduce((sum, event) => sum + estimatedEventDeltaVMps(event), 0);
   const visiblePropagationConfig = missionPropagationProfile ?? analysisConfig?.config ?? null;
 
   return (
@@ -232,17 +238,19 @@ export function AnalysisModalContent({
             <HudPanel>
               <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Mission Timeline Burn Summary</p>
               <p className="mt-2 text-xs leading-5 text-zinc-500">
-                This view only reflects finite-burn events from the active mission timeline. Legacy maneuver-event overlays are hidden from the operator workflow.
+                This view reflects finite and impulsive burn events from the active mission timeline. Legacy maneuver-event overlays are hidden from the operator workflow.
               </p>
               <div className="mt-3 grid grid-cols-2 gap-2">
                 <DetailMetric label="Burn Count" value={String(missionBurnEvents.length)} />
                 <DetailMetric label="Duration" value={secondsToDurationLabel(totalBurnDuration)} />
-                <DetailMetric label="Delta-V" value="Not computed" />
+                <DetailMetric label="Delta-V" value={`${formatNumber(totalDeltaVMps, 2)} m/s`} />
                 <DetailMetric label="Timeline" value={missionBurnEvents.length > 0 ? "Available" : "--"} />
+                <DetailMetric label="Finite" value={String(finiteBurnCount)} />
+                <DetailMetric label="Impulsive" value={String(impulsiveBurnCount)} />
               </div>
               <div className="thin-scrollbar mt-3 max-h-[42vh] space-y-2 overflow-y-scroll pr-1">
                 {missionBurnEvents.length === 0 ? (
-                  <p className="border border-white/10 bg-black/25 px-3 py-2 text-xs text-zinc-500">No finite-burn mission events found.</p>
+                  <p className="border border-white/10 bg-black/25 px-3 py-2 text-xs text-zinc-500">No maneuver burn mission events found.</p>
                 ) : (
                   missionBurnEvents.toSorted((a, b) => a.sequenceIndex - b.sequenceIndex).map((event) => (
                     <div key={event.id} className="border border-rose-300/25 bg-rose-300/[0.04] p-3">
@@ -251,11 +259,13 @@ export function AnalysisModalContent({
                           <p className="truncate text-sm font-semibold text-white">{event.name}</p>
                           <p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">{compactIsoUtc(event.executionTime)}</p>
                         </div>
-                        <span className="border border-rose-300/40 px-2 py-0.5 font-mono text-[10px] uppercase text-rose-100">Burn</span>
+                        <span className="border border-rose-300/40 px-2 py-0.5 font-mono text-[10px] uppercase text-rose-100">
+                          {event.type === "IMPULSIVE_BURN" ? "Impulse" : "Finite"}
+                        </span>
                       </div>
                       <div className="mt-2 grid grid-cols-3 gap-2">
-                        <DetailMetric label="Duration" value={`${readNumberParameter(event.parameters ?? {}, "durationSeconds", 0)}s`} />
-                        <DetailMetric label="Thrust" value={`${readNumberParameter(event.parameters ?? {}, "thrustNewton", 0)} N`} />
+                        <DetailMetric label={event.type === "IMPULSIVE_BURN" ? "Delta-V" : "Duration"} value={event.type === "IMPULSIVE_BURN" ? `${formatNumber(estimatedEventDeltaVMps(event), 2)} m/s` : `${readNumberParameter(event.parameters ?? {}, "durationSeconds", 0)}s`} />
+                        <DetailMetric label={event.type === "IMPULSIVE_BURN" ? "Isp" : "Thrust"} value={event.type === "IMPULSIVE_BURN" ? `${readNumberParameter(event.parameters ?? {}, "ispSeconds", 0)}s` : `${readNumberParameter(event.parameters ?? {}, "thrustNewton", 0)} N`} />
                         <DetailMetric label="Frame" value={readStringParameter(event.parameters ?? {}, "directionFrame", "TNW")} />
                       </div>
                     </div>
