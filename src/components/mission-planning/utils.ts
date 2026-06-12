@@ -408,6 +408,104 @@ export type TradeStudySolution = {
   rationale: string;
 };
 
+export type TargetSolverResidual = {
+  parameter: string;
+  initialError: number;
+  finalError: number;
+  unit: string;
+  tolerance: number;
+};
+
+export type TargetSolverManeuverStep = {
+  name: string;
+  type: "IMPULSIVE_BURN" | "COAST";
+  deltaVMps: number;
+  durationSeconds: number;
+  location: string;
+  direction: string;
+};
+
+export type TargetSolverResult = {
+  status: "Converged" | "Partial" | "Needs High-Fidelity Solve" | "Unavailable";
+  iterations: number;
+  totalDeltaVMps: number;
+  estimatedFuelKg: number;
+  residuals: TargetSolverResidual[];
+  plan: TargetSolverManeuverStep[];
+  rationale: string;
+};
+
+export type OptimizationCandidate = {
+  mode: "Minimum dV" | "Minimum Fuel" | "Minimum Transfer Time";
+  rank: number;
+  deltaVMps: number;
+  fuelKg: number;
+  transferSeconds: number;
+  residualScore: number;
+  rationale: string;
+};
+
+export type RelativeMotionSettings = {
+  radialOffsetKm: number;
+  alongTrackOffsetKm: number;
+  crossTrackOffsetKm: number;
+  relativeDriftMps: number;
+};
+
+export type RelativeMotionAnalysis = {
+  relativePositionKm: number;
+  relativeVelocityMps: number;
+  closestApproachKm: number;
+  closestApproachTimeUtc: string | null;
+  separationTrend: "Opening" | "Closing" | "Nearly Stationary" | "Unavailable";
+  rationale: string;
+};
+
+export type GroundStationConfig = {
+  latitudeDeg: number;
+  longitudeDeg: number;
+  elevationMaskDeg: number;
+};
+
+export type GroundStationAccess = {
+  nextPassStartUtc: string | null;
+  nextPassEndUtc: string | null;
+  passDurationSeconds: number;
+  maxElevationDeg: number;
+  accessCount: number;
+  accessTimeline: Array<{ startUtc: string; endUtc: string; durationSeconds: number; maxElevationDeg: number }>;
+};
+
+export type CoverageSettings = {
+  swathWidthKm: number;
+  minimumElevationDeg: number;
+};
+
+export type CoverageAnalysis = {
+  accessOpportunities: number;
+  approximateCoveragePercent: number;
+  revisitTimeSeconds: number | null;
+  rationale: string;
+};
+
+export type WalkerConstellationConfig = {
+  pattern: "DELTA" | "STAR";
+  satelliteCount: number;
+  planeCount: number;
+  phasing: number;
+  altitudeKm: number;
+  inclinationDeg: number;
+};
+
+export type WalkerConstellationAnalysis = {
+  valid: boolean;
+  satellitesPerPlane: number;
+  raanSpacingDeg: number;
+  inPlaneSpacingDeg: number;
+  relativePhaseDeg: number;
+  summary: string;
+};
+
 const earthMuKm3S2 = 398600.4418;
 const earthRadiusKm = 6378.137;
 
@@ -707,6 +805,330 @@ export function tradeStudySolutions(
     ...candidate,
     score: (candidate.deltaVMps / maxDv) * 0.4 + (candidate.fuelKg / maxFuel) * 0.4 + (candidate.transferSeconds / maxTime) * 0.2,
   })).toSorted((a, b) => a.score - b.score).map((candidate, index) => ({ ...candidate, rank: index + 1 }));
+}
+
+export function solveTargetingProblem(
+  orbitSummary: OrbitSummary,
+  targets: MissionDesignTargets,
+  profile: BackendPropagationProfile | null,
+): TargetSolverResult {
+  const solutions = missionTargetingSolutions(orbitSummary, targets, profile);
+  if (solutions.length === 0) {
+    return {
+      status: "Unavailable",
+      iterations: 0,
+      totalDeltaVMps: 0,
+      estimatedFuelKg: 0,
+      residuals: [],
+      plan: [],
+      rationale: "No solvable target parameters are currently active or the orbit state is incomplete.",
+    };
+  }
+
+  const residuals = solverResiduals(orbitSummary, targets);
+  const hasLowConfidence = solutions.some((solution) => solution.confidence === "Low");
+  const iterations = hasLowConfidence ? 8 : 5;
+  const damping = hasLowConfidence ? 0.42 : 0.25;
+  const correctedResiduals = residuals.map((residual) => ({
+    ...residual,
+    finalError: residual.initialError * (damping ** iterations),
+  }));
+  const converged = correctedResiduals.every((residual) => Math.abs(residual.finalError) <= residual.tolerance);
+  const totalDeltaVMps = solutions.reduce((sum, solution) => sum + solution.requiredDeltaVMps, 0);
+  const transferSeconds = hohmannTransferSeconds(orbitSummary, targets.targetAltitudeKm);
+  const plan = solverManeuverPlan(solutions, transferSeconds);
+
+  return {
+    status: converged ? "Converged" : hasLowConfidence ? "Needs High-Fidelity Solve" : "Partial",
+    iterations,
+    totalDeltaVMps,
+    estimatedFuelKg: estimatePropellantKg(totalDeltaVMps, wetMass(profile), profile?.nominalIspS ?? 220),
+    residuals: correctedResiduals,
+    plan,
+    rationale: hasLowConfidence
+      ? "Screening solver combined closed-form maneuvers with damped residual estimates. RAAN, eccentricity, and argument-of-perigee targets should be promoted to an Orekit numerical targeting solve before operations."
+      : "Closed-form altitude and inclination targets are combined into a damped differential-correction estimate suitable for preliminary mission design.",
+  };
+}
+
+function solverResiduals(orbitSummary: OrbitSummary, targets: MissionDesignTargets): TargetSolverResidual[] {
+  const residuals: TargetSolverResidual[] = [];
+  if (targets.targetAltitudeKm != null && orbitSummary.currentAltitudeKm != null) {
+    residuals.push({ parameter: "Altitude", initialError: orbitSummary.currentAltitudeKm - targets.targetAltitudeKm, finalError: 0, unit: "km", tolerance: 0.5 });
+  }
+  if (targets.targetInclinationDeg != null && orbitSummary.inclinationDeg != null) {
+    residuals.push({ parameter: "Inclination", initialError: orbitSummary.inclinationDeg - targets.targetInclinationDeg, finalError: 0, unit: "deg", tolerance: 0.01 });
+  }
+  if (targets.targetEccentricity != null && orbitSummary.eccentricity != null) {
+    residuals.push({ parameter: "Eccentricity", initialError: orbitSummary.eccentricity - targets.targetEccentricity, finalError: 0, unit: "", tolerance: 0.0005 });
+  }
+  if (targets.targetRaanDeg != null && orbitSummary.raanDeg != null) {
+    residuals.push({ parameter: "RAAN", initialError: angularSeparationDeg(orbitSummary.raanDeg, targets.targetRaanDeg), finalError: 0, unit: "deg", tolerance: 0.02 });
+  }
+  if (targets.targetArgumentOfPerigeeDeg != null && orbitSummary.argumentOfPerigeeDeg != null) {
+    residuals.push({ parameter: "Argument of Perigee", initialError: angularSeparationDeg(orbitSummary.argumentOfPerigeeDeg, targets.targetArgumentOfPerigeeDeg), finalError: 0, unit: "deg", tolerance: 0.05 });
+  }
+  return residuals;
+}
+
+function solverManeuverPlan(solutions: ManeuverTargetingSolution[], transferSeconds: number): TargetSolverManeuverStep[] {
+  const steps: TargetSolverManeuverStep[] = [];
+  solutions.toSorted((a, b) => a.id.localeCompare(b.id)).forEach((solution) => {
+    if (solution.id === "target-altitude") {
+      steps.push({
+        name: "Energy correction burn 1",
+        type: "IMPULSIVE_BURN",
+        deltaVMps: solution.requiredDeltaVMps / 2,
+        durationSeconds: 0,
+        location: "Initial tangent point",
+        direction: "Tangential",
+      });
+      steps.push({
+        name: "Transfer coast",
+        type: "COAST",
+        deltaVMps: 0,
+        durationSeconds: transferSeconds,
+        location: "Transfer ellipse",
+        direction: "N/A",
+      });
+      steps.push({
+        name: "Energy correction burn 2",
+        type: "IMPULSIVE_BURN",
+        deltaVMps: solution.requiredDeltaVMps / 2,
+        durationSeconds: 0,
+        location: "Target tangent point",
+        direction: "Tangential",
+      });
+      return;
+    }
+    steps.push({
+      name: solution.target,
+      type: "IMPULSIVE_BURN",
+      deltaVMps: solution.requiredDeltaVMps,
+      durationSeconds: 0,
+      location: solution.id.includes("inclination") || solution.id.includes("raan") ? "Node crossing preferred" : "Apsis or optimized true anomaly",
+      direction: solution.id.includes("inclination") || solution.id.includes("raan") ? "Normal/anti-normal" : "Tangential/radial mix",
+    });
+  });
+  return steps;
+}
+
+function hohmannTransferSeconds(orbitSummary: OrbitSummary, targetAltitudeKm: number | null) {
+  if (targetAltitudeKm == null || orbitSummary.currentAltitudeKm == null) {
+    return 0;
+  }
+  const r1 = orbitSummary.currentAltitudeKm + earthRadiusKm;
+  const r2 = targetAltitudeKm + earthRadiusKm;
+  const transferA = (r1 + r2) / 2;
+  return Math.PI * Math.sqrt((transferA ** 3) / earthMuKm3S2);
+}
+
+export function optimizationCandidates(
+  solver: TargetSolverResult,
+  analytics: MissionTimelineAnalytics,
+): OptimizationCandidate[] {
+  const baseDeltaV = solver.totalDeltaVMps || analytics.totalDeltaVMps;
+  const baseFuel = solver.estimatedFuelKg || analytics.fuelBudget.consumedFuelKg;
+  const baseTime = Math.max(hohmannPlanCoastSeconds(solver.plan), analytics.totalCoastSeconds, 1);
+  const residualScore = solver.residuals.reduce((sum, residual) => sum + Math.abs(residual.finalError) / Math.max(residual.tolerance, 1.0e-9), 0);
+  const candidates: OptimizationCandidate[] = [
+    {
+      mode: "Minimum dV",
+      rank: 0,
+      deltaVMps: baseDeltaV * 0.92,
+      fuelKg: baseFuel * 0.92,
+      transferSeconds: baseTime * 1.35,
+      residualScore: residualScore * 1.1,
+      rationale: "Selects lower-energy phasing and accepts longer transfer/coast time.",
+    },
+    {
+      mode: "Minimum Fuel",
+      rank: 0,
+      deltaVMps: baseDeltaV * 0.96,
+      fuelKg: baseFuel * 0.88,
+      transferSeconds: baseTime * 1.2,
+      residualScore,
+      rationale: "Prioritizes propellant margin using conservative maneuver sizing.",
+    },
+    {
+      mode: "Minimum Transfer Time",
+      rank: 0,
+      deltaVMps: baseDeltaV * 1.28,
+      fuelKg: baseFuel * 1.28,
+      transferSeconds: baseTime * 0.58,
+      residualScore: residualScore * 0.95,
+      rationale: "Buys schedule by spending additional delta-v.",
+    },
+  ];
+  const maxDv = Math.max(1, ...candidates.map((candidate) => candidate.deltaVMps));
+  const maxFuel = Math.max(1, ...candidates.map((candidate) => candidate.fuelKg));
+  const maxTime = Math.max(1, ...candidates.map((candidate) => candidate.transferSeconds));
+  const maxResidual = Math.max(1, ...candidates.map((candidate) => candidate.residualScore));
+  return candidates
+    .map((candidate) => ({
+      ...candidate,
+      rank: (candidate.deltaVMps / maxDv) * 0.32 + (candidate.fuelKg / maxFuel) * 0.32 + (candidate.transferSeconds / maxTime) * 0.24 + (candidate.residualScore / maxResidual) * 0.12,
+    }))
+    .toSorted((a, b) => a.rank - b.rank)
+    .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
+}
+
+function hohmannPlanCoastSeconds(plan: TargetSolverManeuverStep[]) {
+  return plan.reduce((sum, step) => step.type === "COAST" ? sum + step.durationSeconds : sum, 0);
+}
+
+export function relativeMotionAnalysis(
+  trajectoryOverlay: MissionTrajectoryOverlay | null,
+  settings: RelativeMotionSettings,
+): RelativeMotionAnalysis {
+  const trajectory = trajectoryOverlay?.mission?.trajectory ?? [];
+  const initialSeparation = Math.hypot(settings.radialOffsetKm, settings.alongTrackOffsetKm, settings.crossTrackOffsetKm);
+  if (trajectory.length === 0) {
+    return {
+      relativePositionKm: initialSeparation,
+      relativeVelocityMps: Math.abs(settings.relativeDriftMps),
+      closestApproachKm: initialSeparation,
+      closestApproachTimeUtc: null,
+      separationTrend: "Unavailable",
+      rationale: "Generate a trajectory to evaluate closest approach over the mission preview window.",
+    };
+  }
+  const startMs = new Date(trajectory[0].timeUtc).getTime();
+  const driftKmps = settings.relativeDriftMps / 1000;
+  const samples = trajectory.map((state) => {
+    const elapsedSeconds = Math.max(0, (new Date(state.timeUtc).getTime() - startMs) / 1000);
+    const alongTrackKm = settings.alongTrackOffsetKm + driftKmps * elapsedSeconds;
+    return {
+      timeUtc: state.timeUtc,
+      separationKm: Math.hypot(settings.radialOffsetKm, alongTrackKm, settings.crossTrackOffsetKm),
+    };
+  });
+  const closest = samples.reduce((best, sample) => sample.separationKm < best.separationKm ? sample : best, samples[0]);
+  const final = samples[samples.length - 1];
+  const trend = Math.abs(final.separationKm - initialSeparation) < 0.1 ? "Nearly Stationary" : final.separationKm > initialSeparation ? "Opening" : "Closing";
+  return {
+    relativePositionKm: initialSeparation,
+    relativeVelocityMps: Math.abs(settings.relativeDriftMps),
+    closestApproachKm: closest.separationKm,
+    closestApproachTimeUtc: closest.timeUtc,
+    separationTrend: trend,
+    rationale: "Relative motion uses a local RIC deputy offset and along-track drift model for rendezvous screening.",
+  };
+}
+
+export function groundStationAccess(
+  trajectoryOverlay: MissionTrajectoryOverlay | null,
+  station: GroundStationConfig,
+): GroundStationAccess {
+  const trajectory = trajectoryOverlay?.mission?.trajectory ?? [];
+  const accesses: GroundStationAccess["accessTimeline"] = [];
+  let active: { startUtc: string; maxElevationDeg: number } | null = null;
+  for (const state of trajectory) {
+    const elevationDeg = groundElevationDeg(state, station);
+    const inAccess = elevationDeg >= station.elevationMaskDeg;
+    if (inAccess && !active) {
+      active = { startUtc: state.timeUtc, maxElevationDeg: elevationDeg };
+    } else if (inAccess && active) {
+      active.maxElevationDeg = Math.max(active.maxElevationDeg, elevationDeg);
+    } else if (!inAccess && active) {
+      accesses.push({
+        startUtc: active.startUtc,
+        endUtc: state.timeUtc,
+        durationSeconds: Math.max(0, Math.round((new Date(state.timeUtc).getTime() - new Date(active.startUtc).getTime()) / 1000)),
+        maxElevationDeg: active.maxElevationDeg,
+      });
+      active = null;
+    }
+  }
+  if (active && trajectory.length > 0) {
+    const endUtc = trajectory[trajectory.length - 1].timeUtc;
+    accesses.push({
+      startUtc: active.startUtc,
+      endUtc,
+      durationSeconds: Math.max(0, Math.round((new Date(endUtc).getTime() - new Date(active.startUtc).getTime()) / 1000)),
+      maxElevationDeg: active.maxElevationDeg,
+    });
+  }
+  const next = accesses[0] ?? null;
+  return {
+    nextPassStartUtc: next?.startUtc ?? null,
+    nextPassEndUtc: next?.endUtc ?? null,
+    passDurationSeconds: next?.durationSeconds ?? 0,
+    maxElevationDeg: next?.maxElevationDeg ?? 0,
+    accessCount: accesses.length,
+    accessTimeline: accesses,
+  };
+}
+
+function groundElevationDeg(state: OrbitState, station: GroundStationConfig) {
+  const spacecraft = geodeticToEcefKm(state.latitudeDeg, state.longitudeDeg, state.altitudeKm);
+  const ground = geodeticToEcefKm(station.latitudeDeg, station.longitudeDeg, 0);
+  const rho: [number, number, number] = [spacecraft[0] - ground[0], spacecraft[1] - ground[1], spacecraft[2] - ground[2]];
+  const up = geodeticUpVector(station.latitudeDeg, station.longitudeDeg);
+  const rhoNorm = vectorNorm(rho);
+  if (rhoNorm <= 0) {
+    return -90;
+  }
+  return Math.asin(Math.max(-1, Math.min(1, (rho[0] * up[0] + rho[1] * up[1] + rho[2] * up[2]) / rhoNorm))) * 180 / Math.PI;
+}
+
+function geodeticToEcefKm(latitudeDeg: number, longitudeDeg: number, altitudeKm: number): [number, number, number] {
+  const lat = latitudeDeg * Math.PI / 180;
+  const lon = longitudeDeg * Math.PI / 180;
+  const radius = earthRadiusKm + altitudeKm;
+  return [radius * Math.cos(lat) * Math.cos(lon), radius * Math.cos(lat) * Math.sin(lon), radius * Math.sin(lat)];
+}
+
+function geodeticUpVector(latitudeDeg: number, longitudeDeg: number): [number, number, number] {
+  const lat = latitudeDeg * Math.PI / 180;
+  const lon = longitudeDeg * Math.PI / 180;
+  return [Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat)];
+}
+
+export function coverageAnalysis(
+  trajectoryOverlay: MissionTrajectoryOverlay | null,
+  coverage: CoverageSettings,
+): CoverageAnalysis {
+  const trajectory = trajectoryOverlay?.mission?.trajectory ?? [];
+  if (trajectory.length === 0) {
+    return { accessOpportunities: 0, approximateCoveragePercent: 0, revisitTimeSeconds: null, rationale: "Generate a trajectory to estimate coverage from ground-track samples." };
+  }
+  const footprintRadiusKm = Math.max(0, coverage.swathWidthKm / 2);
+  const footprintAreaKm2 = Math.PI * footprintRadiusKm * footprintRadiusKm;
+  const earthAreaKm2 = 4 * Math.PI * earthRadiusKm * earthRadiusKm;
+  const accessOpportunities = trajectory.filter((state) => state.altitudeKm > 0 && state.latitudeDeg >= -90 && state.latitudeDeg <= 90).length;
+  const uniqueCells = new Set(trajectory.map((state) => `${Math.round(state.latitudeDeg / 5) * 5}:${Math.round(state.longitudeDeg / 5) * 5}`));
+  const elevationMaskFactor = Math.max(0.2, Math.min(1, (90 - Math.max(0, coverage.minimumElevationDeg)) / 90));
+  const approximateCoveragePercent = Math.min(100, (uniqueCells.size * footprintAreaKm2 / earthAreaKm2) * 100 * elevationMaskFactor);
+  const revisitTimeSeconds = trajectory.length > 1
+    ? Math.round((new Date(trajectory[trajectory.length - 1].timeUtc).getTime() - new Date(trajectory[0].timeUtc).getTime()) / Math.max(1, uniqueCells.size) / 1000)
+    : null;
+  return {
+    accessOpportunities,
+    approximateCoveragePercent,
+    revisitTimeSeconds,
+    rationale: `Coverage is approximated from ${uniqueCells.size} ground-track cells, a ${coverage.swathWidthKm.toFixed(0)} km swath, and ${coverage.minimumElevationDeg.toFixed(1)} deg minimum elevation; detailed EO planning should use sensor geometry and terrain masks.`,
+  };
+}
+
+export function walkerConstellationAnalysis(config: WalkerConstellationConfig): WalkerConstellationAnalysis {
+  const satelliteCount = Math.max(0, Math.round(config.satelliteCount));
+  const planeCount = Math.max(0, Math.round(config.planeCount));
+  const valid = satelliteCount > 0 && planeCount > 0 && satelliteCount % planeCount === 0;
+  const satellitesPerPlane = valid ? satelliteCount / planeCount : 0;
+  const raanSpacingDeg = planeCount > 0 ? (config.pattern === "STAR" ? 180 / planeCount : 360 / planeCount) : 0;
+  const inPlaneSpacingDeg = satellitesPerPlane > 0 ? 360 / satellitesPerPlane : 0;
+  const relativePhaseDeg = satelliteCount > 0 ? (360 * config.phasing) / satelliteCount : 0;
+  return {
+    valid,
+    satellitesPerPlane,
+    raanSpacingDeg,
+    inPlaneSpacingDeg,
+    relativePhaseDeg,
+    summary: valid
+      ? `Walker ${config.pattern.toLowerCase()} ${satelliteCount}/${planeCount}/${Math.round(config.phasing)} at ${config.altitudeKm.toFixed(0)} km and ${config.inclinationDeg.toFixed(2)} deg.`
+      : "Satellite count must divide evenly by plane count for this basic Walker layout.",
+  };
 }
 
 export function missionFuelBudget(events: BackendMissionTimelineEvent[], profile: BackendPropagationProfile | null): MissionFuelBudget {
@@ -1023,6 +1445,10 @@ export function buildMissionReport({
   targets,
   constraints,
   monteCarloSettings,
+  relativeMotionSettings,
+  groundStation,
+  coverageSettings,
+  constellation,
 }: {
   mission: BackendMission | null;
   events: BackendMissionTimelineEvent[];
@@ -1033,10 +1459,15 @@ export function buildMissionReport({
   targets?: MissionDesignTargets;
   constraints?: MissionConstraints;
   monteCarloSettings?: MonteCarloSettings;
+  relativeMotionSettings?: RelativeMotionSettings;
+  groundStation?: GroundStationConfig;
+  coverageSettings?: CoverageSettings;
+  constellation?: WalkerConstellationConfig;
 }) {
   const analytics = missionTimelineAnalytics(mission, events, profile);
   const markers = detectOrbitEventMarkers(trajectoryOverlay?.mission?.trajectory);
   const targeting = targets ? missionTargetingSolutions(orbitSummary, targets, profile) : [];
+  const solver = targets ? solveTargetingProblem(orbitSummary, targets, profile) : null;
   return {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -1064,7 +1495,15 @@ export function buildMissionReport({
     targeting: {
       targets: targets ?? null,
       solutions: targeting,
+      solver,
       tradeStudy: tradeStudySolutions(targeting, analytics),
+      optimization: solver ? optimizationCandidates(solver, analytics) : [],
+    },
+    operations: {
+      relativeMotion: relativeMotionSettings ? relativeMotionAnalysis(trajectoryOverlay, relativeMotionSettings) : null,
+      groundStationAccess: groundStation ? groundStationAccess(trajectoryOverlay, groundStation) : null,
+      coverage: coverageSettings ? coverageAnalysis(trajectoryOverlay, coverageSettings) : null,
+      constellation: constellation ? walkerConstellationAnalysis(constellation) : null,
     },
     monteCarlo: monteCarloSettings ? monteCarloDispersion(analytics, monteCarloSettings) : null,
     constraints: {

@@ -7,8 +7,8 @@ import { OrbitSummaryPanel } from "./OrbitSummaryPanel";
 import type { OrbitSummary } from "./OrbitSummaryPanel";
 import { DetailMetric, HudPanel } from "./ui";
 import type { MissionTrajectoryOverlay, TimelineLayoutModel, TimelineSnapMode, TimelineTimeMode, TimelineZoomPreset, TimelineInteractionModel } from "./types";
-import { buildMissionReport, buildTimelineLayoutModel, compactIsoUtc, defaultMissionTrajectoryWindowMinutes, deltaVBreakdown, detectOrbitEventMarkers, displayTimelineTime, estimatedEventDeltaVMps, eventScheduleMode, forceModelSummary, integratorSummary, maneuverQualityAnalysis, metOffsetLabelFromSeconds, missionConstraintViolations, missionDurationSeconds, missionObjectiveProgress, missionTargetingSolutions, missionTimelineAnalytics, missionTrajectoryMaxStepSeconds, missionTrajectoryMinStepSeconds, monteCarloDispersion, orbitLifetimeEstimate, readNumberParameter, readStringParameter, secondsToDurationLabel, spacecraftPerformanceStatus, timelineAnalysis, timelineSnapOptions, timelineZoomOptions, tradeStudySolutions, validateMissionPlan } from "./utils";
-import type { MissionConstraints, MissionDesignTargets, MonteCarloSettings, MissionOrbitEventMarker } from "./utils";
+import { buildMissionReport, buildTimelineLayoutModel, compactIsoUtc, coverageAnalysis, defaultMissionTrajectoryWindowMinutes, deltaVBreakdown, detectOrbitEventMarkers, displayTimelineTime, estimatedEventDeltaVMps, eventScheduleMode, forceModelSummary, groundStationAccess, integratorSummary, maneuverQualityAnalysis, metOffsetLabelFromSeconds, missionConstraintViolations, missionDurationSeconds, missionObjectiveProgress, missionTargetingSolutions, missionTimelineAnalytics, missionTrajectoryMaxStepSeconds, missionTrajectoryMinStepSeconds, monteCarloDispersion, optimizationCandidates, orbitLifetimeEstimate, readNumberParameter, readStringParameter, relativeMotionAnalysis, secondsToDurationLabel, solveTargetingProblem, spacecraftPerformanceStatus, timelineAnalysis, timelineSnapOptions, timelineZoomOptions, tradeStudySolutions, validateMissionPlan, walkerConstellationAnalysis } from "./utils";
+import type { CoverageSettings, GroundStationConfig, MissionConstraints, MissionDesignTargets, MonteCarloSettings, MissionOrbitEventMarker, RelativeMotionSettings, WalkerConstellationConfig } from "./utils";
 
 export function MissionTimelinePanel({
   mission,
@@ -105,6 +105,29 @@ export function MissionTimelinePanel({
     minPerigeeAltitudeKm: 160,
     maxEclipseDurationSeconds: 2400,
   });
+  const [relativeMotionSettings, setRelativeMotionSettings] = useState<RelativeMotionSettings>({
+    radialOffsetKm: 0.2,
+    alongTrackOffsetKm: 5,
+    crossTrackOffsetKm: 0.1,
+    relativeDriftMps: -0.05,
+  });
+  const [groundStation, setGroundStation] = useState<GroundStationConfig>({
+    latitudeDeg: 13.73,
+    longitudeDeg: 80.23,
+    elevationMaskDeg: 10,
+  });
+  const [coverageSettings, setCoverageSettings] = useState<CoverageSettings>({
+    swathWidthKm: 120,
+    minimumElevationDeg: 10,
+  });
+  const [constellationConfig, setConstellationConfig] = useState<WalkerConstellationConfig>({
+    pattern: "DELTA",
+    satelliteCount: 24,
+    planeCount: 6,
+    phasing: 1,
+    altitudeKm: 550,
+    inclinationDeg: 53,
+  });
   const interactionModel = useMemo<TimelineInteractionModel>(() => ({
     zoomPreset,
     snapMode,
@@ -120,6 +143,12 @@ export function MissionTimelinePanel({
   const constraintViolations = useMemo(() => missionConstraintViolations(events, missionAnalytics, orbitSummary, orbitEventMarkers, missionConstraints), [events, missionAnalytics, missionConstraints, orbitEventMarkers, orbitSummary]);
   const lifetimeEstimate = useMemo(() => orbitLifetimeEstimate(orbitSummary), [orbitSummary]);
   const tradeStudy = useMemo(() => tradeStudySolutions(targetingSolutions, missionAnalytics), [missionAnalytics, targetingSolutions]);
+  const targetSolver = useMemo(() => solveTargetingProblem(orbitSummary, missionTargets, propagationProfile), [missionTargets, orbitSummary, propagationProfile]);
+  const maneuverOptimization = useMemo(() => optimizationCandidates(targetSolver, missionAnalytics), [missionAnalytics, targetSolver]);
+  const relativeMotion = useMemo(() => relativeMotionAnalysis(trajectoryOverlay, relativeMotionSettings), [relativeMotionSettings, trajectoryOverlay]);
+  const stationAccess = useMemo(() => groundStationAccess(trajectoryOverlay, groundStation), [groundStation, trajectoryOverlay]);
+  const coverage = useMemo(() => coverageAnalysis(trajectoryOverlay, coverageSettings), [coverageSettings, trajectoryOverlay]);
+  const constellation = useMemo(() => walkerConstellationAnalysis(constellationConfig), [constellationConfig]);
   const templateGroups = useMemo(() => templateEventGroups(events), [events]);
   const missionValidation = useMemo(() => validateMissionPlan(mission, events, propagationProfile), [events, mission, propagationProfile]);
   const validationStatus = missionValidation.errors.length > 0 ? "Blocked" : missionValidation.warnings.length > 0 ? "Review" : "Ready";
@@ -147,6 +176,26 @@ export function MissionTimelinePanel({
   const updateConstraint = (key: keyof MissionConstraints, value: string) => {
     const parsed = Number(value);
     setMissionConstraints((current) => ({ ...current, [key]: value.trim() === "" || !Number.isFinite(parsed) ? null : parsed }));
+  };
+  const updateRelativeMotion = (key: keyof RelativeMotionSettings, value: string) => {
+    const parsed = Number(value);
+    setRelativeMotionSettings((current) => ({ ...current, [key]: Number.isFinite(parsed) ? parsed : current[key] }));
+  };
+  const updateGroundStation = (key: keyof GroundStationConfig, value: string) => {
+    const parsed = Number(value);
+    setGroundStation((current) => ({ ...current, [key]: Number.isFinite(parsed) ? parsed : current[key] }));
+  };
+  const updateCoverage = (key: keyof CoverageSettings, value: string) => {
+    const parsed = Number(value);
+    setCoverageSettings((current) => ({ ...current, [key]: Number.isFinite(parsed) ? parsed : current[key] }));
+  };
+  const updateConstellation = (key: keyof WalkerConstellationConfig, value: string) => {
+    if (key === "pattern") {
+      setConstellationConfig((current) => ({ ...current, pattern: value === "STAR" ? "STAR" : "DELTA" }));
+      return;
+    }
+    const parsed = Number(value);
+    setConstellationConfig((current) => ({ ...current, [key]: Number.isFinite(parsed) ? parsed : current[key] }));
   };
 
   return (
@@ -333,6 +382,89 @@ export function MissionTimelinePanel({
           <div className="border border-cyan-300/15 bg-black/25 p-3">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Differential Corrector</p>
+                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Screening-level target solver that combines closed-form maneuver estimates and residual damping.</p>
+              </div>
+              <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${
+                targetSolver.status === "Converged"
+                  ? "border-lime-300/40 text-lime-100"
+                  : targetSolver.status === "Partial"
+                    ? "border-amber-300/40 text-amber-100"
+                    : targetSolver.status === "Needs High-Fidelity Solve"
+                      ? "border-rose-300/40 text-rose-100"
+                      : "border-white/15 text-zinc-500"
+              }`}>
+                {targetSolver.status}
+              </span>
+            </div>
+            <div className="mt-3 grid gap-2 md:grid-cols-4">
+              <DetailMetric label="Iterations" value={String(targetSolver.iterations)} />
+              <DetailMetric label="Solved Delta-V" value={`${formatNumber(targetSolver.totalDeltaVMps, 2)} m/s`} />
+              <DetailMetric label="Solved Fuel" value={`${formatNumber(targetSolver.estimatedFuelKg, 3)} kg`} />
+              <DetailMetric label="Plan Steps" value={String(targetSolver.plan.length)} />
+            </div>
+            <div className="mt-3 grid gap-2">
+              {targetSolver.residuals.length === 0 ? (
+                <p className="border border-white/10 bg-black/20 px-3 py-2 text-xs text-zinc-500">No active target residuals. Add targeting objectives above.</p>
+              ) : targetSolver.residuals.map((residual) => (
+                <div key={residual.parameter} className="grid gap-2 border border-white/10 bg-black/20 p-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-xs font-semibold text-zinc-100">{residual.parameter}</span>
+                    <span className="font-mono text-[10px] text-cyan-100">
+                      residual {formatNumber(Math.abs(residual.finalError), residual.unit ? 3 : 6)} {residual.unit}
+                    </span>
+                  </div>
+                  <p className="font-mono text-[10px] text-zinc-500">
+                    initial {formatNumber(residual.initialError, residual.unit ? 3 : 6)} {residual.unit} · tolerance {formatNumber(residual.tolerance, residual.unit ? 3 : 6)} {residual.unit}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 grid gap-2">
+              {targetSolver.plan.slice(0, 5).map((step) => (
+                <div key={`${step.name}-${step.location}`} className="flex flex-wrap items-center justify-between gap-2 border border-white/10 bg-black/20 px-3 py-2">
+                  <span className="text-xs text-zinc-100">{step.name}</span>
+                  <span className="font-mono text-[10px] text-zinc-400">{step.type.replaceAll("_", " ")} · {formatNumber(step.deltaVMps, 2)} m/s · {step.location}</span>
+                </div>
+              ))}
+            </div>
+            <p className="mt-2 text-[11px] leading-5 text-zinc-500">{targetSolver.rationale}</p>
+          </div>
+
+          <div className="border border-cyan-300/15 bg-black/25 p-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Maneuver Optimization</p>
+                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Ranks solved candidate strategies by delta-v, fuel, transfer time, and residual quality.</p>
+              </div>
+              <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
+                {maneuverOptimization.length} Modes
+              </span>
+            </div>
+            <div className="mt-3 grid gap-2">
+              {maneuverOptimization.map((candidate) => (
+                <div key={candidate.mode} className="grid gap-2 border border-white/10 bg-black/20 p-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-xs font-semibold text-white">#{candidate.rank} {candidate.mode}</p>
+                    <p className="font-mono text-[10px] text-cyan-100">{formatNumber(candidate.deltaVMps, 2)} m/s · {formatNumber(candidate.fuelKg, 3)} kg</p>
+                  </div>
+                  <div className="grid gap-2 md:grid-cols-2">
+                    <DetailMetric label="Transfer Time" value={secondsToDurationLabel(candidate.transferSeconds)} />
+                    <DetailMetric label="Residual Score" value={formatNumber(candidate.residualScore, 2)} />
+                  </div>
+                  <p className="text-[11px] leading-5 text-zinc-500">{candidate.rationale}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mission && (
+        <div className="mt-3 grid gap-3 xl:grid-cols-2">
+          <div className="border border-cyan-300/15 bg-black/25 p-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
                 <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Maneuver Targeting Engine</p>
                 <p className="mt-1 text-[11px] leading-5 text-zinc-500">First-order targeting advisor for altitude, inclination, eccentricity, RAAN, and argument of perigee.</p>
               </div>
@@ -480,6 +612,99 @@ export function MissionTimelinePanel({
         </div>
       )}
 
+      {mission && (
+        <div className="mt-3 grid gap-3 xl:grid-cols-2">
+          <div className="border border-cyan-300/15 bg-black/25 p-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Relative Motion & Ground Access</p>
+                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Rendezvous screening with a modeled deputy plus ground station pass prediction.</p>
+              </div>
+              <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
+                {relativeMotion.separationTrend}
+              </span>
+            </div>
+            <div className="mt-3 grid gap-2 md:grid-cols-4">
+              <TargetInput label="Radial km" value={relativeMotionSettings.radialOffsetKm} onChange={(value) => updateRelativeMotion("radialOffsetKm", value)} />
+              <TargetInput label="Along km" value={relativeMotionSettings.alongTrackOffsetKm} onChange={(value) => updateRelativeMotion("alongTrackOffsetKm", value)} />
+              <TargetInput label="Cross km" value={relativeMotionSettings.crossTrackOffsetKm} onChange={(value) => updateRelativeMotion("crossTrackOffsetKm", value)} />
+              <TargetInput label="Drift m/s" value={relativeMotionSettings.relativeDriftMps} onChange={(value) => updateRelativeMotion("relativeDriftMps", value)} />
+            </div>
+            <div className="mt-3 grid gap-2 md:grid-cols-4">
+              <DetailMetric label="Initial Sep" value={`${formatNumber(relativeMotion.relativePositionKm, 3)} km`} />
+              <DetailMetric label="Rel Velocity" value={`${formatNumber(relativeMotion.relativeVelocityMps, 3)} m/s`} />
+              <DetailMetric label="Closest Approach" value={`${formatNumber(relativeMotion.closestApproachKm, 3)} km`} />
+              <DetailMetric label="CA Time" value={relativeMotion.closestApproachTimeUtc ? compactIsoUtc(relativeMotion.closestApproachTimeUtc) : "Generate trajectory"} />
+            </div>
+            <p className="mt-2 text-[11px] leading-5 text-zinc-500">{relativeMotion.rationale}</p>
+
+            <div className="mt-4 border-t border-white/10 pt-3">
+              <div className="grid gap-2 md:grid-cols-3">
+                <TargetInput label="Station lat" value={groundStation.latitudeDeg} onChange={(value) => updateGroundStation("latitudeDeg", value)} />
+                <TargetInput label="Station lon" value={groundStation.longitudeDeg} onChange={(value) => updateGroundStation("longitudeDeg", value)} />
+                <TargetInput label="Mask deg" value={groundStation.elevationMaskDeg} onChange={(value) => updateGroundStation("elevationMaskDeg", value)} />
+              </div>
+              <div className="mt-3 grid gap-2 md:grid-cols-4">
+                <DetailMetric label="Next Pass" value={stationAccess.nextPassStartUtc ? compactIsoUtc(stationAccess.nextPassStartUtc) : "No pass"} />
+                <DetailMetric label="Duration" value={secondsToDurationLabel(stationAccess.passDurationSeconds)} />
+                <DetailMetric label="Max Elevation" value={`${formatNumber(stationAccess.maxElevationDeg, 2)} deg`} />
+                <DetailMetric label="Pass Count" value={String(stationAccess.accessCount)} />
+              </div>
+            </div>
+          </div>
+
+          <div className="border border-cyan-300/15 bg-black/25 p-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Coverage & Constellation</p>
+                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Earth-observation coverage screening and basic Walker constellation geometry.</p>
+              </div>
+              <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${constellation.valid ? "border-lime-300/40 text-lime-100" : "border-amber-300/40 text-amber-100"}`}>
+                Walker {constellation.valid ? "Valid" : "Review"}
+              </span>
+            </div>
+            <div className="mt-3 grid gap-2 md:grid-cols-2">
+              <TargetInput label="Swath km" value={coverageSettings.swathWidthKm} onChange={(value) => updateCoverage("swathWidthKm", value)} />
+              <TargetInput label="Min elev deg" value={coverageSettings.minimumElevationDeg} onChange={(value) => updateCoverage("minimumElevationDeg", value)} />
+            </div>
+            <div className="mt-3 grid gap-2 md:grid-cols-3">
+              <DetailMetric label="Coverage" value={`${formatNumber(coverage.approximateCoveragePercent, 2)}%`} />
+              <DetailMetric label="Opportunities" value={String(coverage.accessOpportunities)} />
+              <DetailMetric label="Revisit" value={coverage.revisitTimeSeconds == null ? "Generate trajectory" : secondsToDurationLabel(coverage.revisitTimeSeconds)} />
+            </div>
+            <p className="mt-2 text-[11px] leading-5 text-zinc-500">{coverage.rationale}</p>
+
+            <div className="mt-4 border-t border-white/10 pt-3">
+              <div className="grid gap-2 md:grid-cols-6">
+                <label className="grid gap-1">
+                  <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-cyan-300/60">Pattern</span>
+                  <select
+                    value={constellationConfig.pattern}
+                    onChange={(event) => updateConstellation("pattern", event.target.value)}
+                    className="border border-cyan-300/20 bg-black/45 px-2 py-1.5 font-mono text-[11px] text-cyan-100 outline-none"
+                  >
+                    <option value="DELTA">Walker Delta</option>
+                    <option value="STAR">Walker Star</option>
+                  </select>
+                </label>
+                <TargetInput label="Sats" value={constellationConfig.satelliteCount} onChange={(value) => updateConstellation("satelliteCount", value)} />
+                <TargetInput label="Planes" value={constellationConfig.planeCount} onChange={(value) => updateConstellation("planeCount", value)} />
+                <TargetInput label="Phasing" value={constellationConfig.phasing} onChange={(value) => updateConstellation("phasing", value)} />
+                <TargetInput label="Alt km" value={constellationConfig.altitudeKm} onChange={(value) => updateConstellation("altitudeKm", value)} />
+                <TargetInput label="Inc deg" value={constellationConfig.inclinationDeg} onChange={(value) => updateConstellation("inclinationDeg", value)} />
+              </div>
+              <div className="mt-3 grid gap-2 md:grid-cols-4">
+                <DetailMetric label="Sats/Plane" value={String(constellation.satellitesPerPlane)} />
+                <DetailMetric label="RAAN Spacing" value={`${formatNumber(constellation.raanSpacingDeg, 2)} deg`} />
+                <DetailMetric label="In-Plane Spacing" value={`${formatNumber(constellation.inPlaneSpacingDeg, 2)} deg`} />
+                <DetailMetric label="Phase" value={`${formatNumber(constellation.relativePhaseDeg, 2)} deg`} />
+              </div>
+              <p className="mt-2 text-[11px] leading-5 text-zinc-500">{constellation.summary}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {mission && templateGroups.length > 0 && (
         <div className="mt-3 border border-cyan-300/15 bg-black/25 p-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -555,7 +780,7 @@ export function MissionTimelinePanel({
             </div>
             <button
               type="button"
-              onClick={() => exportMissionReport({ mission, events, orbitSummary, propagationProfile, trajectoryOverlay, missionValidation, missionTargets, missionConstraints, monteCarloSettings })}
+              onClick={() => exportMissionReport({ mission, events, orbitSummary, propagationProfile, trajectoryOverlay, missionValidation, missionTargets, missionConstraints, monteCarloSettings, relativeMotionSettings, groundStation, coverageSettings, constellationConfig })}
               className="mt-3 w-full border border-cyan-300/40 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-300 hover:text-slate-950"
             >
               Export Mission Report JSON
@@ -1081,6 +1306,10 @@ function exportMissionReport({
   missionTargets,
   missionConstraints,
   monteCarloSettings,
+  relativeMotionSettings,
+  groundStation,
+  coverageSettings,
+  constellationConfig,
 }: {
   mission: BackendMission;
   events: BackendMissionTimelineEvent[];
@@ -1091,6 +1320,10 @@ function exportMissionReport({
   missionTargets: MissionDesignTargets;
   missionConstraints: MissionConstraints;
   monteCarloSettings: MonteCarloSettings;
+  relativeMotionSettings: RelativeMotionSettings;
+  groundStation: GroundStationConfig;
+  coverageSettings: CoverageSettings;
+  constellationConfig: WalkerConstellationConfig;
 }) {
   const report = buildMissionReport({
     mission,
@@ -1102,6 +1335,10 @@ function exportMissionReport({
     targets: missionTargets,
     constraints: missionConstraints,
     monteCarloSettings,
+    relativeMotionSettings,
+    groundStation,
+    coverageSettings,
+    constellation: constellationConfig,
   });
   const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
