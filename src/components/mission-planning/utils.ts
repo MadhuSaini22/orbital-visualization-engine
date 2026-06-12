@@ -5,6 +5,9 @@ import type {
   BackendPropagationProfile,
   NumericalIntegratorTypeId,
 } from "@/services/orbitServerApi";
+import type { OrbitState } from "@/domain/orbit";
+import type { OrbitSummary } from "./OrbitSummaryPanel";
+import type { MissionTrajectoryOverlay } from "./types";
 import type { TimelineInteractionModel, TimelineScheduleMode, TimelineSnapMode, TimelineTimeMode, TimelineZoomPreset } from "./types";
 
 export const defaultMissionTrajectoryWindowMinutes = 90;
@@ -292,6 +295,43 @@ export type MissionTimelineAnalytics = {
   fuelBudget: MissionFuelBudget;
 };
 
+export type MissionOrbitEventType =
+  | "PERIGEE_PASSAGE"
+  | "APOGEE_PASSAGE"
+  | "ASCENDING_NODE"
+  | "DESCENDING_NODE"
+  | "ECLIPSE_ENTRY"
+  | "ECLIPSE_EXIT";
+
+export type MissionOrbitEventMarker = {
+  id: string;
+  type: MissionOrbitEventType;
+  timeUtc: string;
+  altitudeKm: number;
+  radiusKm: number;
+  latitudeDeg: number;
+  longitudeDeg: number;
+  description: string;
+};
+
+export type DeltaVBreakdownItem = {
+  key: string;
+  label: string;
+  deltaVMps: number;
+  percent: number;
+  burnCount: number;
+};
+
+export type SpacecraftPerformanceStatus = "Healthy" | "Caution" | "Critical" | "Unavailable";
+
+export type ManeuverQualityAnalysis = {
+  eventId: string;
+  location: string;
+  efficiency: string;
+  alignment: string;
+  rationale: string;
+};
+
 export function missionFuelBudget(events: BackendMissionTimelineEvent[], profile: BackendPropagationProfile | null): MissionFuelBudget {
   const warnings: string[] = [];
   const consumedFuelKg = events.reduce((sum, event) => {
@@ -374,6 +414,270 @@ export function missionTimelineAnalytics(
     averageDeltaVMps: burnEvents.length > 0 ? totalDeltaVMps / burnEvents.length : 0,
     totalDeltaVMps,
     fuelBudget: missionFuelBudget(events, profile),
+  };
+}
+
+function vectorNorm(values: [number, number, number]) {
+  return Math.hypot(values[0], values[1], values[2]);
+}
+
+function sunUnitVectorEciApprox(date: Date): [number, number, number] {
+  const jd = date.getTime() / 86400000 + 2440587.5;
+  const n = jd - 2451545.0;
+  const meanLongitudeDeg = (280.460 + 0.9856474 * n) % 360;
+  const meanAnomalyDeg = (357.528 + 0.9856003 * n) % 360;
+  const meanAnomalyRad = meanAnomalyDeg * Math.PI / 180;
+  const eclipticLongitudeRad = (meanLongitudeDeg + 1.915 * Math.sin(meanAnomalyRad) + 0.020 * Math.sin(2 * meanAnomalyRad)) * Math.PI / 180;
+  const obliquityRad = (23.439 - 0.0000004 * n) * Math.PI / 180;
+  const x = Math.cos(eclipticLongitudeRad);
+  const y = Math.cos(obliquityRad) * Math.sin(eclipticLongitudeRad);
+  const z = Math.sin(obliquityRad) * Math.sin(eclipticLongitudeRad);
+  return [x, y, z];
+}
+
+function isEclipsed(state: OrbitState) {
+  if (!state.positionEciKm) {
+    return false;
+  }
+  const sun = sunUnitVectorEciApprox(new Date(state.timeUtc));
+  const r = state.positionEciKm;
+  const projection = r[0] * sun[0] + r[1] * sun[1] + r[2] * sun[2];
+  if (projection >= 0) {
+    return false;
+  }
+  const radiusSquared = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
+  const perpendicularDistanceKm = Math.sqrt(Math.max(0, radiusSquared - projection * projection));
+  return perpendicularDistanceKm < 6378.137;
+}
+
+function markerFromState(type: MissionOrbitEventType, state: OrbitState, index: number): MissionOrbitEventMarker | null {
+  if (!state.positionEciKm) {
+    return null;
+  }
+  const radiusKm = vectorNorm(state.positionEciKm);
+  const label = type.replaceAll("_", " ").toLowerCase();
+  return {
+    id: `${type}-${state.timeUtc}-${index}`,
+    type,
+    timeUtc: state.timeUtc,
+    altitudeKm: state.altitudeKm,
+    radiusKm,
+    latitudeDeg: state.latitudeDeg,
+    longitudeDeg: state.longitudeDeg,
+    description: type === "ECLIPSE_ENTRY"
+      ? "Spacecraft enters Earth shadow using a low-order Sun-vector estimate."
+      : type === "ECLIPSE_EXIT"
+        ? "Spacecraft exits Earth shadow using a low-order Sun-vector estimate."
+        : `Detected ${label} from propagated trajectory geometry.`,
+  };
+}
+
+export function detectOrbitEventMarkers(samples: OrbitState[] | undefined): MissionOrbitEventMarker[] {
+  const states = (samples ?? [])
+    .filter((state) => state.positionEciKm && Number.isFinite(new Date(state.timeUtc).getTime()))
+    .toSorted((a, b) => new Date(a.timeUtc).getTime() - new Date(b.timeUtc).getTime());
+  if (states.length < 3) {
+    return [];
+  }
+  const markers: MissionOrbitEventMarker[] = [];
+  const radii = states.map((state) => vectorNorm(state.positionEciKm!));
+  for (let index = 1; index < states.length - 1; index += 1) {
+    if (radii[index] < radii[index - 1] && radii[index] < radii[index + 1]) {
+      const marker = markerFromState("PERIGEE_PASSAGE", states[index], index);
+      if (marker) markers.push(marker);
+    }
+    if (radii[index] > radii[index - 1] && radii[index] > radii[index + 1]) {
+      const marker = markerFromState("APOGEE_PASSAGE", states[index], index);
+      if (marker) markers.push(marker);
+    }
+    const previousZ = states[index - 1].positionEciKm?.[2] ?? 0;
+    const currentZ = states[index].positionEciKm?.[2] ?? 0;
+    if (previousZ < 0 && currentZ >= 0) {
+      const marker = markerFromState("ASCENDING_NODE", states[index], index);
+      if (marker) markers.push(marker);
+    }
+    if (previousZ > 0 && currentZ <= 0) {
+      const marker = markerFromState("DESCENDING_NODE", states[index], index);
+      if (marker) markers.push(marker);
+    }
+    const previousEclipse = isEclipsed(states[index - 1]);
+    const currentEclipse = isEclipsed(states[index]);
+    if (!previousEclipse && currentEclipse) {
+      const marker = markerFromState("ECLIPSE_ENTRY", states[index], index);
+      if (marker) markers.push(marker);
+    }
+    if (previousEclipse && !currentEclipse) {
+      const marker = markerFromState("ECLIPSE_EXIT", states[index], index);
+      if (marker) markers.push(marker);
+    }
+  }
+  return markers.toSorted((a, b) => new Date(a.timeUtc).getTime() - new Date(b.timeUtc).getTime());
+}
+
+function templateBreakdownLabel(templateType: string) {
+  switch (templateType) {
+    case "CIRCULARIZATION":
+      return "Circularization";
+    case "HOHMANN_TRANSFER":
+      return "Hohmann";
+    case "PLANE_CHANGE":
+      return "Plane Change";
+    case "APOGEE_RAISE":
+      return "Apogee Raise";
+    case "PERIGEE_RAISE":
+      return "Perigee Raise";
+    case "DEORBIT_BURN":
+      return "Deorbit";
+    case "STATION_KEEPING":
+      return "Stationkeeping";
+    default:
+      return templateType ? templateType.replaceAll("_", " ") : "Manual Burns";
+  }
+}
+
+export function deltaVBreakdown(events: BackendMissionTimelineEvent[]): DeltaVBreakdownItem[] {
+  const totals = new Map<string, { label: string; deltaVMps: number; burnCount: number }>();
+  events.filter((event) => event.enabled && (event.type === "FINITE_BURN" || event.type === "IMPULSIVE_BURN")).forEach((event) => {
+    const templateType = readStringParameter(event.parameters ?? {}, "templateType", "");
+    const key = templateType || "MANUAL";
+    const current = totals.get(key) ?? {
+      label: templateType ? templateBreakdownLabel(templateType) : "Manual Burns",
+      deltaVMps: 0,
+      burnCount: 0,
+    };
+    current.deltaVMps += estimatedEventDeltaVMps(event);
+    current.burnCount += 1;
+    totals.set(key, current);
+  });
+  const total = [...totals.values()].reduce((sum, item) => sum + item.deltaVMps, 0);
+  return [...totals.entries()].map(([key, item]) => ({
+    key,
+    label: item.label,
+    deltaVMps: item.deltaVMps,
+    burnCount: item.burnCount,
+    percent: total > 0 ? (item.deltaVMps / total) * 100 : 0,
+  })).toSorted((a, b) => b.deltaVMps - a.deltaVMps);
+}
+
+export function spacecraftPerformanceStatus(fuelBudget: MissionFuelBudget): SpacecraftPerformanceStatus {
+  if (fuelBudget.remainingFuelKg == null || fuelBudget.fuelMarginPercent == null) {
+    return "Unavailable";
+  }
+  if (fuelBudget.remainingFuelKg < 0 || fuelBudget.fuelMarginPercent < 5) {
+    return "Critical";
+  }
+  if (fuelBudget.fuelMarginPercent < 15) {
+    return "Caution";
+  }
+  return "Healthy";
+}
+
+export function maneuverQualityAnalysis(event: BackendMissionTimelineEvent): ManeuverQualityAnalysis {
+  const parameters = event.parameters ?? {};
+  const templateType = readStringParameter(parameters, "templateType", "");
+  const role = readStringParameter(parameters, "templateRole", "");
+  const executionStrategy = readStringParameter(parameters, "executionStrategy", "");
+  const executionLocation = readStringParameter(parameters, "executionLocation", "");
+  const directionFrame = readStringParameter(parameters, "directionFrame", "TNW");
+  const deltaV = estimatedEventDeltaVMps(event);
+  const location = executionLocation || (role.includes("BURN_2") ? "Target apsis" : role.includes("COAST") ? "Coast arc" : "Scheduled point");
+  if (templateType === "HOHMANN_TRANSFER") {
+    return {
+      eventId: event.id,
+      location: role === "BURN_2" ? "Transfer apoapsis/periapsis" : "Initial circular orbit tangent point",
+      efficiency: "High",
+      alignment: directionFrame === "TNW" ? "Tangential prograde/retrograde" : directionFrame,
+      rationale: role === "BURN_2"
+        ? "The second Hohmann impulse circularizes where the transfer ellipse touches the target orbit."
+        : "Hohmann transfers use tangential impulses at apsides to change orbital energy efficiently.",
+    };
+  }
+  if (templateType === "PLANE_CHANGE") {
+    return {
+      eventId: event.id,
+      location: location || executionStrategy.replaceAll("_", " "),
+      efficiency: executionStrategy === "APOAPSIS" ? "Improved on elliptical orbit" : executionStrategy.includes("NODE") ? "Geometrically correct" : "Time-prioritized",
+      alignment: "Normal-axis impulse",
+      rationale: executionStrategy.includes("NODE")
+        ? "Inclination changes are performed at node crossings where the old and new orbital planes intersect."
+        : executionStrategy === "APOAPSIS"
+          ? "Apoapsis has lower velocity on elliptical orbits, reducing pure plane-change cost."
+          : "Immediate execution prioritizes schedule over geometric optimality.",
+    };
+  }
+  if (templateType === "CIRCULARIZATION") {
+    return {
+      eventId: event.id,
+      location: "Current target-radius crossing",
+      efficiency: "High when executed at apsis",
+      alignment: directionFrame === "TNW" ? "Tangential" : directionFrame,
+      rationale: "Circularization changes orbital energy at the selected radius until perigee and apogee converge.",
+    };
+  }
+  if (templateType === "APOGEE_RAISE" || templateType === "PERIGEE_RAISE" || templateType === "DEORBIT_BURN") {
+    return {
+      eventId: event.id,
+      location: templateType === "PERIGEE_RAISE" ? "Apoapsis" : "Current tangent point",
+      efficiency: templateType === "DEORBIT_BURN" ? "Disposal-oriented" : "Apsis-targeted",
+      alignment: deltaV > 0 ? "Tangential impulse" : "Tangential impulse",
+      rationale: templateType === "PERIGEE_RAISE"
+        ? "Raising perigee is most efficient at apoapsis because the burn changes the opposite apsis."
+        : templateType === "APOGEE_RAISE"
+          ? "Raising apogee is performed with a prograde tangential burn near the low point."
+          : "Deorbit lowers perigee with a retrograde tangential burn to intersect a disposal/reentry altitude.",
+    };
+  }
+  return {
+    eventId: event.id,
+    location,
+    efficiency: "Unclassified",
+    alignment: directionFrame,
+    rationale: "Manual maneuver; verify geometry, frame, and timing against mission objectives.",
+  };
+}
+
+export function buildMissionReport({
+  mission,
+  events,
+  orbitSummary,
+  profile,
+  trajectoryOverlay,
+  validation,
+}: {
+  mission: BackendMission | null;
+  events: BackendMissionTimelineEvent[];
+  orbitSummary: OrbitSummary;
+  profile: BackendPropagationProfile | null;
+  trajectoryOverlay: MissionTrajectoryOverlay | null;
+  validation: MissionValidationResult;
+}) {
+  const analytics = missionTimelineAnalytics(mission, events, profile);
+  const markers = detectOrbitEventMarkers(trajectoryOverlay?.mission?.trajectory);
+  return {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    mission,
+    orbit: orbitSummary,
+    maneuverSequence: events.toSorted((a, b) => a.sequenceIndex - b.sequenceIndex).map((event) => ({
+      id: event.id,
+      name: event.name,
+      type: event.type,
+      enabled: event.enabled,
+      executionTime: event.executionTime,
+      deltaVMps: estimatedEventDeltaVMps(event),
+      templateType: readStringParameter(event.parameters ?? {}, "templateType", ""),
+      templateRole: readStringParameter(event.parameters ?? {}, "templateRole", ""),
+      quality: event.type === "COAST" ? null : maneuverQualityAnalysis(event),
+    })),
+    deltaVBudget: {
+      totalDeltaVMps: analytics.totalDeltaVMps,
+      breakdown: deltaVBreakdown(events),
+    },
+    fuelBudget: analytics.fuelBudget,
+    spacecraftPerformance: spacecraftPerformanceStatus(analytics.fuelBudget),
+    timelineAnalytics: analytics,
+    orbitEvents: markers,
+    validation,
   };
 }
 

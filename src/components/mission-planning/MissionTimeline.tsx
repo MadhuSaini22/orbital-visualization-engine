@@ -7,7 +7,7 @@ import { OrbitSummaryPanel } from "./OrbitSummaryPanel";
 import type { OrbitSummary } from "./OrbitSummaryPanel";
 import { DetailMetric, HudPanel } from "./ui";
 import type { MissionTrajectoryOverlay, TimelineLayoutModel, TimelineSnapMode, TimelineTimeMode, TimelineZoomPreset, TimelineInteractionModel } from "./types";
-import { buildTimelineLayoutModel, compactIsoUtc, defaultMissionTrajectoryWindowMinutes, displayTimelineTime, estimatedEventDeltaVMps, eventScheduleMode, forceModelSummary, integratorSummary, metOffsetLabelFromSeconds, missionDurationSeconds, missionTimelineAnalytics, missionTrajectoryMaxStepSeconds, missionTrajectoryMinStepSeconds, readNumberParameter, readStringParameter, secondsToDurationLabel, timelineAnalysis, timelineSnapOptions, timelineZoomOptions, validateMissionPlan } from "./utils";
+import { buildMissionReport, buildTimelineLayoutModel, compactIsoUtc, defaultMissionTrajectoryWindowMinutes, deltaVBreakdown, detectOrbitEventMarkers, displayTimelineTime, estimatedEventDeltaVMps, eventScheduleMode, forceModelSummary, integratorSummary, maneuverQualityAnalysis, metOffsetLabelFromSeconds, missionDurationSeconds, missionTimelineAnalytics, missionTrajectoryMaxStepSeconds, missionTrajectoryMinStepSeconds, readNumberParameter, readStringParameter, secondsToDurationLabel, spacecraftPerformanceStatus, timelineAnalysis, timelineSnapOptions, timelineZoomOptions, validateMissionPlan } from "./utils";
 
 export function MissionTimelinePanel({
   mission,
@@ -91,9 +91,12 @@ export function MissionTimelinePanel({
   }), [customZoomHours, snapMode, zoomPreset]);
   const analysis = useMemo(() => timelineAnalysis(mission, events), [events, mission]);
   const missionAnalytics = useMemo(() => missionTimelineAnalytics(mission, events, propagationProfile), [events, mission, propagationProfile]);
+  const orbitEventMarkers = useMemo(() => detectOrbitEventMarkers(trajectoryOverlay?.mission?.trajectory), [trajectoryOverlay]);
+  const dvBreakdown = useMemo(() => deltaVBreakdown(events), [events]);
   const templateGroups = useMemo(() => templateEventGroups(events), [events]);
   const missionValidation = useMemo(() => validateMissionPlan(mission, events, propagationProfile), [events, mission, propagationProfile]);
   const validationStatus = missionValidation.errors.length > 0 ? "Blocked" : missionValidation.warnings.length > 0 ? "Review" : "Ready";
+  const performanceStatus = spacecraftPerformanceStatus(missionAnalytics.fuelBudget);
   const hasEnabledManeuverEvents = events.some((event) => event.enabled && (event.type === "FINITE_BURN" || event.type === "IMPULSIVE_BURN"));
   const trajectoryCurrentBlocker = trajectoryOverlay && !trajectoryStale
     ? "Trajectory is current. Change mission configuration, timeline, or cadence to update."
@@ -236,6 +239,7 @@ export function MissionTimelinePanel({
             <DetailMetric label="Fuel Remaining" value={missionAnalytics.fuelBudget.remainingFuelKg == null ? "Profile not loaded" : `${formatNumber(missionAnalytics.fuelBudget.remainingFuelKg, 3)} kg`} />
             <DetailMetric label="Remaining Delta-V" value={missionAnalytics.fuelBudget.remainingDeltaVMps == null ? "Profile not loaded" : `${formatNumber(missionAnalytics.fuelBudget.remainingDeltaVMps, 2)} m/s`} />
             <DetailMetric label="Orbit Class" value={orbitSummary.classification} />
+            <DetailMetric label="Spacecraft Status" value={performanceStatus} />
           </div>
           {missionAnalytics.fuelBudget.warnings.length > 0 && (
             <div className="mt-3 border border-amber-300/25 bg-amber-300/[0.05] px-3 py-2">
@@ -299,6 +303,99 @@ export function MissionTimelinePanel({
           <div className="mt-3 grid gap-2">
             {templateGroups.map((group) => (
               <TemplateGroupSummary key={group.templateInstanceId} group={group} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {mission && (
+        <div className="mt-3 grid gap-3 lg:grid-cols-2">
+          <div className="border border-cyan-300/15 bg-black/25 p-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Delta-V Budget</p>
+                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Mission-wide maneuver cost by template family.</p>
+              </div>
+              <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
+                {formatNumber(missionAnalytics.totalDeltaVMps, 2)} m/s
+              </span>
+            </div>
+            <div className="mt-3 grid gap-2">
+              {dvBreakdown.length === 0 ? (
+                <p className="border border-white/10 bg-black/20 px-3 py-2 text-xs text-zinc-500">No enabled burn events in the current mission timeline.</p>
+              ) : dvBreakdown.map((item) => (
+                <div key={item.key} className="grid gap-2 border border-white/10 bg-black/20 p-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-xs font-semibold text-zinc-100">{item.label}</span>
+                    <span className="font-mono text-[10px] text-cyan-100">{formatNumber(item.deltaVMps, 2)} m/s · {formatNumber(item.percent, 1)}%</span>
+                  </div>
+                  <div className="h-1.5 overflow-hidden bg-white/10">
+                    <div className="h-full bg-cyan-300" style={{ width: `${Math.min(100, Math.max(0, item.percent))}%` }} />
+                  </div>
+                  <p className="font-mono text-[10px] uppercase text-zinc-600">{item.burnCount} burn{item.burnCount === 1 ? "" : "s"}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="border border-cyan-300/15 bg-black/25 p-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Spacecraft Performance</p>
+                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Capability check from the active propagation profile and planned burns.</p>
+              </div>
+              <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${
+                performanceStatus === "Critical"
+                  ? "border-rose-300/40 text-rose-100"
+                  : performanceStatus === "Caution"
+                    ? "border-amber-300/40 text-amber-100"
+                    : performanceStatus === "Healthy"
+                      ? "border-lime-300/40 text-lime-100"
+                      : "border-white/15 text-zinc-500"
+              }`}>
+                {performanceStatus}
+              </span>
+            </div>
+            <div className="mt-3 grid gap-2 md:grid-cols-2">
+              <DetailMetric label="Current Mass" value={missionAnalytics.fuelBudget.initialMassKg == null ? "Profile not loaded" : `${formatNumber(Math.max((missionAnalytics.fuelBudget.initialMassKg ?? 0) - missionAnalytics.fuelBudget.consumedFuelKg, missionAnalytics.fuelBudget.dryMassKg ?? 0), 3)} kg`} />
+              <DetailMetric label="Dry Mass" value={missionAnalytics.fuelBudget.dryMassKg == null ? "Profile not loaded" : `${formatNumber(missionAnalytics.fuelBudget.dryMassKg, 3)} kg`} />
+              <DetailMetric label="Remaining Propellant" value={missionAnalytics.fuelBudget.remainingFuelKg == null ? "Profile not loaded" : `${formatNumber(missionAnalytics.fuelBudget.remainingFuelKg, 3)} kg`} />
+              <DetailMetric label="Mission Margin" value={missionAnalytics.fuelBudget.fuelMarginPercent == null ? "Profile not loaded" : `${formatNumber(missionAnalytics.fuelBudget.fuelMarginPercent, 1)}%`} />
+            </div>
+            <button
+              type="button"
+              onClick={() => exportMissionReport({ mission, events, orbitSummary, propagationProfile, trajectoryOverlay, missionValidation })}
+              className="mt-3 w-full border border-cyan-300/40 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-300 hover:text-slate-950"
+            >
+              Export Mission Report JSON
+            </button>
+          </div>
+        </div>
+      )}
+
+      {mission && (
+        <div className="mt-3 border border-cyan-300/15 bg-black/25 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Orbit Event Detection</p>
+              <p className="mt-1 text-[11px] leading-5 text-zinc-500">Derived from generated trajectory samples: apsides, node crossings, and low-order eclipse estimates.</p>
+            </div>
+            <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
+              {orbitEventMarkers.length} Markers
+            </span>
+          </div>
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            {orbitEventMarkers.length === 0 ? (
+              <p className="border border-white/10 bg-black/20 px-3 py-2 text-xs text-zinc-500 md:col-span-2">Generate a trajectory to detect perigee, apogee, node, and eclipse events.</p>
+            ) : orbitEventMarkers.slice(0, 8).map((marker) => (
+              <div key={marker.id} className="border border-white/10 bg-black/20 p-2">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="font-mono text-[10px] uppercase text-cyan-100">{marker.type.replaceAll("_", " ")}</p>
+                  <p className="font-mono text-[10px] text-zinc-500">{compactIsoUtc(marker.timeUtc)}</p>
+                </div>
+                <p className="mt-1 text-xs text-zinc-300">Alt {formatNumber(marker.altitudeKm, 2)} km · Lat {formatNumber(marker.latitudeDeg, 2)} deg · Lon {formatNumber(marker.longitudeDeg, 2)} deg</p>
+                <p className="mt-1 text-[11px] leading-5 text-zinc-500">{marker.description}</p>
+              </div>
             ))}
           </div>
         </div>
@@ -739,6 +836,38 @@ function TimelineMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function exportMissionReport({
+  mission,
+  events,
+  orbitSummary,
+  propagationProfile,
+  trajectoryOverlay,
+  missionValidation,
+}: {
+  mission: BackendMission;
+  events: BackendMissionTimelineEvent[];
+  orbitSummary: OrbitSummary;
+  propagationProfile: BackendPropagationProfile | null;
+  trajectoryOverlay: MissionTrajectoryOverlay | null;
+  missionValidation: ReturnType<typeof validateMissionPlan>;
+}) {
+  const report = buildMissionReport({
+    mission,
+    events,
+    orbitSummary,
+    profile: propagationProfile,
+    trajectoryOverlay,
+    validation: missionValidation,
+  });
+  const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${mission.name.replace(/[^a-z0-9_-]+/gi, "-").toLowerCase()}-mission-report.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 type TemplateEventGroup = {
   templateInstanceId: string;
   templateType: string;
@@ -842,6 +971,7 @@ function TimelineEventCard({
   const generatedAt = readStringParameter(parameters, "generatedAt", event.createdAt);
   const executionStrategy = readStringParameter(parameters, "executionStrategy", "");
   const estimatedPropellantKg = readNumberParameter(parameters, "estimatedPropellantKg", 0);
+  const quality = isFiniteBurn || isImpulsiveBurn ? maneuverQualityAnalysis(event) : null;
   const summary = isFiniteBurn
     ? `${readNumberParameter(parameters, "durationSeconds", 0)}s, ${readNumberParameter(parameters, "thrustNewton", 0)} N, ${readStringParameter(parameters, "directionFrame", "TNW")}`
     : isImpulsiveBurn
@@ -893,6 +1023,17 @@ function TimelineEventCard({
               <span>dV {formatNumber(estimatedEventDeltaVMps(event), 2)} m/s</span>
               <span>Prop {estimatedPropellantKg > 0 ? `${formatNumber(estimatedPropellantKg, 3)} kg` : "n/a"}</span>
             </span>
+          </span>
+        )}
+        {quality && (
+          <span className="mt-2 grid gap-1 border border-lime-300/10 bg-lime-300/[0.03] p-2">
+            <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-lime-200">Execution Quality</span>
+            <span className="grid gap-1 font-mono text-[10px] text-zinc-500 md:grid-cols-3">
+              <span>Location {quality.location}</span>
+              <span>Efficiency {quality.efficiency}</span>
+              <span>Alignment {quality.alignment}</span>
+            </span>
+            <span className="text-[11px] leading-5 text-zinc-400">{quality.rationale}</span>
           </span>
         )}
       </button>

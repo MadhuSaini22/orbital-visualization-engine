@@ -9,7 +9,7 @@ import { PropagationProfileEditor } from "./PropagationProfileEditor";
 import { OrbitSummaryPanel } from "./OrbitSummaryPanel";
 import type { OrbitSummary } from "./OrbitSummaryPanel";
 import { DetailMetric, HudPanel } from "./ui";
-import { compactIsoUtc, estimatedEventDeltaVMps, readNumberParameter, readStringParameter, secondsToDurationLabel } from "./utils";
+import { compactIsoUtc, deltaVBreakdown, detectOrbitEventMarkers, estimatedEventDeltaVMps, maneuverQualityAnalysis, readNumberParameter, readStringParameter, secondsToDurationLabel } from "./utils";
 
 const analysisPresetOptions = [
   { id: "FAST_PREVIEW", label: "Fast" },
@@ -110,6 +110,8 @@ export function AnalysisModalContent({
   const impulsiveBurnCount = missionBurnEvents.filter((event) => event.type === "IMPULSIVE_BURN").length;
   const totalBurnDuration = missionBurnEvents.reduce((sum, event) => sum + readNumberParameter(event.parameters ?? {}, "durationSeconds", 0), 0);
   const totalDeltaVMps = missionBurnEvents.reduce((sum, event) => sum + estimatedEventDeltaVMps(event), 0);
+  const orbitEventMarkers = useMemo(() => detectOrbitEventMarkers(trajectoryOverlay?.mission?.trajectory), [trajectoryOverlay]);
+  const dvBreakdown = useMemo(() => deltaVBreakdown(missionEvents), [missionEvents]);
   const visiblePropagationConfig = missionPropagationProfile ?? analysisConfig?.config ?? null;
 
   return (
@@ -143,6 +145,20 @@ export function AnalysisModalContent({
                 <DetailMetric label="Mission Overlay" value={trajectoryOverlay?.mission ? "Ready" : "--"} />
                 <DetailMetric label="Generated" value={trajectoryOverlay ? compactIsoUtc(trajectoryOverlay.generatedAt) : "--"} />
                 <DetailMetric label="Cadence" value={trajectoryOverlay ? `${trajectoryOverlay.sampleCadenceSeconds}s` : "--"} />
+                <DetailMetric label="Orbit Events" value={String(orbitEventMarkers.length)} />
+              </div>
+              <div className="mt-3 grid gap-2">
+                {orbitEventMarkers.length === 0 ? (
+                  <p className="border border-white/10 bg-black/25 px-3 py-2 text-xs text-zinc-500">Generate trajectory samples to detect apsides, node crossings, and eclipse transitions.</p>
+                ) : orbitEventMarkers.slice(0, 6).map((marker) => (
+                  <div key={marker.id} className="border border-white/10 bg-black/25 px-3 py-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="font-mono text-[10px] uppercase text-cyan-100">{marker.type.replaceAll("_", " ")}</p>
+                      <p className="font-mono text-[10px] text-zinc-500">{compactIsoUtc(marker.timeUtc)}</p>
+                    </div>
+                    <p className="mt-1 text-xs text-zinc-400">Alt {formatNumber(marker.altitudeKm, 2)} km · radius {formatNumber(marker.radiusKm, 2)} km</p>
+                  </div>
+                ))}
               </div>
             </HudPanel>
 
@@ -262,27 +278,30 @@ export function AnalysisModalContent({
                 <DetailMetric label="Finite" value={String(finiteBurnCount)} />
                 <DetailMetric label="Impulsive" value={String(impulsiveBurnCount)} />
               </div>
+              <div className="mt-3 border border-cyan-300/15 bg-black/20 p-3">
+                <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Delta-V Contribution</p>
+                <div className="mt-2 grid gap-2">
+                  {dvBreakdown.length === 0 ? (
+                    <p className="text-xs text-zinc-500">No enabled burns to budget.</p>
+                  ) : dvBreakdown.map((item) => (
+                    <div key={item.key} className="grid gap-1">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-xs text-zinc-200">{item.label}</span>
+                        <span className="font-mono text-[10px] text-cyan-100">{formatNumber(item.deltaVMps, 2)} m/s · {formatNumber(item.percent, 1)}%</span>
+                      </div>
+                      <div className="h-1.5 overflow-hidden bg-white/10">
+                        <div className="h-full bg-cyan-300" style={{ width: `${Math.min(100, Math.max(0, item.percent))}%` }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
               <div className="thin-scrollbar mt-3 max-h-[42vh] space-y-2 overflow-y-scroll pr-1">
                 {missionBurnEvents.length === 0 ? (
                   <p className="border border-white/10 bg-black/25 px-3 py-2 text-xs text-zinc-500">No maneuver burn mission events found.</p>
                 ) : (
                   missionBurnEvents.toSorted((a, b) => a.sequenceIndex - b.sequenceIndex).map((event) => (
-                    <div key={event.id} className="border border-rose-300/25 bg-rose-300/[0.04] p-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-semibold text-white">{event.name}</p>
-                          <p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">{compactIsoUtc(event.executionTime)}</p>
-                        </div>
-                        <span className="border border-rose-300/40 px-2 py-0.5 font-mono text-[10px] uppercase text-rose-100">
-                          {event.type === "IMPULSIVE_BURN" ? "Impulse" : "Finite"}
-                        </span>
-                      </div>
-                      <div className="mt-2 grid grid-cols-3 gap-2">
-                        <DetailMetric label={event.type === "IMPULSIVE_BURN" ? "Delta-V" : "Duration"} value={event.type === "IMPULSIVE_BURN" ? `${formatNumber(estimatedEventDeltaVMps(event), 2)} m/s` : `${readNumberParameter(event.parameters ?? {}, "durationSeconds", 0)}s`} />
-                        <DetailMetric label={event.type === "IMPULSIVE_BURN" ? "Isp" : "Thrust"} value={event.type === "IMPULSIVE_BURN" ? `${readNumberParameter(event.parameters ?? {}, "ispSeconds", 0)}s` : `${readNumberParameter(event.parameters ?? {}, "thrustNewton", 0)} N`} />
-                        <DetailMetric label="Frame" value={readStringParameter(event.parameters ?? {}, "directionFrame", "TNW")} />
-                      </div>
-                    </div>
+                    <ManeuverAnalysisCard key={event.id} event={event} />
                   ))
                 )}
               </div>
@@ -330,6 +349,37 @@ export function AnalysisModalContent({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function ManeuverAnalysisCard({ event }: { event: BackendMissionTimelineEvent }) {
+  const quality = maneuverQualityAnalysis(event);
+  return (
+    <div className="border border-rose-300/25 bg-rose-300/[0.04] p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-white">{event.name}</p>
+                          <p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">{compactIsoUtc(event.executionTime)}</p>
+                        </div>
+                        <span className="border border-rose-300/40 px-2 py-0.5 font-mono text-[10px] uppercase text-rose-100">
+                          {event.type === "IMPULSIVE_BURN" ? "Impulse" : "Finite"}
+                        </span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-3 gap-2">
+                        <DetailMetric label={event.type === "IMPULSIVE_BURN" ? "Delta-V" : "Duration"} value={event.type === "IMPULSIVE_BURN" ? `${formatNumber(estimatedEventDeltaVMps(event), 2)} m/s` : `${readNumberParameter(event.parameters ?? {}, "durationSeconds", 0)}s`} />
+                        <DetailMetric label={event.type === "IMPULSIVE_BURN" ? "Isp" : "Thrust"} value={event.type === "IMPULSIVE_BURN" ? `${readNumberParameter(event.parameters ?? {}, "ispSeconds", 0)}s` : `${readNumberParameter(event.parameters ?? {}, "thrustNewton", 0)} N`} />
+                        <DetailMetric label="Frame" value={readStringParameter(event.parameters ?? {}, "directionFrame", "TNW")} />
+                      </div>
+      <div className="mt-3 border border-lime-300/15 bg-lime-300/[0.03] p-2">
+        <p className="font-mono text-[10px] uppercase text-lime-200">Execution Quality</p>
+        <div className="mt-2 grid gap-2 md:grid-cols-3">
+          <DetailMetric label="Location" value={quality.location} />
+          <DetailMetric label="Efficiency" value={quality.efficiency} />
+          <DetailMetric label="Alignment" value={quality.alignment} />
+        </div>
+        <p className="mt-2 text-xs leading-5 text-zinc-400">{quality.rationale}</p>
+      </div>
     </div>
   );
 }
