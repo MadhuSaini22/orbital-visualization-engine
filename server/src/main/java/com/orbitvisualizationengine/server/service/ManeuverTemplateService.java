@@ -36,6 +36,7 @@ public class ManeuverTemplateService {
   private static final double EARTH_RADIUS_KM = Constants.WGS84_EARTH_EQUATORIAL_RADIUS / 1000.0;
   private static final double MU = Constants.EGM96_EARTH_MU;
   private static final double SMALL_ECCENTRICITY = 1.0e-6;
+  private static final double NEAR_CIRCULAR_ECCENTRICITY = 1.0e-3;
   private static final double INTERSECTION_TOLERANCE_KM = 1.0;
 
   private final MissionService missions;
@@ -148,8 +149,8 @@ public class ManeuverTemplateService {
       int sequenceIndex) {
     double initialRadiusMeters = orbit.getPosition().getNorm();
     double targetRadiusMeters = radiusMeters(request.targetAltitudeKm());
-    if (Math.abs(targetRadiusMeters - initialRadiusMeters) < 1.0) {
-      throw new IllegalArgumentException("Target altitude must differ from the current orbital radius for a Hohmann transfer.");
+    if (Math.abs(targetRadiusMeters - initialRadiusMeters) < 1000.0) {
+      throw new IllegalArgumentException("Target orbit altitude must differ from the current altitude by at least 1 km for a Hohmann transfer.");
     }
 
     double transferSemiMajorAxisMeters = (initialRadiusMeters + targetRadiusMeters) / 2.0;
@@ -321,7 +322,8 @@ public class ManeuverTemplateService {
     List<String> warnings = new ArrayList<>();
     double eccentricity = orbit.getE();
     double currentRadiusMeters = orbit.getPosition().getNorm();
-    if (eccentricity < SMALL_ECCENTRICITY) {
+    if (eccentricity < NEAR_CIRCULAR_ECCENTRICITY) {
+      warnings.add("Current orbit is already near-circular; circularization delta-v may be very small.");
       if (Math.abs(currentRadiusMeters - targetRadiusMeters) / 1000.0 > INTERSECTION_TOLERANCE_KM) {
         warnings.add("Current orbit is near-circular and does not naturally coast to the requested target altitude; circularization is computed at the current radius.");
       }

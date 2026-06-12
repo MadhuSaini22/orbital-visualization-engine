@@ -150,6 +150,16 @@ type ManeuverTemplateDraft = {
   inclinationChangeDeg: string;
   executionStrategy: PlaneChangeExecutionStrategy;
 };
+type ManeuverTemplateOrbitSummary = {
+  orbitType: string;
+  currentAltitudeKm: number | null;
+  localVelocityKmps: number | null;
+  perigeeAltitudeKm: number | null;
+  apogeeAltitudeKm: number | null;
+  semiMajorAxisKm: number | null;
+  inclinationDeg: number | null;
+  eccentricity: number | null;
+};
 type TimelineEditorDraft = {
   type: TimelineEventDraftType;
   name: string;
@@ -305,6 +315,8 @@ const orbitTemplateCategories = [
 ] satisfies OrbitTemplateCategory[];
 const missionTrajectoryMinStepSeconds = 5;
 const missionTrajectoryMaxStepSeconds = 3600;
+const earthMuKm3S2 = 398600.4418;
+const earthRadiusKm = 6378.137;
 
 const fallbackCapabilities: BackendCapabilityRegistry = {
   propagators: [
@@ -1684,6 +1696,14 @@ function readStringParameter(parameters: Record<string, unknown>, key: string, f
   return typeof value === "string" && value.trim() ? value : fallback;
 }
 
+function templateEndpointErrorMessage(error: unknown, fallback: string) {
+  const message = userErrorMessage(error, fallback);
+  if (message.includes("status 404")) {
+    return "Maneuver template endpoint was not found. Restart the orbit analysis backend so the preview/apply routes are loaded.";
+  }
+  return message;
+}
+
 function userErrorMessage(error: unknown, fallback: string) {
   if (!(error instanceof Error)) {
     return fallback;
@@ -1693,6 +1713,102 @@ function userErrorMessage(error: unknown, fallback: string) {
     return fallback;
   }
   return message;
+}
+
+function vectorNorm(values: [number, number, number]) {
+  return Math.hypot(values[0], values[1], values[2]);
+}
+
+function vectorCross(left: [number, number, number], right: [number, number, number]): [number, number, number] {
+  return [
+    left[1] * right[2] - left[2] * right[1],
+    left[2] * right[0] - left[0] * right[2],
+    left[0] * right[1] - left[1] * right[0],
+  ];
+}
+
+function maneuverOrbitSummaryFromSnapshot(snapshot: SatelliteSnapshot | null | undefined): ManeuverTemplateOrbitSummary {
+  const satellite = snapshot?.satellite;
+  const state = snapshot?.state;
+  const base: ManeuverTemplateOrbitSummary = {
+    orbitType: satellite?.sourceType === "TLE"
+      ? "TLE"
+      : satellite?.sourceType === "MANUAL_STATE"
+        ? "Manual orbit"
+        : satellite?.sourceType ?? "Unknown",
+    currentAltitudeKm: typeof state?.altitudeKm === "number" && Number.isFinite(state.altitudeKm) ? state.altitudeKm : null,
+    localVelocityKmps: typeof state?.velocityKmps === "number" && Number.isFinite(state.velocityKmps) ? state.velocityKmps : null,
+    perigeeAltitudeKm: null,
+    apogeeAltitudeKm: null,
+    semiMajorAxisKm: null,
+    inclinationDeg: null,
+    eccentricity: null,
+  };
+  if (!state?.positionEciKm || !state.velocityEciKmps) {
+    return base;
+  }
+
+  const r = state.positionEciKm;
+  const v = state.velocityEciKmps;
+  const radiusKm = vectorNorm(r);
+  const speedKmps = vectorNorm(v);
+  const h = vectorCross(r, v);
+  const hNorm = vectorNorm(h);
+  if (!Number.isFinite(radiusKm) || radiusKm <= 0 || !Number.isFinite(speedKmps) || hNorm <= 0) {
+    return base;
+  }
+
+  const semiMajorAxisKm = 1.0 / ((2.0 / radiusKm) - ((speedKmps * speedKmps) / earthMuKm3S2));
+  const vxh = vectorCross(v, h);
+  const eccentricityVector: [number, number, number] = [
+    (vxh[0] / earthMuKm3S2) - (r[0] / radiusKm),
+    (vxh[1] / earthMuKm3S2) - (r[1] / radiusKm),
+    (vxh[2] / earthMuKm3S2) - (r[2] / radiusKm),
+  ];
+  const eccentricity = vectorNorm(eccentricityVector);
+  const inclinationDeg = Math.acos(Math.max(-1, Math.min(1, h[2] / hNorm))) * 180 / Math.PI;
+  const perigeeRadiusKm = semiMajorAxisKm * (1 - eccentricity);
+  const apogeeRadiusKm = semiMajorAxisKm * (1 + eccentricity);
+
+  return {
+    ...base,
+    currentAltitudeKm: radiusKm - earthRadiusKm,
+    localVelocityKmps: speedKmps,
+    perigeeAltitudeKm: Number.isFinite(perigeeRadiusKm) ? perigeeRadiusKm - earthRadiusKm : null,
+    apogeeAltitudeKm: Number.isFinite(apogeeRadiusKm) ? apogeeRadiusKm - earthRadiusKm : null,
+    semiMajorAxisKm: Number.isFinite(semiMajorAxisKm) ? semiMajorAxisKm : null,
+    inclinationDeg: Number.isFinite(inclinationDeg) ? inclinationDeg : null,
+    eccentricity: Number.isFinite(eccentricity) ? eccentricity : null,
+  };
+}
+
+function maneuverTemplateDraftEstimateMps(draft: ManeuverTemplateDraft, orbitSummary: ManeuverTemplateOrbitSummary) {
+  if (draft.type === "PLANE_CHANGE") {
+    const inclinationChange = Number(draft.inclinationChangeDeg);
+    if (!Number.isFinite(inclinationChange) || !orbitSummary.localVelocityKmps) {
+      return null;
+    }
+    return 2 * orbitSummary.localVelocityKmps * 1000 * Math.sin(Math.abs(inclinationChange) * Math.PI / 360);
+  }
+  const targetAltitudeKm = Number(draft.targetAltitudeKm);
+  if (!Number.isFinite(targetAltitudeKm) || targetAltitudeKm < 0 || orbitSummary.currentAltitudeKm == null) {
+    return null;
+  }
+  const currentRadiusKm = orbitSummary.currentAltitudeKm + earthRadiusKm;
+  const targetRadiusKm = targetAltitudeKm + earthRadiusKm;
+  if (draft.type === "HOHMANN_TRANSFER") {
+    const transferSemiMajorAxisKm = (currentRadiusKm + targetRadiusKm) / 2;
+    const circularSpeedInitial = Math.sqrt(earthMuKm3S2 / currentRadiusKm);
+    const circularSpeedTarget = Math.sqrt(earthMuKm3S2 / targetRadiusKm);
+    const transferPeriapsisSpeed = Math.sqrt(earthMuKm3S2 * ((2 / currentRadiusKm) - (1 / transferSemiMajorAxisKm)));
+    const transferApoapsisSpeed = Math.sqrt(earthMuKm3S2 * ((2 / targetRadiusKm) - (1 / transferSemiMajorAxisKm)));
+    return (Math.abs(transferPeriapsisSpeed - circularSpeedInitial) + Math.abs(circularSpeedTarget - transferApoapsisSpeed)) * 1000;
+  }
+  const localVelocityKmps = orbitSummary.localVelocityKmps;
+  if (!localVelocityKmps || Math.abs(targetRadiusKm - currentRadiusKm) > 1) {
+    return null;
+  }
+  return Math.abs(Math.sqrt(earthMuKm3S2 / currentRadiusKm) - localVelocityKmps) * 1000;
 }
 
 function getConjunctionStatusFromRisk(event: ConjunctionEvent, missDistanceKm: number) {
@@ -1759,6 +1875,7 @@ export function OrbitalDashboard() {
   const [maneuverTemplateDraft, setManeuverTemplateDraft] = useState<ManeuverTemplateDraft>(defaultManeuverTemplateDraft);
   const [maneuverTemplatePreview, setManeuverTemplatePreview] = useState<ManeuverTemplatePreview | null>(null);
   const [isManeuverTemplateLoading, setIsManeuverTemplateLoading] = useState(false);
+  const [maneuverTemplateError, setManeuverTemplateError] = useState<string | null>(null);
   const [isMissionSetupOpen, setIsMissionSetupOpen] = useState(false);
   const [missionSetupDraft, setMissionSetupDraft] = useState<MissionSetupDraft>(
     () => missionSetupDraftFor(null, initialSimulationTime),
@@ -1984,6 +2101,10 @@ export function OrbitalDashboard() {
   const missionSubjectSnapshot = activeDataSource === "endpoint" && importedMissionSpacecraftId
     ? snapshots.find((item) => item.satellite.id === importedMissionSpacecraftId) ?? selectedSnapshot
     : selectedSnapshot;
+  const maneuverTemplateOrbitSummary = useMemo(
+    () => maneuverOrbitSummaryFromSnapshot(missionSubjectSnapshot),
+    [missionSubjectSnapshot],
+  );
   const selectedNoradId = activeDataSource === "manual" ? null : selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? null;
   const canUseAnalysisConfig = activeDataSource === "backend" && Boolean(selectedNoradId);
   const importedMissionSubjectCandidates = useMemo<MissionSubjectOption[]>(() => {
@@ -2208,6 +2329,7 @@ export function OrbitalDashboard() {
     setTimelineModalMode(null);
     setIsManeuverTemplateOpen(false);
     setManeuverTemplatePreview(null);
+    setManeuverTemplateError(null);
     setTimelineStatus(null);
     setMissionTrajectoryOverlay(null);
     setMissionPropagationProfile(null);
@@ -3049,6 +3171,7 @@ export function OrbitalDashboard() {
       targetAltitudeKm: Number.isFinite(altitudeKm) ? String(Math.max(0, Math.round(altitudeKm ?? 500))) : "500",
     });
     setManeuverTemplatePreview(null);
+    setManeuverTemplateError(null);
     setIsManeuverTemplateOpen(true);
   }, [missionSubjectSnapshot]);
 
@@ -3088,6 +3211,7 @@ export function OrbitalDashboard() {
       return;
     }
     setIsManeuverTemplateLoading(true);
+    setManeuverTemplateError(null);
     setTimelineStatus("Previewing maneuver template...");
     try {
       const preview = await previewManeuverTemplate(mission.id, maneuverTemplateRequest());
@@ -3095,7 +3219,8 @@ export function OrbitalDashboard() {
       setTimelineStatus(`${preview.events.length} generated primitive event${preview.events.length === 1 ? "" : "s"} previewed.`);
       toast.success("Maneuver template preview ready.");
     } catch (error) {
-      const message = userErrorMessage(error, "Unable to preview maneuver template.");
+      const message = templateEndpointErrorMessage(error, "Unable to preview maneuver template.");
+      setManeuverTemplateError(message);
       setTimelineStatus(message);
       toast.error(message);
     } finally {
@@ -3109,6 +3234,7 @@ export function OrbitalDashboard() {
       return;
     }
     setIsManeuverTemplateLoading(true);
+    setManeuverTemplateError(null);
     setTimelineStatus("Applying maneuver template...");
     setActiveOperationLabel("Saving timeline event...");
     try {
@@ -3121,7 +3247,8 @@ export function OrbitalDashboard() {
       setTimelineStatus(`Applied ${response.events.length} generated primitive event${response.events.length === 1 ? "" : "s"} to the timeline.`);
       toast.success("Maneuver template applied.");
     } catch (error) {
-      const message = userErrorMessage(error, "Unable to apply maneuver template.");
+      const message = templateEndpointErrorMessage(error, "Unable to apply maneuver template.");
+      setManeuverTemplateError(message);
       setTimelineStatus(message);
       toast.error(message);
     } finally {
@@ -4302,16 +4429,20 @@ export function OrbitalDashboard() {
         <ManeuverTemplateModal
           draft={maneuverTemplateDraft}
           preview={maneuverTemplatePreview}
+          orbitSummary={maneuverTemplateOrbitSummary}
           loading={isManeuverTemplateLoading}
+          error={maneuverTemplateError}
           onDraftChange={(draft) => {
             setManeuverTemplateDraft(draft);
             setManeuverTemplatePreview(null);
+            setManeuverTemplateError(null);
           }}
           onPreview={previewSelectedManeuverTemplate}
           onApply={applySelectedManeuverTemplate}
           onClose={() => {
             setIsManeuverTemplateOpen(false);
             setManeuverTemplatePreview(null);
+            setManeuverTemplateError(null);
           }}
         />
       )}
@@ -6192,7 +6323,9 @@ function MissionSetupModal({
 function ManeuverTemplateModal({
   draft,
   preview,
+  orbitSummary,
   loading,
+  error,
   onDraftChange,
   onPreview,
   onApply,
@@ -6200,7 +6333,9 @@ function ManeuverTemplateModal({
 }: {
   draft: ManeuverTemplateDraft;
   preview: ManeuverTemplatePreview | null;
+  orbitSummary: ManeuverTemplateOrbitSummary;
   loading: boolean;
+  error: string | null;
   onDraftChange: (draft: ManeuverTemplateDraft) => void;
   onPreview: () => void;
   onApply: () => void;
@@ -6208,9 +6343,24 @@ function ManeuverTemplateModal({
 }) {
   const targetAltitude = Number(draft.targetAltitudeKm);
   const inclinationChange = Number(draft.inclinationChangeDeg);
-  const canPreview = draft.type === "PLANE_CHANGE"
-    ? Number.isFinite(inclinationChange) && inclinationChange !== 0 && !loading
-    : Number.isFinite(targetAltitude) && targetAltitude >= 0 && !loading;
+  const validationMessages: Array<{ tone: "error" | "warning"; message: string }> = [];
+  if (draft.type === "PLANE_CHANGE") {
+    if (!Number.isFinite(inclinationChange) || Math.abs(inclinationChange) <= 0) {
+      validationMessages.push({ tone: "error", message: "Inclination change magnitude must be greater than 0 degrees." });
+    }
+  } else {
+    if (!Number.isFinite(targetAltitude) || targetAltitude < 0) {
+      validationMessages.push({ tone: "error", message: "Target altitude must be a number greater than or equal to 0 km." });
+    }
+    if (draft.type === "CIRCULARIZATION" && orbitSummary.eccentricity != null && orbitSummary.eccentricity < 0.001) {
+      validationMessages.push({ tone: "warning", message: "Current orbit is already near-circular; the circularization burn may be very small." });
+    }
+    if (draft.type === "HOHMANN_TRANSFER" && Number.isFinite(targetAltitude) && orbitSummary.currentAltitudeKm != null && Math.abs(targetAltitude - orbitSummary.currentAltitudeKm) < 1) {
+      validationMessages.push({ tone: "error", message: "Target orbit altitude must differ from the current altitude by at least 1 km." });
+    }
+  }
+  const hasBlockingValidation = validationMessages.some((item) => item.tone === "error");
+  const canPreview = !hasBlockingValidation && !loading;
   const applyBlocked = preview?.warnings.some((warning) => warning.includes("cannot be applied")) ?? false;
   const canApply = Boolean(preview && preview.events.length > 0 && !loading && !applyBlocked);
   const totalDeltaV = readNumberParameter(preview?.metadata ?? {}, "totalDeltaVMps", 0);
@@ -6218,6 +6368,7 @@ function ManeuverTemplateModal({
   const coastSeconds = readNumberParameter(preview?.metadata ?? {}, "coastSeconds", 0);
   const executionLocation = readStringParameter(preview?.metadata ?? {}, "executionLocation", "Not applicable");
   const executionStrategy = readStringParameter(preview?.metadata ?? {}, "executionStrategy", "Not applicable");
+  const draftEstimateMps = maneuverTemplateDraftEstimateMps(draft, orbitSummary);
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
@@ -6241,6 +6392,26 @@ function ManeuverTemplateModal({
         </div>
 
         <div className="thin-scrollbar min-h-0 overflow-y-auto p-5">
+          <div className="mb-5 border border-cyan-300/15 bg-black/25 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Current Orbit Summary</p>
+                <p className="mt-1 text-xs text-zinc-500">Template calculations use the current mission orbit state.</p>
+              </div>
+              <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
+                {orbitSummary.orbitType}
+              </span>
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-3">
+              <TemplateMetric label="Perigee Alt" value={formatTemplateNumber(orbitSummary.perigeeAltitudeKm, "km", 2)} />
+              <TemplateMetric label="Apogee Alt" value={formatTemplateNumber(orbitSummary.apogeeAltitudeKm, "km", 2)} />
+              <TemplateMetric label="Semi-Major Axis" value={formatTemplateNumber(orbitSummary.semiMajorAxisKm, "km", 2)} />
+              <TemplateMetric label="Inclination" value={formatTemplateNumber(orbitSummary.inclinationDeg, "deg", 3)} />
+              <TemplateMetric label="Eccentricity" value={formatTemplateNumber(orbitSummary.eccentricity, "", 6)} />
+              <TemplateMetric label="Current Alt" value={formatTemplateNumber(orbitSummary.currentAltitudeKm, "km", 2)} />
+            </div>
+          </div>
+
           <div className="grid grid-cols-3 gap-2 max-sm:grid-cols-1">
             {(["CIRCULARIZATION", "HOHMANN_TRANSFER", "PLANE_CHANGE"] as const).map((type) => (
               <button
@@ -6258,10 +6429,10 @@ function ManeuverTemplateModal({
                 </span>
                 <span className={`mt-1 block text-xs ${draft.type === type ? "text-slate-800" : "text-zinc-500"}`}>
                   {type === "CIRCULARIZATION"
-                    ? "Generate one impulsive burn at the circularization point."
+                    ? "Convert an elliptical orbit into a circular orbit using a single burn."
                     : type === "HOHMANN_TRANSFER"
-                      ? "Generate burn, transfer coast, and burn primitives."
-                      : "Generate a normal-axis impulsive burn at the selected execution point."}
+                      ? "Transfer between two circular orbits using two burns and a coast phase."
+                      : "Change orbital inclination by rotating the orbital plane."}
                 </span>
               </button>
             ))}
@@ -6300,6 +6471,43 @@ function ManeuverTemplateModal({
                   className="timeline-input"
                 />
               </TimelineField>
+            )}
+
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="border border-white/10 bg-black/20 p-3">
+                <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Estimated dV Before Preview</p>
+                <p className="mt-1 font-mono text-sm font-semibold text-zinc-100">
+                  {draftEstimateMps == null ? "Preview required" : `${formatNumber(draftEstimateMps, 3)} m/s`}
+                </p>
+              </div>
+              <div className="border border-white/10 bg-black/20 p-3">
+                <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Generated Primitives</p>
+                <p className="mt-1 text-xs leading-5 text-zinc-400">
+                  {draft.type === "HOHMANN_TRANSFER" ? "Impulsive burn, coast, impulsive burn." : draft.type === "PLANE_CHANGE" ? "Optional coast, impulsive burn." : "Optional coast, impulsive burn."}
+                </p>
+              </div>
+            </div>
+
+            {(validationMessages.length > 0 || error) && (
+              <div className="grid gap-2">
+                {validationMessages.map((item) => (
+                  <p
+                    key={item.message}
+                    className={`border px-3 py-2 text-xs leading-5 ${
+                      item.tone === "error"
+                        ? "border-rose-300/30 bg-rose-300/[0.06] text-rose-100"
+                        : "border-amber-300/25 bg-amber-300/[0.05] text-amber-100"
+                    }`}
+                  >
+                    {item.message}
+                  </p>
+                ))}
+                {error && (
+                  <p className="border border-rose-300/30 bg-rose-300/[0.06] px-3 py-2 text-xs leading-5 text-rose-100">
+                    {error}
+                  </p>
+                )}
+              </div>
             )}
 
             <div className="border border-cyan-300/15 bg-black/25 p-3">
@@ -6384,6 +6592,14 @@ function TemplateMetric({ label, value }: { label: string; value: string }) {
       <p className="mt-1 break-words font-mono text-xs font-semibold leading-5 text-zinc-100">{value}</p>
     </div>
   );
+}
+
+function formatTemplateNumber(value: number | null, unit: string, fractionDigits: number) {
+  if (value == null || !Number.isFinite(value)) {
+    return "Unavailable";
+  }
+  const formatted = formatNumber(value, fractionDigits);
+  return unit ? `${formatted} ${unit}` : formatted;
 }
 
 function ManeuverTemplatePreviewRow({ event, index }: { event: CreateTimelineEventRequest; index: number }) {

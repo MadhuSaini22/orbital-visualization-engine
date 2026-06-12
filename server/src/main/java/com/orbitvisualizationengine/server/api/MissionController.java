@@ -2,9 +2,6 @@ package com.orbitvisualizationengine.server.api;
 
 import com.orbitvisualizationengine.server.dto.CreateMissionRequest;
 import com.orbitvisualizationengine.server.dto.CreateTimelineEventRequest;
-import com.orbitvisualizationengine.server.dto.ManeuverTemplateApplyResponse;
-import com.orbitvisualizationengine.server.dto.ManeuverTemplatePreview;
-import com.orbitvisualizationengine.server.dto.ManeuverTemplateRequest;
 import com.orbitvisualizationengine.server.dto.MissionTrajectoryRequest;
 import com.orbitvisualizationengine.server.dto.MissionResponse;
 import com.orbitvisualizationengine.server.dto.MissionTimelineEventResponse;
@@ -16,7 +13,6 @@ import com.orbitvisualizationengine.server.dto.UpdateTimelineEventRequest;
 import com.orbitvisualizationengine.server.service.MissionService;
 import com.orbitvisualizationengine.server.service.MissionTimelineService;
 import com.orbitvisualizationengine.server.service.MissionTrajectoryService;
-import com.orbitvisualizationengine.server.service.ManeuverTemplateService;
 import com.orbitvisualizationengine.server.service.PropagationProfileService;
 import jakarta.validation.Valid;
 import java.util.List;
@@ -35,19 +31,16 @@ public class MissionController {
   private final MissionService missions;
   private final MissionTimelineService timeline;
   private final MissionTrajectoryService trajectories;
-  private final ManeuverTemplateService maneuverTemplates;
   private final PropagationProfileService propagationProfiles;
 
   public MissionController(
       MissionService missions,
       MissionTimelineService timeline,
       MissionTrajectoryService trajectories,
-      ManeuverTemplateService maneuverTemplates,
       PropagationProfileService propagationProfiles) {
     this.missions = missions;
     this.timeline = timeline;
     this.trajectories = trajectories;
-    this.maneuverTemplates = maneuverTemplates;
     this.propagationProfiles = propagationProfiles;
   }
 
@@ -112,20 +105,6 @@ public class MissionController {
   @PostMapping("/{missionId}/timeline/events/{eventId}/disable")
   MissionTimelineEventResponse disableEvent(@PathVariable String missionId, @PathVariable String eventId) {
     return MissionTimelineEventResponse.from(timeline.setEnabled(missionId, eventId, false));
-  }
-
-  @PostMapping("/{missionId}/maneuver-templates/preview")
-  ManeuverTemplatePreview previewManeuverTemplate(
-      @PathVariable String missionId,
-      @Valid @RequestBody ManeuverTemplateRequest request) {
-    return maneuverTemplates.preview(missionId, request);
-  }
-
-  @PostMapping("/{missionId}/maneuver-templates/apply")
-  ManeuverTemplateApplyResponse applyManeuverTemplate(
-      @PathVariable String missionId,
-      @Valid @RequestBody ManeuverTemplateRequest request) {
-    return maneuverTemplates.apply(missionId, request);
   }
 
   @PostMapping("/{missionId}/trajectory")
