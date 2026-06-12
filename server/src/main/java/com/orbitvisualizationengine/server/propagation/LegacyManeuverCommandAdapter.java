@@ -21,6 +21,9 @@ public class LegacyManeuverCommandAdapter {
         direction[0],
         direction[1],
         direction[2],
+        0.0,
+        0.0,
+        0.0,
         true,
         maneuver.metadata());
   }

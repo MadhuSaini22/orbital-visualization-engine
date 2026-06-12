@@ -190,6 +190,9 @@ function timelineEventDurationSeconds(event: BackendMissionTimelineEvent, nextEv
   if (event.type === "FINITE_BURN") {
     return Math.max(0, readNumberParameter(event.parameters ?? {}, "durationSeconds", 0));
   }
+  if (event.type === "IMPULSIVE_BURN") {
+    return 0;
+  }
   const eventMs = new Date(event.executionTime).getTime();
   const nextMs = nextEvent ? new Date(nextEvent.executionTime).getTime() : mission ? new Date(mission.scenarioEnd).getTime() : Number.NaN;
   if (!Number.isFinite(eventMs) || !Number.isFinite(nextMs)) {
@@ -258,10 +261,29 @@ export function timelineAnalysis(mission: BackendMission | null, events: Backend
   return {
     missionDuration,
     eventCount: events.length,
-    burnCount: events.filter((event) => event.type === "FINITE_BURN").length,
+    burnCount: events.filter((event) => event.type === "FINITE_BURN" || event.type === "IMPULSIVE_BURN").length,
+    finiteBurnCount: events.filter((event) => event.type === "FINITE_BURN").length,
+    impulsiveBurnCount: events.filter((event) => event.type === "IMPULSIVE_BURN").length,
     coastCount: events.filter((event) => event.type === "COAST").length,
+    cumulativeDeltaVMps: events.reduce((total, event) => total + estimatedEventDeltaVMps(event), 0),
     warnings,
   };
+}
+
+export function estimatedEventDeltaVMps(event: BackendMissionTimelineEvent) {
+  const parameters = event.parameters ?? {};
+  if (event.type === "IMPULSIVE_BURN") {
+    const x = readNumberParameter(parameters, "deltaVxMps", 0);
+    const y = readNumberParameter(parameters, "deltaVyMps", 0);
+    const z = readNumberParameter(parameters, "deltaVzMps", 0);
+    return Math.sqrt(x * x + y * y + z * z);
+  }
+  if (event.type === "FINITE_BURN") {
+    const thrust = readNumberParameter(parameters, "thrustNewton", 0);
+    const duration = readNumberParameter(parameters, "durationSeconds", 0);
+    return thrust > 0 && duration > 0 ? thrust * duration / 1000 : 0;
+  }
+  return 0;
 }
 
 export function forceModelSummary(profile: BackendPropagationProfile | null) {
@@ -319,7 +341,8 @@ function visualTimelineBlocks(mission: BackendMission | null, events: BackendMis
     const nextEvent = ordered[index + 1] ?? null;
     const durationSeconds = timelineEventDurationSeconds(event, nextEvent, mission);
     const offsetSeconds = resolvedSchedule.offsets.get(event.id) ?? 0;
-    const widthPercent = Math.min(100, Math.max(18, (durationSeconds / missionSeconds) * 100));
+    const minWidthPercent = event.type === "IMPULSIVE_BURN" ? 2.5 : 18;
+    const widthPercent = Math.min(100, Math.max(minWidthPercent, (durationSeconds / missionSeconds) * 100));
     const startPercent = Math.min(100, Math.max(0, (offsetSeconds / missionSeconds) * 100));
     return { event, offsetSeconds, durationSeconds, widthPercent, startPercent };
   });

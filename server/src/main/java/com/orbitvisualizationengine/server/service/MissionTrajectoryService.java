@@ -88,11 +88,11 @@ public class MissionTrajectoryService {
     OrbitPropagator selected = selectPropagator(missionConfig.propagatorType());
     if (!commands.isEmpty() && !selected.supportsManeuvers()) {
       throw new IllegalArgumentException(
-          "Mission contains finite-burn events, but " + missionConfig.propagatorType() + " propagation does not support maneuver execution. Select NUMERICAL propagation or disable burn events.");
+          "Mission contains maneuver events, but " + missionConfig.propagatorType() + " propagation does not support maneuver execution. Select NUMERICAL propagation or disable burn events.");
     }
     if (!commands.isEmpty() && !missionConfig.maneuverModelEnabled()) {
       throw new IllegalArgumentException(
-          "Mission contains finite-burn events, but the mission propagation profile has maneuver model disabled.");
+          "Mission contains maneuver events, but the mission propagation profile has maneuver model disabled.");
     }
     return new MissionTrajectoryResult(
         selected.name(),

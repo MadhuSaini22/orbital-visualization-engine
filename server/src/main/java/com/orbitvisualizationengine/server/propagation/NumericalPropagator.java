@@ -137,6 +137,13 @@ public class NumericalPropagator implements OrbitPropagator {
     propagator.setInitialState(initialState);
 
     forceModels(context).forEach(propagator::addForceModel);
+    if (context.analysisConfig().maneuverModelEnabled()) {
+      context.maneuverCommands().stream()
+          .filter(PropagationManeuverCommand::enabled)
+          .filter(command -> command.maneuverType() == PropagationManeuverType.IMPULSIVE_BURN)
+          .map(maneuverFactory::impulse)
+          .forEach(propagator::addEventDetector);
+    }
     return propagator;
   }
 

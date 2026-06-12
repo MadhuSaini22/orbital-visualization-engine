@@ -13,9 +13,9 @@ public class CapabilityRegistry {
         forceModels(),
         new CapabilityRegistryResponse.ManeuverCapability(
             true,
+            true,
             false,
-            false,
-            "Finite burns execute through mission timeline commands only when NUMERICAL propagation is selected."),
+            "Finite and impulsive burns execute through mission timeline commands only when NUMERICAL propagation is selected."),
         List.of(
             "dryMassKg",
             "fuelMassKg",

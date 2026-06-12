@@ -168,7 +168,7 @@ class MissionTrajectoryServiceTest {
             60)));
 
     assertEquals(
-        "Mission contains finite-burn events, but the mission propagation profile has maneuver model disabled.",
+        "Mission contains maneuver events, but the mission propagation profile has maneuver model disabled.",
         exception.getMessage());
   }
 

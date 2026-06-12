@@ -200,7 +200,7 @@ export type CreateMissionRequest = {
 
 export type CreateTimelineEventRequest = {
   sequenceIndex: number;
-  type: "COAST" | "FINITE_BURN";
+  type: "COAST" | "FINITE_BURN" | "IMPULSIVE_BURN";
   name: string;
   enabled: boolean;
   executionTime: string;

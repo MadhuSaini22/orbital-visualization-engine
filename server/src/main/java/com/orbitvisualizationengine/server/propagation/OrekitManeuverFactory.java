@@ -5,7 +5,9 @@ import org.hipparchus.geometry.euclidean.threed.Vector3D;
 import org.orekit.attitudes.AttitudeProvider;
 import org.orekit.attitudes.LofOffset;
 import org.orekit.forces.maneuvers.ConstantThrustManeuver;
+import org.orekit.forces.maneuvers.ImpulseManeuver;
 import org.orekit.frames.LOFType;
+import org.orekit.propagation.events.DateDetector;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -27,6 +29,16 @@ public class OrekitManeuverFactory {
         attitude,
         direction,
         "burn-" + command.id());
+  }
+
+  public ImpulseManeuver impulse(PropagationManeuverCommand command) {
+    AttitudeProvider attitude = attitudeProvider(command.directionFrame());
+    Vector3D deltaV = new Vector3D(command.deltaVxMps(), command.deltaVyMps(), command.deltaVzMps());
+    return new ImpulseManeuver(
+        new DateDetector(OrekitStateMapper.toAbsoluteDate(command.executionTimeUtc())),
+        attitude,
+        deltaV,
+        command.ispSeconds());
   }
 
   private AttitudeProvider attitudeProvider(String frame) {

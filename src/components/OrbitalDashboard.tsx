@@ -138,8 +138,9 @@ type TimelineScheduleMode = "UTC" | "MET" | "AFTER_EVENT";
 type TimelineSnapMode = "FREE" | "ONE_MIN" | "FIVE_MIN" | "TEN_MIN" | "THIRTY_MIN" | "ONE_HOUR";
 type MissionDurationPreset = "ONE_ORBIT" | "THREE_HOURS" | "TWELVE_HOURS" | "TWENTY_FOUR_HOURS" | "CUSTOM";
 type CommandModalId = "mission" | "analysis" | "workspace" | "templates";
+type TimelineEventDraftType = "COAST" | "FINITE_BURN" | "IMPULSIVE_BURN";
 type TimelineEditorDraft = {
-  type: "COAST" | "FINITE_BURN";
+  type: TimelineEventDraftType;
   name: string;
   scheduleMode: TimelineScheduleMode;
   executionDateUtc: string;
@@ -155,6 +156,9 @@ type TimelineEditorDraft = {
   directionX: string;
   directionY: string;
   directionZ: string;
+  deltaVxMps: string;
+  deltaVyMps: string;
+  deltaVzMps: string;
 };
 type MissionSetupDraft = {
   name: string;
@@ -239,6 +243,9 @@ const defaultTimelineDraft: TimelineEditorDraft = {
   directionX: "1",
   directionY: "0",
   directionZ: "0",
+  deltaVxMps: "1",
+  deltaVyMps: "0",
+  deltaVzMps: "0",
 };
 const missionDurationPresets = [
   { id: "ONE_ORBIT", label: "1 orbit", seconds: 90 * 60 },
@@ -255,6 +262,13 @@ const timelineSnapOptions = [
   { id: "THIRTY_MIN", label: "30 min", seconds: 30 * 60 },
   { id: "ONE_HOUR", label: "1 hr", seconds: 60 * 60 },
 ] satisfies Array<{ id: TimelineSnapMode; label: string; seconds: number }>;
+function timelineEventDefaultName(type: TimelineEventDraftType) {
+  return type === "COAST" ? "Coast" : type === "IMPULSIVE_BURN" ? "Impulsive Burn" : "Finite Burn";
+}
+
+function timelineRequestType(value: string): CreateTimelineEventRequest["type"] {
+  return value === "COAST" || value === "IMPULSIVE_BURN" ? value : "FINITE_BURN";
+}
 const missionTemplateCategories = [
   "LEO",
   "GTO",
@@ -317,7 +331,7 @@ const fallbackCapabilities: BackendCapabilityRegistry = {
   forceModels: [],
   maneuverSupport: {
     finiteBurn: true,
-    impulsiveBurn: false,
+    impulsiveBurn: true,
     vectorBurn: false,
     notes: "Capabilities are loading from the backend.",
   },
@@ -958,7 +972,7 @@ function proposedEventsForDraft(
     missionId: mission.id,
     sequenceIndex,
     type: draft.type,
-    name: draft.name.trim() || (draft.type === "COAST" ? "Coast" : "Finite Burn"),
+    name: draft.name.trim() || timelineEventDefaultName(draft.type),
     enabled,
     executionTime: existing?.executionTime ?? mission.scenarioStart,
     parameters: schedulingMetadata(draft, existing?.executionTime ?? mission.scenarioStart),
@@ -1137,7 +1151,7 @@ function timelineDraftFromEvent(event: BackendMissionTimelineEvent, mission: Bac
   );
   const offsetParts = metOffsetPartsFromSeconds(storedOffsetSeconds);
   return {
-    type: event.type === "COAST" ? "COAST" : "FINITE_BURN",
+    type: timelineRequestType(event.type),
     name: event.name,
     scheduleMode,
     executionDateUtc: utcIsoToDateInput(event.executionTime, initialSimulationTime.toISOString()),
@@ -1151,6 +1165,9 @@ function timelineDraftFromEvent(event: BackendMissionTimelineEvent, mission: Bac
     directionX: String(readNumberParameter(parameters, "directionX", 1)),
     directionY: String(readNumberParameter(parameters, "directionY", 0)),
     directionZ: String(readNumberParameter(parameters, "directionZ", 0)),
+    deltaVxMps: String(readNumberParameter(parameters, "deltaVxMps", 1)),
+    deltaVyMps: String(readNumberParameter(parameters, "deltaVyMps", 0)),
+    deltaVzMps: String(readNumberParameter(parameters, "deltaVzMps", 0)),
   };
 }
 
@@ -1172,6 +1189,24 @@ function buildTimelineRequest(
       enabled,
       executionTime,
       parameters: schedule,
+    };
+  }
+
+  if (draft.type === "IMPULSIVE_BURN") {
+    return {
+      sequenceIndex,
+      type: "IMPULSIVE_BURN",
+      name: draft.name.trim() || "Impulsive Burn",
+      enabled,
+      executionTime,
+      parameters: {
+        ...schedule,
+        ispSeconds: Number(draft.ispSeconds),
+        directionFrame: draft.directionFrame,
+        deltaVxMps: Number(draft.deltaVxMps),
+        deltaVyMps: Number(draft.deltaVyMps),
+        deltaVzMps: Number(draft.deltaVzMps),
+      },
     };
   }
 
@@ -1236,6 +1271,19 @@ function validateTimelineDraft(draft: TimelineEditorDraft) {
         errors[key] = "Number required";
       }
     });
+  }
+  if (draft.type === "IMPULSIVE_BURN") {
+    validatePositiveDraftNumber(draft.ispSeconds, "ispSeconds", errors);
+    (["deltaVxMps", "deltaVyMps", "deltaVzMps"] as const).forEach((key) => {
+      const value = Number(draft[key]);
+      if (!Number.isFinite(value)) {
+        errors[key] = "Number required";
+      }
+    });
+    if (!errors.deltaVxMps && !errors.deltaVyMps && !errors.deltaVzMps
+        && Number(draft.deltaVxMps) === 0 && Number(draft.deltaVyMps) === 0 && Number(draft.deltaVzMps) === 0) {
+      errors.deltaVxMps = "Non-zero dV";
+    }
   }
   return errors;
 }
@@ -1416,7 +1464,9 @@ function timelineAnalysis(mission: BackendMission | null, events: BackendMission
   return {
     missionDuration,
     eventCount: events.length,
-    burnCount: events.filter((event) => event.type === "FINITE_BURN").length,
+    burnCount: events.filter((event) => event.type === "FINITE_BURN" || event.type === "IMPULSIVE_BURN").length,
+    finiteBurnCount: events.filter((event) => event.type === "FINITE_BURN").length,
+    impulsiveBurnCount: events.filter((event) => event.type === "IMPULSIVE_BURN").length,
     coastCount: events.filter((event) => event.type === "COAST").length,
     warnings,
   };
@@ -1527,7 +1577,7 @@ function buildSchedulingUpdateCommand(
     executionTime,
     request: {
       sequenceIndex: event.sequenceIndex,
-      type: event.type === "COAST" ? "COAST" : "FINITE_BURN",
+      type: timelineRequestType(event.type),
       name: event.name,
       enabled: event.enabled,
       executionTime,
@@ -2869,7 +2919,7 @@ export function OrbitalDashboard() {
       }
       const createdEvent = await createMissionTimelineEvent(createdMission.id, {
         sequenceIndex: templateEvent.sequenceIndex,
-        type: templateEvent.type === "COAST" ? "COAST" : "FINITE_BURN",
+        type: timelineRequestType(templateEvent.type),
         name: templateEvent.name,
         enabled: templateEvent.enabled,
         executionTime: new Date(new Date(createdMission.scenarioStart).getTime() + offsetSeconds * 1000).toISOString(),
@@ -2960,7 +3010,7 @@ export function OrbitalDashboard() {
     setTimelineDraft({
       ...defaultTimelineDraft,
       type,
-      name: type === "COAST" ? "Coast" : "Finite Burn",
+      name: timelineEventDefaultName(type),
       scheduleMode: "MET",
       executionDateUtc: utcIsoToDateInput(simTimeRef.current.toISOString()),
       executionTimeUtc: utcIsoToTimeInput(simTimeRef.current.toISOString()),
@@ -3978,7 +4028,7 @@ export function OrbitalDashboard() {
           rows={[
             ["Range", effectiveShowRangeCheck && rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : canUseRangeCheck ? "Available" : "Unavailable"],
             ["Conjunction", effectiveShowConjunctions ? `${conjunctionSnapshots.length} visible` : conjunctionSnapshots.length > 0 ? "Available" : "No events"],
-            ["Mission Burns", `${missionSummaryAnalysis.burnCount} finite burns`],
+            ["Mission Burns", `${missionSummaryAnalysis.finiteBurnCount} finite / ${missionSummaryAnalysis.impulsiveBurnCount} impulsive`],
             ["Last Analysis", analysisLastTimestamp],
           ]}
         />
@@ -5114,7 +5164,6 @@ function ManualOrbitForm({
   const [form, setForm] = useState<ManualOrbitFormState>(defaultManualOrbitForm);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [status, setStatus] = useState<{ tone: "success" | "error"; message: string } | null>(null);
-  const [propagatorType, setPropagatorType] = useState<"KEPLERIAN" | "NUMERICAL">("KEPLERIAN");
   const activeForm = form.type === mode ? form : { ...form, type: mode };
   const validation = validateManualOrbitForm(activeForm);
   const isValid = Object.keys(validation).length === 0;
@@ -5134,7 +5183,6 @@ function ManualOrbitForm({
     try {
       await onCreate({
         ...buildManualOrbitRequest(activeForm),
-        propagatorType,
       });
       setStatus({ tone: "success", message: "Orbit created. Loading trajectory on the globe." });
     } catch (error) {
@@ -5186,21 +5234,6 @@ function ManualOrbitForm({
 
         <aside className="space-y-4 border border-white/10 bg-black/25 p-4">
           <div>
-            <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Propagator</p>
-            <div className="mt-2 grid gap-2">
-              {(["KEPLERIAN", "NUMERICAL"] as const).map((item) => (
-                <button
-                  key={item}
-                  type="button"
-                  onClick={() => setPropagatorType(item)}
-                  className={`border px-3 py-2 text-left font-mono text-xs uppercase transition ${propagatorType === item ? "border-cyan-300 bg-cyan-300 text-slate-950" : "border-white/10 text-zinc-400 hover:border-cyan-300/50 hover:text-cyan-100"}`}
-                >
-                  {item}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="border-t border-white/10 pt-4">
             <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Frame</p>
             <p className="mt-2 text-xs leading-5 text-zinc-400">Phase 1 manual states are Earth-centered and interpreted in EME2000.</p>
           </div>
@@ -5764,8 +5797,14 @@ function MissionLibraryRow({
       {events.length > 0 && (
         <div className="mt-2 flex flex-wrap items-center gap-1">
           {events.map((event) => (
-            <span key={event.eventId} className={`border px-1.5 py-0.5 font-mono text-[9px] uppercase ${event.type === "FINITE_BURN" ? "border-rose-300/35 text-rose-100" : "border-sky-300/30 text-sky-100"}`}>
-              {event.type === "FINITE_BURN" ? "Burn" : "Coast"}
+            <span key={event.eventId} className={`border px-1.5 py-0.5 font-mono text-[9px] uppercase ${
+              event.type === "FINITE_BURN"
+                ? "border-rose-300/35 text-rose-100"
+                : event.type === "IMPULSIVE_BURN"
+                  ? "border-amber-300/45 text-amber-100"
+                  : "border-sky-300/30 text-sky-100"
+            }`}>
+              {event.type === "FINITE_BURN" ? "Finite" : event.type === "IMPULSIVE_BURN" ? "Impulse" : "Coast"}
             </span>
           ))}
         </div>
@@ -6092,17 +6131,17 @@ function TimelineEventModal({
         </div>
 
         <div className="thin-scrollbar min-h-0 overflow-y-auto p-5">
-          <div className="grid grid-cols-2 gap-2">
-            {(["COAST", "FINITE_BURN"] as const).map((type) => (
+          <div className="grid grid-cols-3 gap-2 max-sm:grid-cols-1">
+            {(["COAST", "FINITE_BURN", "IMPULSIVE_BURN"] as const).map((type) => (
               <button
                 key={type}
                 type="button"
-                onClick={() => update({ type, name: draft.name || (type === "COAST" ? "Coast" : "Finite Burn") })}
+                onClick={() => update({ type, name: draft.name || timelineEventDefaultName(type) })}
                 className={`border px-3 py-2 font-mono text-xs uppercase transition ${
                   draft.type === type ? "border-cyan-300 bg-cyan-300 text-slate-950" : "border-white/10 text-zinc-400 hover:border-cyan-300/50"
                 }`}
               >
-                {type === "FINITE_BURN" ? "Finite Burn" : "Coast"}
+                {type === "FINITE_BURN" ? "Finite Burn" : type === "IMPULSIVE_BURN" ? "Impulsive Burn" : "Coast"}
               </button>
             ))}
           </div>
@@ -6289,6 +6328,35 @@ function TimelineEventModal({
                   </TimelineField>
                   <TimelineField label="Direction Z" error={errors.directionZ}>
                     <input value={draft.directionZ} onChange={(event) => update({ directionZ: event.target.value })} inputMode="decimal" className="timeline-input" />
+                  </TimelineField>
+                </div>
+              </>
+            )}
+
+            {draft.type === "IMPULSIVE_BURN" && (
+              <>
+                <div className="grid grid-cols-2 gap-3 max-sm:grid-cols-1">
+                  <TimelineField label="Attitude Frame">
+                    <select value={draft.directionFrame} onChange={(event) => update({ directionFrame: event.target.value as TimelineEditorDraft["directionFrame"] })} className="timeline-input">
+                      <option value="TNW">TNW</option>
+                      <option value="QSW">QSW</option>
+                      <option value="RTN">RTN</option>
+                      <option value="LVLH">LVLH</option>
+                    </select>
+                  </TimelineField>
+                  <TimelineField label="ISP sec" error={errors.ispSeconds}>
+                    <input value={draft.ispSeconds} onChange={(event) => update({ ispSeconds: event.target.value })} inputMode="decimal" className="timeline-input" />
+                  </TimelineField>
+                </div>
+                <div className="grid grid-cols-3 gap-3 max-sm:grid-cols-1">
+                  <TimelineField label="dV X m/s" error={errors.deltaVxMps}>
+                    <input value={draft.deltaVxMps} onChange={(event) => update({ deltaVxMps: event.target.value })} inputMode="decimal" className="timeline-input" />
+                  </TimelineField>
+                  <TimelineField label="dV Y m/s" error={errors.deltaVyMps}>
+                    <input value={draft.deltaVyMps} onChange={(event) => update({ deltaVyMps: event.target.value })} inputMode="decimal" className="timeline-input" />
+                  </TimelineField>
+                  <TimelineField label="dV Z m/s" error={errors.deltaVzMps}>
+                    <input value={draft.deltaVzMps} onChange={(event) => update({ deltaVzMps: event.target.value })} inputMode="decimal" className="timeline-input" />
                   </TimelineField>
                 </div>
               </>

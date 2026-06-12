@@ -22,6 +22,7 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.orekit.forces.ForceModel;
 import org.orekit.forces.maneuvers.ConstantThrustManeuver;
+import org.orekit.forces.maneuvers.ImpulseManeuver;
 import org.orekit.orbits.KeplerianOrbit;
 import org.orekit.orbits.Orbit;
 import org.orekit.orbits.PositionAngleType;
@@ -56,6 +57,43 @@ class PhaseBPropagationBridgeParityTest {
         () -> executor.toPropagationCommands(List.of(timelineEvent(TimelineEventType.HOHMANN_TRANSFER, true))));
 
     assertTrue(exception.getMessage().contains("HOHMANN_TRANSFER is not supported by Phase B propagation bridge"));
+  }
+
+  @Test
+  void timelineImpulsiveBurnCommandUsesDeltaVVector() {
+    PropagationManeuverCommand command =
+        new TimelineExecutor(new MissionTimelineValidator())
+            .toPropagationCommands(List.of(impulsiveTimelineEvent(true)))
+            .getFirst();
+
+    assertEquals(PropagationManeuverType.IMPULSIVE_BURN, command.maneuverType());
+    assertEquals(BURN_TIME, command.executionTimeUtc());
+    assertEquals(0.0, command.durationSeconds(), 0.0);
+    assertEquals(0.0, command.thrustNewton(), 0.0);
+    assertEquals(ISP_S, command.ispSeconds(), 0.0);
+    assertEquals("TNW", command.directionFrame());
+    assertEquals(1.5, command.deltaVxMps(), 0.0);
+    assertEquals(0.0, command.deltaVyMps(), 0.0);
+    assertEquals(0.2, command.deltaVzMps(), 0.0);
+  }
+
+  @Test
+  void impulsiveBurnCommandsRegisterOrekitImpulseEventDetector() {
+    OrekitTestDataLoader.ensureLoaded();
+    OrekitEnvironment environment = new OrekitEnvironment();
+    NumericalPropagator propagator = new NumericalPropagator(environment);
+    PropagationManeuverCommand command =
+        new TimelineExecutor(new MissionTimelineValidator())
+            .toPropagationCommands(List.of(impulsiveTimelineEvent(true)))
+            .getFirst();
+
+    org.orekit.propagation.numerical.NumericalPropagator orekitPropagator =
+        propagator.buildPropagator(context(environment, List.of(), List.of(command)));
+
+    long impulseCount = orekitPropagator.getEventDetectors().stream()
+        .filter(detector -> detector instanceof ImpulseManeuver)
+        .count();
+    assertEquals(1, impulseCount);
   }
 
   @Test
@@ -124,6 +162,9 @@ class PhaseBPropagationBridgeParityTest {
     assertEquals(legacy.directionX(), timeline.directionX(), 0.0);
     assertEquals(legacy.directionY(), timeline.directionY(), 0.0);
     assertEquals(legacy.directionZ(), timeline.directionZ(), 0.0);
+    assertEquals(legacy.deltaVxMps(), timeline.deltaVxMps(), 0.0);
+    assertEquals(legacy.deltaVyMps(), timeline.deltaVyMps(), 0.0);
+    assertEquals(legacy.deltaVzMps(), timeline.deltaVzMps(), 0.0);
     assertEquals(legacy.metadata().get("source"), timeline.metadata().get("source"));
   }
 
@@ -186,6 +227,26 @@ class PhaseBPropagationBridgeParityTest {
             "directionY", 0.0,
             "directionZ", 0.0,
             "source", "phase-b-parity"),
+        EPOCH,
+        EPOCH);
+  }
+
+  private static MissionTimelineEvent impulsiveTimelineEvent(boolean enabled) {
+    return new MissionTimelineEvent(
+        "impulsive-burn-1",
+        "mission-1",
+        0,
+        TimelineEventType.IMPULSIVE_BURN,
+        "Impulsive burn",
+        enabled,
+        BURN_TIME,
+        Map.of(
+            "ispSeconds", ISP_S,
+            "directionFrame", "TNW",
+            "deltaVxMps", 1.5,
+            "deltaVyMps", 0.0,
+            "deltaVzMps", 0.2,
+            "source", "phase-b-impulse"),
         EPOCH,
         EPOCH);
   }

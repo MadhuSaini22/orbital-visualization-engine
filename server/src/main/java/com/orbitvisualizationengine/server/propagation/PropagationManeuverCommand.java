@@ -14,6 +14,9 @@ public record PropagationManeuverCommand(
     double directionX,
     double directionY,
     double directionZ,
+    double deltaVxMps,
+    double deltaVyMps,
+    double deltaVzMps,
     boolean enabled,
     Map<String, Object> metadata) {
 }

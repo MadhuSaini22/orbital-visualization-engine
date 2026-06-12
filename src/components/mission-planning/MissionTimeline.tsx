@@ -5,7 +5,7 @@ import { formatNumber, formatUtc } from "@/geometry/format";
 import { PropagationProfileEditor } from "./PropagationProfileEditor";
 import { DetailMetric, HudPanel } from "./ui";
 import type { MissionTrajectoryOverlay, TimelineLayoutModel, TimelineSnapMode, TimelineTimeMode, TimelineZoomPreset, TimelineInteractionModel } from "./types";
-import { buildTimelineLayoutModel, compactIsoUtc, defaultMissionTrajectoryWindowMinutes, displayTimelineTime, eventScheduleMode, forceModelSummary, integratorSummary, metOffsetLabelFromSeconds, missionDurationSeconds, missionTrajectoryMaxStepSeconds, missionTrajectoryMinStepSeconds, readNumberParameter, readStringParameter, secondsToDurationLabel, timelineAnalysis, timelineSnapOptions, timelineZoomOptions } from "./utils";
+import { buildTimelineLayoutModel, compactIsoUtc, defaultMissionTrajectoryWindowMinutes, displayTimelineTime, estimatedEventDeltaVMps, eventScheduleMode, forceModelSummary, integratorSummary, metOffsetLabelFromSeconds, missionDurationSeconds, missionTrajectoryMaxStepSeconds, missionTrajectoryMinStepSeconds, readNumberParameter, readStringParameter, secondsToDurationLabel, timelineAnalysis, timelineSnapOptions, timelineZoomOptions } from "./utils";
 
 export function MissionTimelinePanel({
   mission,
@@ -62,7 +62,7 @@ export function MissionTimelinePanel({
   onOpenCatalog: () => void;
   onOpenWorkspace: () => void;
   onOpenTemplates: () => void;
-  onCreateEvent: (type?: "COAST" | "FINITE_BURN") => void;
+  onCreateEvent: (type?: "COAST" | "FINITE_BURN" | "IMPULSIVE_BURN") => void;
   onEditEvent: (event: BackendMissionTimelineEvent) => void;
   onDeleteEvent: (event: BackendMissionTimelineEvent) => void;
   onToggleEvent: (event: BackendMissionTimelineEvent) => void;
@@ -84,14 +84,14 @@ export function MissionTimelinePanel({
     customVisibleSeconds: Math.max(60, Number(customZoomHours) * 3600 || 3 * 3600),
   }), [customZoomHours, snapMode, zoomPreset]);
   const analysis = useMemo(() => timelineAnalysis(mission, events), [events, mission]);
-  const hasEnabledFiniteBurns = events.some((event) => event.enabled && event.type === "FINITE_BURN");
+  const hasEnabledManeuverEvents = events.some((event) => event.enabled && (event.type === "FINITE_BURN" || event.type === "IMPULSIVE_BURN"));
   const trajectoryCurrentBlocker = trajectoryOverlay && !trajectoryStale
     ? "Trajectory is current. Change mission configuration, timeline, or cadence to update."
     : null;
   const trajectoryGenerationBlocker = !propagationProfile
     ? "Mission propagation profile is still loading. Configure propagation before generating trajectory."
-    : propagationProfile.propagatorType !== "NUMERICAL" && hasEnabledFiniteBurns
-      ? `${propagationProfile.propagatorType.replaceAll("_", " ")} propagation cannot execute finite-burn mission events. Select Numerical or disable burn events.`
+    : propagationProfile.propagatorType !== "NUMERICAL" && hasEnabledManeuverEvents
+      ? `${propagationProfile.propagatorType.replaceAll("_", " ")} propagation cannot execute maneuver mission events. Select Numerical or disable burn events.`
       : trajectoryCadenceError ?? trajectoryCurrentBlocker;
   const layoutModel = useMemo(() => mission
     ? buildTimelineLayoutModel(mission, events, interactionModel, selectedEventId, simulationTimeIso)
@@ -130,7 +130,14 @@ export function MissionTimelinePanel({
               onClick={() => onCreateEvent("FINITE_BURN")}
               className="border border-rose-300/50 px-2 py-1.5 font-mono text-[10px] uppercase text-rose-100 transition hover:border-rose-300 hover:bg-rose-300/10"
             >
-              Burn
+              Finite
+            </button>
+            <button
+              type="button"
+              onClick={() => onCreateEvent("IMPULSIVE_BURN")}
+              className="border border-amber-300/50 px-2 py-1.5 font-mono text-[10px] uppercase text-amber-100 transition hover:border-amber-300 hover:bg-amber-300/10"
+            >
+              Impulse
             </button>
           </div>
         )}
@@ -343,10 +350,13 @@ export function MissionTimelinePanel({
           />
           )}
 
-          <div className="mt-3 grid grid-cols-4 gap-2 max-sm:grid-cols-2">
+          <div className="mt-3 grid grid-cols-6 gap-2 max-sm:grid-cols-2">
             <TimelineMetric label="Duration" value={secondsToDurationLabel(analysis.missionDuration)} />
             <TimelineMetric label="Events" value={String(analysis.eventCount)} />
             <TimelineMetric label="Burns" value={String(analysis.burnCount)} />
+            <TimelineMetric label="Finite" value={String(analysis.finiteBurnCount)} />
+            <TimelineMetric label="Impulsive" value={String(analysis.impulsiveBurnCount)} />
+            <TimelineMetric label="Est dV" value={`${formatNumber(analysis.cumulativeDeltaVMps, 2)} m/s`} />
             <TimelineMetric label="Coasts" value={String(analysis.coastCount)} />
           </div>
 
@@ -493,7 +503,8 @@ function VisualMissionTimeline({
           {layout.cursors.currentSimTime !== null && <TimelineCursor positionPercent={layout.cursors.currentSimTime} label="Sim" tone="lime" />}
           {layout.cursors.selectedEvent !== null && <TimelineCursor positionPercent={layout.cursors.selectedEvent} label="Selected" tone="rose" />}
           {layout.blocks.map(({ event, offsetSeconds, durationSeconds, widthPercent }) => {
-          const isBurn = event.type === "FINITE_BURN";
+          const isFiniteBurn = event.type === "FINITE_BURN";
+          const isImpulsiveBurn = event.type === "IMPULSIVE_BURN";
           const scheduleMode = eventScheduleMode(event);
           const dependencyId = readStringParameter(event.parameters ?? {}, "scheduleDependencyId", "");
           const dependencyName = dependencyId ? eventNameById.get(dependencyId) ?? dependencyId : "";
@@ -526,21 +537,25 @@ function VisualMissionTimeline({
               }}
               style={{
                 left: `${displayStartPercent}%`,
-                width: `${Math.max(7, Math.min(widthPercent, 34))}%`,
+                width: isImpulsiveBurn ? `${Math.max(2.5, Math.min(widthPercent, 5))}%` : `${Math.max(7, Math.min(widthPercent, 34))}%`,
               }}
               title={`Mission-relative position ${metOffsetLabelFromSeconds(displayOffsetSeconds)} (${formatNumber(displayStartPercent, 1)}%)`}
               className={`absolute top-14 min-h-28 min-w-[150px] cursor-grab touch-none border px-3 py-2 text-left transition active:cursor-grabbing ${
                 selectedEventId === event.id
                   ? "border-cyan-300 bg-cyan-300/10"
-                  : isBurn
+                  : isFiniteBurn
                     ? "border-rose-300/35 bg-rose-300/[0.04] hover:border-rose-300/70"
+                    : isImpulsiveBurn
+                      ? "border-amber-300/45 bg-amber-300/[0.06] hover:border-amber-300/80"
                     : "border-sky-300/25 bg-sky-300/[0.03] hover:border-sky-300/60"
               } ${dragState?.eventId === event.id ? "z-20 shadow-[0_0_28px_rgba(103,232,249,0.20)]" : "z-10"}`}
             >
               <span className="flex items-center justify-between gap-2">
                 <span className="truncate text-xs font-semibold text-white">{event.name}</span>
-                <span className={`border px-1.5 py-0.5 font-mono text-[9px] uppercase ${isBurn ? "border-rose-300/45 text-rose-100" : "border-sky-300/35 text-sky-100"}`}>
-                  {isBurn ? "Burn" : "Coast"}
+                <span className={`border px-1.5 py-0.5 font-mono text-[9px] uppercase ${
+                  isFiniteBurn ? "border-rose-300/45 text-rose-100" : isImpulsiveBurn ? "border-amber-300/55 text-amber-100" : "border-sky-300/35 text-sky-100"
+                }`}>
+                  {isFiniteBurn ? "Finite" : isImpulsiveBurn ? "Impulse" : "Coast"}
                 </span>
               </span>
               <span className="mt-2 block font-mono text-[10px] text-cyan-100">
@@ -554,9 +569,15 @@ function VisualMissionTimeline({
                   after {dependencyName} + {metOffsetLabelFromSeconds(dependencyOffset).replace("T+", "")}
                 </span>
               )}
-              <span className="mt-1 block font-mono text-[10px] text-zinc-500">
-                Duration {secondsToDurationLabel(durationSeconds)}
-              </span>
+              {isImpulsiveBurn ? (
+                <span className="mt-1 block font-mono text-[10px] text-amber-100">
+                  dV {formatNumber(estimatedEventDeltaVMps(event), 2)} m/s
+                </span>
+              ) : (
+                <span className="mt-1 block font-mono text-[10px] text-zinc-500">
+                  Duration {secondsToDurationLabel(durationSeconds)}
+                </span>
+              )}
               {dragState?.eventId === event.id && (
                 <span className="mt-1 block font-mono text-[10px] text-lime-100">
                   Preview {metOffsetLabelFromSeconds(displayOffsetSeconds)}
@@ -632,9 +653,12 @@ function TimelineEventCard({
   onDrop: () => void;
 }) {
   const parameters = event.parameters ?? {};
-  const isBurn = event.type === "FINITE_BURN";
-  const summary = isBurn
+  const isFiniteBurn = event.type === "FINITE_BURN";
+  const isImpulsiveBurn = event.type === "IMPULSIVE_BURN";
+  const summary = isFiniteBurn
     ? `${readNumberParameter(parameters, "durationSeconds", 0)}s, ${readNumberParameter(parameters, "thrustNewton", 0)} N, ${readStringParameter(parameters, "directionFrame", "TNW")}`
+    : isImpulsiveBurn
+      ? `${formatNumber(estimatedEventDeltaVMps(event), 2)} m/s, ${readStringParameter(parameters, "directionFrame", "TNW")}, ISP ${readNumberParameter(parameters, "ispSeconds", 0)}s`
     : "Coast segment";
 
   return (
@@ -654,8 +678,10 @@ function TimelineEventCard({
             <span className="block truncate text-sm font-semibold text-white">[{index + 1}] {event.name}</span>
             <span className="mt-1 block font-mono text-[10px] uppercase text-zinc-500">{formatUtc(new Date(event.executionTime))}</span>
           </span>
-          <span className={`border px-2 py-0.5 font-mono text-[10px] uppercase ${isBurn ? "border-rose-300/45 text-rose-100" : "border-sky-300/35 text-sky-100"}`}>
-            {isBurn ? "Finite" : "Coast"}
+          <span className={`border px-2 py-0.5 font-mono text-[10px] uppercase ${
+            isFiniteBurn ? "border-rose-300/45 text-rose-100" : isImpulsiveBurn ? "border-amber-300/55 text-amber-100" : "border-sky-300/35 text-sky-100"
+          }`}>
+            {isFiniteBurn ? "Finite" : isImpulsiveBurn ? "Impulse" : "Coast"}
           </span>
         </span>
         <span className="mt-2 block truncate text-xs text-zinc-400">{summary}</span>
