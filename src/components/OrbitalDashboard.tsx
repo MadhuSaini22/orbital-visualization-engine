@@ -100,6 +100,7 @@ import type {
   ManeuverTemplatePreview,
   ManeuverTemplateType,
   ManualOrbitType,
+  PlaneChangeExecutionStrategy,
   PropagatorTypeId,
   UpdatePropagationProfileRequest,
 } from "@/services/orbitServerApi";
@@ -146,6 +147,8 @@ type TimelineEventDraftType = "COAST" | "FINITE_BURN" | "IMPULSIVE_BURN";
 type ManeuverTemplateDraft = {
   type: ManeuverTemplateType;
   targetAltitudeKm: string;
+  inclinationChangeDeg: string;
+  executionStrategy: PlaneChangeExecutionStrategy;
 };
 type TimelineEditorDraft = {
   type: TimelineEventDraftType;
@@ -258,6 +261,8 @@ const defaultTimelineDraft: TimelineEditorDraft = {
 const defaultManeuverTemplateDraft: ManeuverTemplateDraft = {
   type: "CIRCULARIZATION",
   targetAltitudeKm: "500",
+  inclinationChangeDeg: "5",
+  executionStrategy: "IMMEDIATE",
 };
 const missionDurationPresets = [
   { id: "ONE_ORBIT", label: "1 orbit", seconds: 90 * 60 },
@@ -3054,6 +3059,18 @@ export function OrbitalDashboard() {
   }, [mission]);
 
   const maneuverTemplateRequest = useCallback(() => {
+    if (maneuverTemplateDraft.type === "PLANE_CHANGE") {
+      const inclinationChangeDeg = Number(maneuverTemplateDraft.inclinationChangeDeg);
+      if (!Number.isFinite(inclinationChangeDeg) || inclinationChangeDeg === 0) {
+        throw new Error("Inclination change must be a non-zero number.");
+      }
+      return {
+        type: maneuverTemplateDraft.type,
+        inclinationChangeDeg,
+        executionStrategy: maneuverTemplateDraft.executionStrategy,
+        sequenceIndex: missionTimelineEvents.length,
+      };
+    }
     const targetAltitudeKm = Number(maneuverTemplateDraft.targetAltitudeKm);
     if (!Number.isFinite(targetAltitudeKm) || targetAltitudeKm < 0) {
       throw new Error("Target altitude must be a number greater than or equal to zero.");
@@ -6190,11 +6207,17 @@ function ManeuverTemplateModal({
   onClose: () => void;
 }) {
   const targetAltitude = Number(draft.targetAltitudeKm);
-  const canPreview = Number.isFinite(targetAltitude) && targetAltitude >= 0 && !loading;
+  const inclinationChange = Number(draft.inclinationChangeDeg);
+  const canPreview = draft.type === "PLANE_CHANGE"
+    ? Number.isFinite(inclinationChange) && inclinationChange !== 0 && !loading
+    : Number.isFinite(targetAltitude) && targetAltitude >= 0 && !loading;
   const applyBlocked = preview?.warnings.some((warning) => warning.includes("cannot be applied")) ?? false;
   const canApply = Boolean(preview && preview.events.length > 0 && !loading && !applyBlocked);
   const totalDeltaV = readNumberParameter(preview?.metadata ?? {}, "totalDeltaVMps", 0);
   const transferTimeSeconds = readNumberParameter(preview?.metadata ?? {}, "transferTimeSeconds", 0);
+  const coastSeconds = readNumberParameter(preview?.metadata ?? {}, "coastSeconds", 0);
+  const executionLocation = readStringParameter(preview?.metadata ?? {}, "executionLocation", "Not applicable");
+  const executionStrategy = readStringParameter(preview?.metadata ?? {}, "executionStrategy", "Not applicable");
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/72 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
@@ -6218,8 +6241,8 @@ function ManeuverTemplateModal({
         </div>
 
         <div className="thin-scrollbar min-h-0 overflow-y-auto p-5">
-          <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
-            {(["CIRCULARIZATION", "HOHMANN_TRANSFER"] as const).map((type) => (
+          <div className="grid grid-cols-3 gap-2 max-sm:grid-cols-1">
+            {(["CIRCULARIZATION", "HOHMANN_TRANSFER", "PLANE_CHANGE"] as const).map((type) => (
               <button
                 key={type}
                 type="button"
@@ -6231,24 +6254,53 @@ function ManeuverTemplateModal({
                 }`}
               >
                 <span className="block font-mono text-xs font-semibold uppercase">
-                  {type === "CIRCULARIZATION" ? "Circularization" : "Hohmann Transfer"}
+                  {type === "CIRCULARIZATION" ? "Circularization" : type === "HOHMANN_TRANSFER" ? "Hohmann Transfer" : "Plane Change"}
                 </span>
                 <span className={`mt-1 block text-xs ${draft.type === type ? "text-slate-800" : "text-zinc-500"}`}>
-                  {type === "CIRCULARIZATION" ? "Generate one impulsive burn at the circularization point." : "Generate burn, transfer coast, and burn primitives."}
+                  {type === "CIRCULARIZATION"
+                    ? "Generate one impulsive burn at the circularization point."
+                    : type === "HOHMANN_TRANSFER"
+                      ? "Generate burn, transfer coast, and burn primitives."
+                      : "Generate a normal-axis impulsive burn at the selected execution point."}
                 </span>
               </button>
             ))}
           </div>
 
           <div className="mt-5 grid gap-4">
-            <TimelineField label={draft.type === "CIRCULARIZATION" ? "Target altitude km" : "Target orbit altitude km"}>
-              <input
-                value={draft.targetAltitudeKm}
-                onChange={(event) => onDraftChange({ ...draft, targetAltitudeKm: event.target.value })}
-                inputMode="decimal"
-                className="timeline-input"
-              />
-            </TimelineField>
+            {draft.type === "PLANE_CHANGE" ? (
+              <div className="grid grid-cols-2 gap-3 max-sm:grid-cols-1">
+                <TimelineField label="Inclination change deg">
+                  <input
+                    value={draft.inclinationChangeDeg}
+                    onChange={(event) => onDraftChange({ ...draft, inclinationChangeDeg: event.target.value })}
+                    inputMode="decimal"
+                    className="timeline-input"
+                  />
+                </TimelineField>
+                <TimelineField label="Execution strategy">
+                  <select
+                    value={draft.executionStrategy}
+                    onChange={(event) => onDraftChange({ ...draft, executionStrategy: event.target.value as PlaneChangeExecutionStrategy })}
+                    className="timeline-input"
+                  >
+                    <option value="IMMEDIATE">Immediate</option>
+                    <option value="ASCENDING_NODE">Ascending node</option>
+                    <option value="DESCENDING_NODE">Descending node</option>
+                    <option value="APOAPSIS">Apoapsis</option>
+                  </select>
+                </TimelineField>
+              </div>
+            ) : (
+              <TimelineField label={draft.type === "CIRCULARIZATION" ? "Target altitude km" : "Target orbit altitude km"}>
+                <input
+                  value={draft.targetAltitudeKm}
+                  onChange={(event) => onDraftChange({ ...draft, targetAltitudeKm: event.target.value })}
+                  inputMode="decimal"
+                  className="timeline-input"
+                />
+              </TimelineField>
+            )}
 
             <div className="border border-cyan-300/15 bg-black/25 p-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -6269,10 +6321,11 @@ function ManeuverTemplateModal({
                 </div>
               ) : (
                 <>
-                  <div className="mt-3 grid gap-2 md:grid-cols-3">
+                  <div className="mt-3 grid gap-2 md:grid-cols-4">
                     <TemplateMetric label="Template Instance" value={preview.templateInstanceId} />
                     <TemplateMetric label="Total dV" value={`${formatNumber(totalDeltaV, 3)} m/s`} />
-                    <TemplateMetric label="Transfer Time" value={transferTimeSeconds > 0 ? secondsToDurationLabel(transferTimeSeconds) : "Not applicable"} />
+                    <TemplateMetric label={preview.type === "PLANE_CHANGE" ? "Coast Time" : "Transfer Time"} value={(preview.type === "PLANE_CHANGE" ? coastSeconds : transferTimeSeconds) > 0 ? secondsToDurationLabel(preview.type === "PLANE_CHANGE" ? coastSeconds : transferTimeSeconds) : "Not applicable"} />
+                    <TemplateMetric label={preview.type === "PLANE_CHANGE" ? "Execution" : "Location"} value={preview.type === "PLANE_CHANGE" ? `${executionLocation} / ${executionStrategy.replaceAll("_", " ")}` : "Template-defined"} />
                   </div>
                   <div className="mt-3 space-y-2">
                     {preview.events.map((event, index) => (

@@ -130,7 +130,8 @@ export type NumericalIntegratorTypeId =
   | "GRAGG_BULIRSCH_STOER";
 export type MissionTimelineEventType = "COAST" | "FINITE_BURN" | "IMPULSIVE_BURN" | "VECTOR_BURN" | "STATION_KEEPING" | "PLANE_CHANGE" | "HOHMANN_TRANSFER";
 export type ManualOrbitType = "TLE" | "CLASSICAL_ELEMENTS" | "CARTESIAN_STATE";
-export type ManeuverTemplateType = "CIRCULARIZATION" | "HOHMANN_TRANSFER";
+export type ManeuverTemplateType = "CIRCULARIZATION" | "HOHMANN_TRANSFER" | "PLANE_CHANGE";
+export type PlaneChangeExecutionStrategy = "ASCENDING_NODE" | "DESCENDING_NODE" | "APOAPSIS" | "IMMEDIATE";
 
 export type BackendCapabilityRegistry = {
   propagators: Array<{
@@ -212,7 +213,9 @@ export type UpdateTimelineEventRequest = Partial<CreateTimelineEventRequest>;
 
 export type ManeuverTemplateRequest = {
   type: ManeuverTemplateType;
-  targetAltitudeKm: number;
+  targetAltitudeKm?: number;
+  inclinationChangeDeg?: number;
+  executionStrategy?: PlaneChangeExecutionStrategy;
   sequenceIndex?: number;
 };
 

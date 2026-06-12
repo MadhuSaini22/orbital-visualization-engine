@@ -3,6 +3,7 @@ package com.orbitvisualizationengine.server.service;
 import com.orbitvisualizationengine.server.domain.ManeuverTemplateType;
 import com.orbitvisualizationengine.server.domain.Mission;
 import com.orbitvisualizationengine.server.domain.MissionTimelineEvent;
+import com.orbitvisualizationengine.server.domain.PlaneChangeExecutionStrategy;
 import com.orbitvisualizationengine.server.domain.TimelineEventType;
 import com.orbitvisualizationengine.server.dto.CreateTimelineEventRequest;
 import com.orbitvisualizationengine.server.dto.ManeuverTemplateApplyResponse;
@@ -64,6 +65,7 @@ public class ManeuverTemplateService {
     return switch (request.type()) {
       case CIRCULARIZATION -> circularizationPreview(mission, request, orbit, templateInstanceId, sequenceIndex);
       case HOHMANN_TRANSFER -> hohmannPreview(mission, request, orbit, templateInstanceId, sequenceIndex);
+      case PLANE_CHANGE -> planeChangePreview(mission, request, orbit, templateInstanceId, sequenceIndex);
     };
   }
 
@@ -217,6 +219,86 @@ public class ManeuverTemplateService {
     return new ManeuverTemplatePreview(request.type(), templateInstanceId, metadata, warnings, events);
   }
 
+  private ManeuverTemplatePreview planeChangePreview(
+      Mission mission,
+      ManeuverTemplateRequest request,
+      Orbit orbit,
+      String templateInstanceId,
+      int sequenceIndex) {
+    KeplerianOrbit keplerian = new KeplerianOrbit(orbit);
+    PlaneChangeExecutionStrategy strategy = request.executionStrategy() == null
+        ? PlaneChangeExecutionStrategy.IMMEDIATE
+        : request.executionStrategy();
+    double inclinationChangeDeg = requiredFinite(request.inclinationChangeDeg(), "Inclination change");
+    if (Math.abs(inclinationChangeDeg) < 1.0e-9) {
+      throw new IllegalArgumentException("Inclination change must be non-zero for a plane change template.");
+    }
+
+    PlaneChangePoint point = planeChangePoint(keplerian, strategy);
+    Instant burnTime = mission.scenarioStart().plusSeconds(Math.max(0, Math.round(point.coastSeconds())));
+    List<String> warnings = new ArrayList<>(point.warnings());
+    warnIfOutsideMission(mission, burnTime, "Plane change burn", warnings);
+
+    double localVelocityMps = speedAtRadius(keplerian.getA(), point.radiusMeters());
+    double deltaVMps = 2.0 * localVelocityMps * Math.sin(Math.abs(Math.toRadians(inclinationChangeDeg)) / 2.0);
+    double normalDeltaVMps = inclinationChangeDeg > 0.0 ? deltaVMps : -deltaVMps;
+
+    Map<String, Object> metadata = templateMetadata(templateInstanceId, request.type(), "SUMMARY");
+    metadata.put("computedDeltaV", deltaVMps);
+    metadata.put("computedDeltaVMps", deltaVMps);
+    metadata.put("totalDeltaVMps", deltaVMps);
+    metadata.put("inclinationChange", inclinationChangeDeg);
+    metadata.put("inclinationChangeDeg", inclinationChangeDeg);
+    metadata.put("executionStrategy", strategy.name());
+    metadata.put("executionLocation", point.location());
+    metadata.put("executionRadiusKm", point.radiusMeters() / 1000.0);
+    metadata.put("executionAltitudeKm", point.radiusMeters() / 1000.0 - EARTH_RADIUS_KM);
+    metadata.put("localVelocityMps", localVelocityMps);
+    metadata.put("coastSeconds", point.coastSeconds());
+    metadata.put("burnDirection", inclinationChangeDeg > 0.0 ? "NORMAL" : "ANTI_NORMAL");
+
+    List<CreateTimelineEventRequest> events = new ArrayList<>();
+    if (point.coastSeconds() > 1.0) {
+      Map<String, Object> coastMetadata = withSchedule(
+          templateMetadata(templateInstanceId, request.type(), "COAST"),
+          mission,
+          mission.scenarioStart());
+      coastMetadata.put("executionStrategy", strategy.name());
+      events.add(new CreateTimelineEventRequest(
+          sequenceIndex++,
+          TimelineEventType.COAST,
+          "Plane Change Coast",
+          true,
+          mission.scenarioStart(),
+          coastMetadata));
+    }
+
+    Map<String, Object> burnMetadata = withSchedule(
+        templateMetadata(templateInstanceId, request.type(), "PLANE_CHANGE_BURN"),
+        mission,
+        burnTime);
+    burnMetadata.put("computedDeltaV", deltaVMps);
+    burnMetadata.put("computedDeltaVMps", deltaVMps);
+    burnMetadata.put("inclinationChange", inclinationChangeDeg);
+    burnMetadata.put("inclinationChangeDeg", inclinationChangeDeg);
+    burnMetadata.put("executionStrategy", strategy.name());
+    burnMetadata.put("executionLocation", point.location());
+    burnMetadata.put("executionRadiusKm", point.radiusMeters() / 1000.0);
+    burnMetadata.put("executionAltitudeKm", point.radiusMeters() / 1000.0 - EARTH_RADIUS_KM);
+    burnMetadata.put("localVelocityMps", localVelocityMps);
+    burnMetadata.put("burnDirection", inclinationChangeDeg > 0.0 ? "NORMAL" : "ANTI_NORMAL");
+
+    events.add(new CreateTimelineEventRequest(
+        sequenceIndex,
+        TimelineEventType.IMPULSIVE_BURN,
+        "Plane Change Burn",
+        true,
+        burnTime,
+        impulsiveParameters(burnMetadata, 0.0, 0.0, normalDeltaVMps)));
+
+    return new ManeuverTemplatePreview(request.type(), templateInstanceId, metadata, warnings, events);
+  }
+
   private Orbit orbitAtMissionStart(Mission mission) {
     if (mission.subjectNoradId() == null && mission.subjectOrbitId() == null) {
       throw new IllegalArgumentException("Maneuver template preview requires a mission subject.");
@@ -269,6 +351,35 @@ public class ManeuverTemplateService {
     return new CircularizationPoint(targetRadiusMeters, selectedDeltaMean / meanMotion, warnings);
   }
 
+  private PlaneChangePoint planeChangePoint(KeplerianOrbit orbit, PlaneChangeExecutionStrategy strategy) {
+    List<String> warnings = new ArrayList<>();
+    double targetTrueAnomaly = switch (strategy) {
+      case IMMEDIATE -> orbit.getTrueAnomaly();
+      case ASCENDING_NODE -> -orbit.getPerigeeArgument();
+      case DESCENDING_NODE -> Math.PI - orbit.getPerigeeArgument();
+      case APOAPSIS -> Math.PI;
+    };
+    if ((strategy == PlaneChangeExecutionStrategy.ASCENDING_NODE || strategy == PlaneChangeExecutionStrategy.DESCENDING_NODE)
+        && Math.abs(Math.sin(orbit.getI())) < 1.0e-6) {
+      warnings.add("Current orbit is near-equatorial; ascending and descending node locations are weakly defined.");
+    }
+    if (strategy == PlaneChangeExecutionStrategy.APOAPSIS && orbit.getE() < SMALL_ECCENTRICITY) {
+      warnings.add("Current orbit is near-circular; apoapsis is weakly defined and selected from the current osculating elements.");
+    }
+
+    double coastSeconds = strategy == PlaneChangeExecutionStrategy.IMMEDIATE
+        ? 0.0
+        : timeToTrueAnomalySeconds(orbit, targetTrueAnomaly);
+    double radiusMeters = radiusAtTrueAnomaly(orbit, targetTrueAnomaly);
+    String location = switch (strategy) {
+      case IMMEDIATE -> "Immediate";
+      case ASCENDING_NODE -> "Ascending node";
+      case DESCENDING_NODE -> "Descending node";
+      case APOAPSIS -> "Apoapsis";
+    };
+    return new PlaneChangePoint(radiusMeters, coastSeconds, location, warnings);
+  }
+
   private Map<String, Object> templateMetadata(
       String templateInstanceId,
       ManeuverTemplateType templateType,
@@ -290,11 +401,15 @@ public class ManeuverTemplateService {
   }
 
   private Map<String, Object> impulsiveParameters(Map<String, Object> metadata, double deltaVMps) {
+    return impulsiveParameters(metadata, deltaVMps, 0.0, 0.0);
+  }
+
+  private Map<String, Object> impulsiveParameters(Map<String, Object> metadata, double deltaVxMps, double deltaVyMps, double deltaVzMps) {
     metadata.put("ispSeconds", 220.0);
     metadata.put("directionFrame", "TNW");
-    metadata.put("deltaVxMps", deltaVMps);
-    metadata.put("deltaVyMps", 0.0);
-    metadata.put("deltaVzMps", 0.0);
+    metadata.put("deltaVxMps", deltaVxMps);
+    metadata.put("deltaVyMps", deltaVyMps);
+    metadata.put("deltaVzMps", deltaVzMps);
     return metadata;
   }
 
@@ -311,6 +426,20 @@ public class ManeuverTemplateService {
 
   private double speedAtRadius(double semiMajorAxisMeters, double radiusMeters) {
     return Math.sqrt(MU * ((2.0 / radiusMeters) - (1.0 / semiMajorAxisMeters)));
+  }
+
+  private double radiusAtTrueAnomaly(KeplerianOrbit orbit, double trueAnomaly) {
+    double eccentricity = orbit.getE();
+    double p = orbit.getA() * (1.0 - eccentricity * eccentricity);
+    return p / (1.0 + eccentricity * Math.cos(trueAnomaly));
+  }
+
+  private double timeToTrueAnomalySeconds(KeplerianOrbit orbit, double trueAnomaly) {
+    double currentMean = normalizeAngle(orbit.getMeanAnomaly());
+    double targetMean = meanAnomalyFromTrue(trueAnomaly, orbit.getE());
+    double deltaMean = positiveAngleDelta(currentMean, targetMean);
+    double meanMotion = Math.sqrt(MU / Math.pow(orbit.getA(), 3.0));
+    return deltaMean / meanMotion;
   }
 
   private double meanAnomalyFromTrue(double trueAnomaly, double eccentricity) {
@@ -333,7 +462,17 @@ public class ManeuverTemplateService {
     if (request.type() == null) {
       throw new IllegalArgumentException("Maneuver template type is required.");
     }
-    radiusMeters(request.targetAltitudeKm());
+    switch (request.type()) {
+      case CIRCULARIZATION, HOHMANN_TRANSFER -> radiusMeters(request.targetAltitudeKm());
+      case PLANE_CHANGE -> requiredFinite(request.inclinationChangeDeg(), "Inclination change");
+    }
+  }
+
+  private double requiredFinite(Double value, String label) {
+    if (value == null || !Double.isFinite(value)) {
+      throw new IllegalArgumentException(label + " must be a finite number.");
+    }
+    return value;
   }
 
   private void warnIfOutsideMission(Mission mission, Instant executionTime, String label, List<String> warnings) {
@@ -351,5 +490,8 @@ public class ManeuverTemplateService {
   }
 
   private record CircularizationPoint(double radiusMeters, double coastSeconds, List<String> warnings) {
+  }
+
+  private record PlaneChangePoint(double radiusMeters, double coastSeconds, String location, List<String> warnings) {
   }
 }
