@@ -7,7 +7,7 @@ import { OrbitSummaryPanel } from "./OrbitSummaryPanel";
 import type { OrbitSummary } from "./OrbitSummaryPanel";
 import { DetailMetric, HudPanel } from "./ui";
 import type { MissionTrajectoryOverlay, TimelineLayoutModel, TimelineSnapMode, TimelineTimeMode, TimelineZoomPreset, TimelineInteractionModel } from "./types";
-import { buildMissionReport, buildTimelineLayoutModel, compactIsoUtc, coverageAnalysis, defaultMissionTrajectoryWindowMinutes, deltaVBreakdown, detectOrbitEventMarkers, displayTimelineTime, estimatedEventDeltaVMps, eventScheduleMode, forceModelSummary, groundStationAccess, integratorSummary, maneuverQualityAnalysis, metOffsetLabelFromSeconds, missionConstraintViolations, missionDurationSeconds, missionObjectiveProgress, missionTargetingSolutions, missionTimelineAnalytics, missionTrajectoryMaxStepSeconds, missionTrajectoryMinStepSeconds, monteCarloDispersion, optimizationCandidates, orbitLifetimeEstimate, readNumberParameter, readStringParameter, relativeMotionAnalysis, secondsToDurationLabel, solveTargetingProblem, spacecraftPerformanceStatus, timelineAnalysis, timelineSnapOptions, timelineZoomOptions, tradeStudySolutions, validateMissionPlan, walkerConstellationAnalysis } from "./utils";
+import { aerospaceReviewFindings, buildMissionReport, buildTimelineLayoutModel, compactIsoUtc, coverageAnalysis, defaultMissionTrajectoryWindowMinutes, deltaVBreakdown, detectOrbitEventMarkers, displayTimelineTime, estimatedEventDeltaVMps, eventScheduleMode, forceModelSummary, groundStationAccess, integratorSummary, maneuverQualityAnalysis, metOffsetLabelFromSeconds, missionConstraintViolations, missionDurationSeconds, missionObjectiveProgress, missionTargetingSolutions, missionTimelineAnalytics, missionTrajectoryMaxStepSeconds, missionTrajectoryMinStepSeconds, monteCarloDispersion, optimizationCandidates, orbitLifetimeEstimate, readNumberParameter, readStringParameter, relativeMotionAnalysis, secondsToDurationLabel, solveTargetingProblem, spacecraftPerformanceStatus, timelineAnalysis, timelineSnapOptions, timelineZoomOptions, tradeStudySolutions, validateMissionPlan, walkerConstellationAnalysis } from "./utils";
 import type { CoverageSettings, GroundStationConfig, MissionConstraints, MissionDesignTargets, MonteCarloSettings, MissionOrbitEventMarker, RelativeMotionSettings, WalkerConstellationConfig } from "./utils";
 
 export function MissionTimelinePanel({
@@ -149,6 +149,16 @@ export function MissionTimelinePanel({
   const stationAccess = useMemo(() => groundStationAccess(trajectoryOverlay, groundStation), [groundStation, trajectoryOverlay]);
   const coverage = useMemo(() => coverageAnalysis(trajectoryOverlay, coverageSettings), [coverageSettings, trajectoryOverlay]);
   const constellation = useMemo(() => walkerConstellationAnalysis(constellationConfig), [constellationConfig]);
+  const aerospaceFindings = useMemo(() => aerospaceReviewFindings({
+    events,
+    orbitSummary,
+    profile: propagationProfile,
+    solver: targetSolver,
+    relativeMotion,
+    stationAccess,
+    coverage,
+    constellation,
+  }), [constellation, coverage, events, orbitSummary, propagationProfile, relativeMotion, stationAccess, targetSolver]);
   const templateGroups = useMemo(() => templateEventGroups(events), [events]);
   const missionValidation = useMemo(() => validateMissionPlan(mission, events, propagationProfile), [events, mission, propagationProfile]);
   const validationStatus = missionValidation.errors.length > 0 ? "Blocked" : missionValidation.warnings.length > 0 ? "Review" : "Ready";
@@ -374,6 +384,38 @@ export function MissionTimelinePanel({
             title="Current Orbit"
             subtitle="Mission planner context for transfer, circularization, and plane-change decisions."
           />
+        </div>
+      )}
+
+      {mission && (
+        <div className="mt-3 border border-rose-300/20 bg-rose-300/[0.035] p-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-rose-200">Aerospace Engineering Review</p>
+              <p className="mt-1 text-[11px] leading-5 text-zinc-500">Brutal flight-dynamics audit: flags screening-only analyses, missing backend Orekit capabilities, and operations risks.</p>
+            </div>
+            <span className="border border-rose-300/35 px-2 py-1 font-mono text-[10px] uppercase text-rose-100">
+              {aerospaceFindings.filter((finding) => finding.severity === "Critical").length} Critical
+            </span>
+          </div>
+          <div className="mt-3 grid gap-2">
+            {aerospaceFindings.slice(0, 6).map((finding) => (
+              <div key={`${finding.area}-${finding.finding}`} className={`border px-3 py-2 ${
+                finding.severity === "Critical"
+                  ? "border-rose-300/30 bg-rose-300/[0.06]"
+                  : finding.severity === "Warning"
+                    ? "border-amber-300/25 bg-amber-300/[0.045]"
+                    : "border-cyan-300/20 bg-cyan-300/[0.035]"
+              }`}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-xs font-semibold text-white">{finding.area}</p>
+                  <p className="font-mono text-[10px] uppercase text-zinc-400">{finding.status} · {finding.severity}</p>
+                </div>
+                <p className="mt-1 text-[11px] leading-5 text-zinc-400">{finding.finding}</p>
+                <p className="mt-1 text-[11px] leading-5 text-zinc-500">{finding.recommendation}</p>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

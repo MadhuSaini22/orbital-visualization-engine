@@ -506,6 +506,30 @@ export type WalkerConstellationAnalysis = {
   summary: string;
 };
 
+export type AerospaceReviewFinding = {
+  area: string;
+  severity: "Info" | "Warning" | "Critical";
+  status: "Implemented" | "Partial" | "Screening Only" | "Missing";
+  finding: string;
+  recommendation: string;
+};
+
+export type CapabilityMatrixItem = {
+  capability: string;
+  currentStatus: "Implemented" | "Partial" | "Missing";
+  orekit: "Implemented" | "Partial" | "Missing";
+  gmat: "Implemented" | "Partial" | "Missing";
+  stk: "Implemented" | "Partial" | "Missing";
+  freeFlyer: "Implemented" | "Partial" | "Missing";
+  note: string;
+};
+
+type ReducedTargetState = {
+  altitudeKm: number;
+  inclinationDeg: number;
+  eccentricity: number;
+};
+
 const earthMuKm3S2 = 398600.4418;
 const earthRadiusKm = 6378.137;
 
@@ -813,7 +837,11 @@ export function solveTargetingProblem(
   profile: BackendPropagationProfile | null,
 ): TargetSolverResult {
   const solutions = missionTargetingSolutions(orbitSummary, targets, profile);
-  if (solutions.length === 0) {
+  const initialState = reducedTargetState(orbitSummary);
+  const targetState = reducedDesiredState(initialState, targets);
+  const activeKeys = (["altitudeKm", "inclinationDeg", "eccentricity"] as const)
+    .filter((key) => Number.isFinite(targetState[key] - initialState[key]));
+  if (solutions.length === 0 || activeKeys.length === 0) {
     return {
       status: "Unavailable",
       iterations: 0,
@@ -825,48 +853,164 @@ export function solveTargetingProblem(
     };
   }
 
-  const residuals = solverResiduals(orbitSummary, targets);
+  const solve = finiteDifferenceCorrector(initialState, targetState, activeKeys);
+  const residuals = solverResiduals(orbitSummary, targets, solve.finalState);
   const hasLowConfidence = solutions.some((solution) => solution.confidence === "Low");
-  const iterations = hasLowConfidence ? 8 : 5;
-  const damping = hasLowConfidence ? 0.42 : 0.25;
-  const correctedResiduals = residuals.map((residual) => ({
-    ...residual,
-    finalError: residual.initialError * (damping ** iterations),
-  }));
-  const converged = correctedResiduals.every((residual) => Math.abs(residual.finalError) <= residual.tolerance);
-  const totalDeltaVMps = solutions.reduce((sum, solution) => sum + solution.requiredDeltaVMps, 0);
+  const converged = residuals.every((residual) => Math.abs(residual.finalError) <= residual.tolerance);
+  const totalDeltaVMps = Math.max(solve.controlNormMps, solutions.reduce((sum, solution) => sum + solution.requiredDeltaVMps, 0));
   const transferSeconds = hohmannTransferSeconds(orbitSummary, targets.targetAltitudeKm);
   const plan = solverManeuverPlan(solutions, transferSeconds);
 
   return {
     status: converged ? "Converged" : hasLowConfidence ? "Needs High-Fidelity Solve" : "Partial",
-    iterations,
+    iterations: solve.iterations,
     totalDeltaVMps,
     estimatedFuelKg: estimatePropellantKg(totalDeltaVMps, wetMass(profile), profile?.nominalIspS ?? 220),
-    residuals: correctedResiduals,
+    residuals,
     plan,
     rationale: hasLowConfidence
-      ? "Screening solver combined closed-form maneuvers with damped residual estimates. RAAN, eccentricity, and argument-of-perigee targets should be promoted to an Orekit numerical targeting solve before operations."
-      : "Closed-form altitude and inclination targets are combined into a damped differential-correction estimate suitable for preliminary mission design.",
+      ? "Finite-difference corrector solved altitude/inclination/eccentricity in a reduced-order model. RAAN and argument-of-perigee remain screening estimates and should be promoted to an Orekit numerical targeting solve before operations."
+      : "Finite-difference corrector solved a reduced-order maneuver model with explicit residual tolerances. This is materially better than closed-form ranking, but still not a high-fidelity propagated shooting method.",
   };
 }
 
-function solverResiduals(orbitSummary: OrbitSummary, targets: MissionDesignTargets): TargetSolverResidual[] {
+function reducedTargetState(orbitSummary: OrbitSummary): ReducedTargetState {
+  return {
+    altitudeKm: orbitSummary.currentAltitudeKm ?? orbitSummary.perigeeAltitudeKm ?? 0,
+    inclinationDeg: orbitSummary.inclinationDeg ?? 0,
+    eccentricity: orbitSummary.eccentricity ?? 0,
+  };
+}
+
+function reducedDesiredState(initialState: ReducedTargetState, targets: MissionDesignTargets): ReducedTargetState {
+  return {
+    altitudeKm: targets.targetAltitudeKm ?? initialState.altitudeKm,
+    inclinationDeg: targets.targetInclinationDeg ?? initialState.inclinationDeg,
+    eccentricity: targets.targetEccentricity ?? initialState.eccentricity,
+  };
+}
+
+function finiteDifferenceCorrector(
+  initialState: ReducedTargetState,
+  targetState: ReducedTargetState,
+  activeKeys: Array<keyof ReducedTargetState>,
+) {
+  let control: [number, number, number] = [0, 0, 0];
+  let finalState = applyReducedManeuverModel(initialState, control);
+  const tolerance = [0.5, 0.01, 0.0005];
+  let iterations = 0;
+  for (; iterations < 12; iterations += 1) {
+    const residual = activeKeys.map((key) => finalState[key] - targetState[key]);
+    if (residual.every((value, index) => Math.abs(value) <= tolerance[index])) {
+      break;
+    }
+    const jacobian = finiteDifferenceJacobian(initialState, control, activeKeys);
+    const step = solveLeastSquares3(jacobian, residual);
+    control = [
+      clamp(control[0] - step[0], -5000, 5000),
+      clamp(control[1] - step[1], -5000, 5000),
+      clamp(control[2] - step[2], -5000, 5000),
+    ];
+    finalState = applyReducedManeuverModel(initialState, control);
+  }
+  return {
+    iterations,
+    finalState,
+    controlNormMps: Math.hypot(control[0], control[1], control[2]),
+  };
+}
+
+function applyReducedManeuverModel(initialState: ReducedTargetState, controlMps: [number, number, number]): ReducedTargetState {
+  const circularRadiusKm = earthRadiusKm + Math.max(120, initialState.altitudeKm);
+  const circularSpeedMps = Math.sqrt(earthMuKm3S2 / circularRadiusKm) * 1000;
+  return {
+    altitudeKm: Math.max(-earthRadiusKm, initialState.altitudeKm + (2 * circularRadiusKm * controlMps[0] / circularSpeedMps)),
+    inclinationDeg: initialState.inclinationDeg + (controlMps[1] / Math.max(circularSpeedMps, 1)) * 180 / Math.PI,
+    eccentricity: clamp(initialState.eccentricity + controlMps[2] / Math.max(circularSpeedMps, 1), 0, 0.95),
+  };
+}
+
+function finiteDifferenceJacobian(
+  initialState: ReducedTargetState,
+  controlMps: [number, number, number],
+  activeKeys: Array<keyof ReducedTargetState>,
+) {
+  const epsilon = 0.1;
+  const base = applyReducedManeuverModel(initialState, controlMps);
+  return activeKeys.map((key) => {
+    return [0, 1, 2].map((axis) => {
+      const perturbed: [number, number, number] = [...controlMps];
+      perturbed[axis] += epsilon;
+      const shifted = applyReducedManeuverModel(initialState, perturbed);
+      return (shifted[key] - base[key]) / epsilon;
+    });
+  });
+}
+
+function solveLeastSquares3(jacobian: number[][], residual: number[]) {
+  const normal: [number, number, number][] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  const rhs: [number, number, number] = [0, 0, 0];
+  jacobian.forEach((row, rowIndex) => {
+    for (let i = 0; i < 3; i += 1) {
+      rhs[i] += row[i] * residual[rowIndex];
+      for (let j = 0; j < 3; j += 1) {
+        normal[i][j] += row[i] * row[j];
+      }
+    }
+  });
+  for (let i = 0; i < 3; i += 1) {
+    normal[i][i] += 1.0e-8;
+  }
+  return solve3x3(normal, rhs);
+}
+
+function solve3x3(matrix: [number, number, number][], vector: [number, number, number]): [number, number, number] {
+  const a = matrix.map((row, index) => [...row, vector[index]]);
+  for (let pivot = 0; pivot < 3; pivot += 1) {
+    let pivotRow = pivot;
+    for (let row = pivot + 1; row < 3; row += 1) {
+      if (Math.abs(a[row][pivot]) > Math.abs(a[pivotRow][pivot])) {
+        pivotRow = row;
+      }
+    }
+    [a[pivot], a[pivotRow]] = [a[pivotRow], a[pivot]];
+    const divisor = Math.abs(a[pivot][pivot]) < 1.0e-12 ? 1.0e-12 : a[pivot][pivot];
+    for (let column = pivot; column < 4; column += 1) {
+      a[pivot][column] /= divisor;
+    }
+    for (let row = 0; row < 3; row += 1) {
+      if (row === pivot) continue;
+      const factor = a[row][pivot];
+      for (let column = pivot; column < 4; column += 1) {
+        a[row][column] -= factor * a[pivot][column];
+      }
+    }
+  }
+  return [a[0][3], a[1][3], a[2][3]];
+}
+
+function clamp(value: number, minimum: number, maximum: number) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function solverResiduals(orbitSummary: OrbitSummary, targets: MissionDesignTargets, finalState: ReducedTargetState): TargetSolverResidual[] {
   const residuals: TargetSolverResidual[] = [];
   if (targets.targetAltitudeKm != null && orbitSummary.currentAltitudeKm != null) {
-    residuals.push({ parameter: "Altitude", initialError: orbitSummary.currentAltitudeKm - targets.targetAltitudeKm, finalError: 0, unit: "km", tolerance: 0.5 });
+    residuals.push({ parameter: "Altitude", initialError: orbitSummary.currentAltitudeKm - targets.targetAltitudeKm, finalError: finalState.altitudeKm - targets.targetAltitudeKm, unit: "km", tolerance: 0.5 });
   }
   if (targets.targetInclinationDeg != null && orbitSummary.inclinationDeg != null) {
-    residuals.push({ parameter: "Inclination", initialError: orbitSummary.inclinationDeg - targets.targetInclinationDeg, finalError: 0, unit: "deg", tolerance: 0.01 });
+    residuals.push({ parameter: "Inclination", initialError: orbitSummary.inclinationDeg - targets.targetInclinationDeg, finalError: finalState.inclinationDeg - targets.targetInclinationDeg, unit: "deg", tolerance: 0.01 });
   }
   if (targets.targetEccentricity != null && orbitSummary.eccentricity != null) {
-    residuals.push({ parameter: "Eccentricity", initialError: orbitSummary.eccentricity - targets.targetEccentricity, finalError: 0, unit: "", tolerance: 0.0005 });
+    residuals.push({ parameter: "Eccentricity", initialError: orbitSummary.eccentricity - targets.targetEccentricity, finalError: finalState.eccentricity - targets.targetEccentricity, unit: "", tolerance: 0.0005 });
   }
   if (targets.targetRaanDeg != null && orbitSummary.raanDeg != null) {
-    residuals.push({ parameter: "RAAN", initialError: angularSeparationDeg(orbitSummary.raanDeg, targets.targetRaanDeg), finalError: 0, unit: "deg", tolerance: 0.02 });
+    const initialError = angularSeparationDeg(orbitSummary.raanDeg, targets.targetRaanDeg);
+    residuals.push({ parameter: "RAAN", initialError, finalError: initialError, unit: "deg", tolerance: 0.02 });
   }
   if (targets.targetArgumentOfPerigeeDeg != null && orbitSummary.argumentOfPerigeeDeg != null) {
-    residuals.push({ parameter: "Argument of Perigee", initialError: angularSeparationDeg(orbitSummary.argumentOfPerigeeDeg, targets.targetArgumentOfPerigeeDeg), finalError: 0, unit: "deg", tolerance: 0.05 });
+    const initialError = angularSeparationDeg(orbitSummary.argumentOfPerigeeDeg, targets.targetArgumentOfPerigeeDeg);
+    residuals.push({ parameter: "Argument of Perigee", initialError, finalError: initialError, unit: "deg", tolerance: 0.05 });
   }
   return residuals;
 }
@@ -1129,6 +1273,145 @@ export function walkerConstellationAnalysis(config: WalkerConstellationConfig): 
       ? `Walker ${config.pattern.toLowerCase()} ${satelliteCount}/${planeCount}/${Math.round(config.phasing)} at ${config.altitudeKm.toFixed(0)} km and ${config.inclinationDeg.toFixed(2)} deg.`
       : "Satellite count must divide evenly by plane count for this basic Walker layout.",
   };
+}
+
+export function aerospaceReviewFindings({
+  events,
+  orbitSummary,
+  profile,
+  solver,
+  relativeMotion,
+  stationAccess,
+  coverage,
+  constellation,
+}: {
+  events: BackendMissionTimelineEvent[];
+  orbitSummary: OrbitSummary;
+  profile: BackendPropagationProfile | null;
+  solver: TargetSolverResult;
+  relativeMotion: RelativeMotionAnalysis;
+  stationAccess: GroundStationAccess;
+  coverage: CoverageAnalysis;
+  constellation: WalkerConstellationAnalysis;
+}): AerospaceReviewFinding[] {
+  const findings: AerospaceReviewFinding[] = [
+    {
+      area: "Differential corrector",
+      severity: "Warning",
+      status: "Partial",
+      finding: "The target solver now performs finite-difference Newton iterations, but over a reduced-order altitude/inclination/eccentricity model rather than propagated Cartesian states.",
+      recommendation: "Move correction to backend Orekit propagation with finite-difference state transition sensitivities or Orekit partial derivatives.",
+    },
+    {
+      area: "Lambert transfers",
+      severity: "Critical",
+      status: "Missing",
+      finding: "No true point-to-point Lambert solver exists. Hohmann estimates only cover circular coplanar transfers.",
+      recommendation: "Add a backend Lambert service for boundary-value transfers, multi-revolution options, and departure/arrival velocity residuals.",
+    },
+    {
+      area: "Event detection",
+      severity: "Warning",
+      status: "Partial",
+      finding: "Apsis, node, and eclipse events are derived from sampled trajectory points, so event time accuracy is bounded by sample cadence.",
+      recommendation: "Use Orekit event detectors such as ApsideDetector, NodeDetector, EclipseDetector, and AltitudeDetector during propagation.",
+    },
+    {
+      area: "Access and coverage",
+      severity: "Warning",
+      status: "Screening Only",
+      finding: "Ground access and coverage use spherical geometry over sampled states without refraction, terrain masks, sensor attitude, or exact rise/set root finding.",
+      recommendation: "Move access to backend topocentric-frame elevation event detection and sensor field-of-view geometry.",
+    },
+    {
+      area: "Relative motion",
+      severity: "Warning",
+      status: "Screening Only",
+      finding: "Relative motion uses a modeled RIC offset and along-track drift, not independently propagated chief/deputy states.",
+      recommendation: "Add multi-spacecraft propagation with relative PV histories in RIC/LVLH and closest-approach root refinement.",
+    },
+  ];
+
+  if (profile?.maneuverModelEnabled === false && events.some((event) => event.enabled && event.type !== "COAST")) {
+    findings.push({
+      area: "Maneuver execution",
+      severity: "Critical",
+      status: "Partial",
+      finding: "Mission contains enabled burns while the propagation profile maneuver model is disabled.",
+      recommendation: "Enable maneuver execution before accepting trajectory, fuel, or final-orbit products.",
+    });
+  }
+  if (orbitSummary.perigeeAltitudeKm != null && orbitSummary.perigeeAltitudeKm < 160) {
+    findings.push({
+      area: "Reentry safety",
+      severity: "Critical",
+      status: "Implemented",
+      finding: `Current perigee is ${orbitSummary.perigeeAltitudeKm.toFixed(1)} km, which is inside or near the operational reentry regime.`,
+      recommendation: "Treat this as a reentry/disposal trajectory and run high-fidelity drag/lifetime analysis before mission approval.",
+    });
+  }
+  if (solver.status !== "Converged" && solver.status !== "Unavailable") {
+    findings.push({
+      area: "Target convergence",
+      severity: "Critical",
+      status: "Partial",
+      finding: `Target solver status is ${solver.status}; residuals are not flight-design quality.`,
+      recommendation: "Do not turn this solution into an operations timeline until a propagated backend corrector converges.",
+    });
+  }
+  if (stationAccess.accessCount === 0) {
+    findings.push({
+      area: "Ground operations",
+      severity: "Warning",
+      status: "Partial",
+      finding: "No ground station access window is detected in the current trajectory preview.",
+      recommendation: "Verify station coordinates, mission window, elevation mask, and trajectory generation span.",
+    });
+  }
+  if (relativeMotion.closestApproachKm < 1) {
+    findings.push({
+      area: "Rendezvous safety",
+      severity: "Critical",
+      status: "Screening Only",
+      finding: `Modeled closest approach is ${relativeMotion.closestApproachKm.toFixed(3)} km without an independently propagated deputy state.`,
+      recommendation: "Run a two-spacecraft propagated relative-motion analysis before treating this as a safe rendezvous or proximity-operations plan.",
+    });
+  }
+  if (coverage.approximateCoveragePercent > 80) {
+    findings.push({
+      area: "Coverage realism",
+      severity: "Warning",
+      status: "Screening Only",
+      finding: "Approximate coverage is very high for a sample-based swath model.",
+      recommendation: "Validate with sensor footprint clipping, Earth rotation, target grid, and revisit statistics before claiming coverage performance.",
+    });
+  }
+  if (!constellation.valid) {
+    findings.push({
+      area: "Constellation geometry",
+      severity: "Critical",
+      status: "Partial",
+      finding: "Walker constellation definition is invalid because satellites are not evenly distributed across planes.",
+      recommendation: "Choose a satellite count divisible by plane count or implement mixed-plane custom constellation support.",
+    });
+  }
+  return findings;
+}
+
+export function capabilityMatrix(): CapabilityMatrixItem[] {
+  return [
+    { capability: "High-fidelity numerical propagation", currentStatus: "Implemented", orekit: "Implemented", gmat: "Implemented", stk: "Implemented", freeFlyer: "Implemented", note: "Backend uses Orekit numerical propagation with configurable force models." },
+    { capability: "Primitive maneuver execution", currentStatus: "Implemented", orekit: "Implemented", gmat: "Implemented", stk: "Implemented", freeFlyer: "Implemented", note: "Finite and impulsive burns exist; operational validation still needs deeper review." },
+    { capability: "Maneuver templates", currentStatus: "Partial", orekit: "Missing", gmat: "Implemented", stk: "Implemented", freeFlyer: "Implemented", note: "Templates expand into primitives, but most targeting is still analytical/screening." },
+    { capability: "Differential correction", currentStatus: "Partial", orekit: "Partial", gmat: "Implemented", stk: "Implemented", freeFlyer: "Implemented", note: "Frontend reduced-order finite-difference solve; needs backend propagated shooting." },
+    { capability: "Lambert targeting", currentStatus: "Missing", orekit: "Partial", gmat: "Implemented", stk: "Implemented", freeFlyer: "Implemented", note: "No true point-to-point boundary-value solver is wired." },
+    { capability: "Event-driven propagation", currentStatus: "Partial", orekit: "Implemented", gmat: "Implemented", stk: "Implemented", freeFlyer: "Implemented", note: "Current event markers are sample-derived; Orekit detectors should drive exact events." },
+    { capability: "Ground station access", currentStatus: "Partial", orekit: "Implemented", gmat: "Partial", stk: "Implemented", freeFlyer: "Implemented", note: "Screening access exists; exact topocentric rise/set and constraints are not backend-owned." },
+    { capability: "Sensor coverage", currentStatus: "Partial", orekit: "Partial", gmat: "Missing", stk: "Implemented", freeFlyer: "Implemented", note: "Approximate coverage only; no FOV/attitude/target grid engine yet." },
+    { capability: "Relative motion / rendezvous", currentStatus: "Partial", orekit: "Partial", gmat: "Partial", stk: "Implemented", freeFlyer: "Implemented", note: "Modeled deputy only; no multi-spacecraft propagation service." },
+    { capability: "Constellation design", currentStatus: "Partial", orekit: "Missing", gmat: "Missing", stk: "Implemented", freeFlyer: "Partial", note: "Basic Walker geometry only; no propagated constellation analysis." },
+    { capability: "Mission report and audit trail", currentStatus: "Implemented", orekit: "Missing", gmat: "Partial", stk: "Implemented", freeFlyer: "Partial", note: "JSON reports include analysis, constraints, audit findings, and capability matrix." },
+  ];
 }
 
 export function missionFuelBudget(events: BackendMissionTimelineEvent[], profile: BackendPropagationProfile | null): MissionFuelBudget {
@@ -1468,6 +1751,10 @@ export function buildMissionReport({
   const markers = detectOrbitEventMarkers(trajectoryOverlay?.mission?.trajectory);
   const targeting = targets ? missionTargetingSolutions(orbitSummary, targets, profile) : [];
   const solver = targets ? solveTargetingProblem(orbitSummary, targets, profile) : null;
+  const relativeMotion = relativeMotionSettings ? relativeMotionAnalysis(trajectoryOverlay, relativeMotionSettings) : null;
+  const access = groundStation ? groundStationAccess(trajectoryOverlay, groundStation) : null;
+  const coverage = coverageSettings ? coverageAnalysis(trajectoryOverlay, coverageSettings) : null;
+  const constellationAnalysis = constellation ? walkerConstellationAnalysis(constellation) : null;
   return {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -1500,10 +1787,10 @@ export function buildMissionReport({
       optimization: solver ? optimizationCandidates(solver, analytics) : [],
     },
     operations: {
-      relativeMotion: relativeMotionSettings ? relativeMotionAnalysis(trajectoryOverlay, relativeMotionSettings) : null,
-      groundStationAccess: groundStation ? groundStationAccess(trajectoryOverlay, groundStation) : null,
-      coverage: coverageSettings ? coverageAnalysis(trajectoryOverlay, coverageSettings) : null,
-      constellation: constellation ? walkerConstellationAnalysis(constellation) : null,
+      relativeMotion,
+      groundStationAccess: access,
+      coverage,
+      constellation: constellationAnalysis,
     },
     monteCarlo: monteCarloSettings ? monteCarloDispersion(analytics, monteCarloSettings) : null,
     constraints: {
@@ -1512,6 +1799,10 @@ export function buildMissionReport({
     },
     objectives: targets ? missionObjectiveProgress(orbitSummary, targets) : [],
     lifetime: orbitLifetimeEstimate(orbitSummary),
+    aerospaceReview: solver && relativeMotion && access && coverage && constellationAnalysis
+      ? aerospaceReviewFindings({ events, orbitSummary, profile, solver, relativeMotion, stationAccess: access, coverage, constellation: constellationAnalysis })
+      : [],
+    capabilityMatrix: capabilityMatrix(),
     validation,
   };
 }

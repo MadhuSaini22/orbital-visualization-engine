@@ -6438,6 +6438,9 @@ function ManeuverTemplateModal({
 }) {
   const targetAltitude = Number(draft.targetAltitudeKm);
   const inclinationChange = Number(draft.inclinationChangeDeg);
+  const maxPerigeeRaiseTargetKm = orbitSummary.apogeeAltitudeKm == null ? null : Math.max(0, orbitSummary.apogeeAltitudeKm - 1);
+  const minApogeeRaiseTargetKm = orbitSummary.currentAltitudeKm == null ? null : orbitSummary.currentAltitudeKm + 1;
+  const maxDeorbitTargetKm = orbitSummary.currentAltitudeKm == null ? null : Math.max(0, orbitSummary.currentAltitudeKm - 1);
   const validationMessages: Array<{ tone: "error" | "warning"; message: string }> = [];
   if (draft.type === "PLANE_CHANGE") {
     if (!Number.isFinite(inclinationChange) || Math.abs(inclinationChange) <= 0) {
@@ -6453,14 +6456,14 @@ function ManeuverTemplateModal({
     if (draft.type === "HOHMANN_TRANSFER" && Number.isFinite(targetAltitude) && orbitSummary.currentAltitudeKm != null && Math.abs(targetAltitude - orbitSummary.currentAltitudeKm) < 1) {
       validationMessages.push({ tone: "error", message: "Target orbit altitude must differ from the current altitude by at least 1 km." });
     }
-    if (draft.type === "APOGEE_RAISE" && Number.isFinite(targetAltitude) && orbitSummary.currentAltitudeKm != null && targetAltitude <= orbitSummary.currentAltitudeKm + 1) {
-      validationMessages.push({ tone: "error", message: "Target apogee altitude must be above the current altitude by at least 1 km." });
+    if (draft.type === "APOGEE_RAISE" && Number.isFinite(targetAltitude) && minApogeeRaiseTargetKm != null && targetAltitude < minApogeeRaiseTargetKm) {
+      validationMessages.push({ tone: "error", message: `Target apogee altitude must be at least ${formatNumber(minApogeeRaiseTargetKm, 2)} km.` });
     }
-    if (draft.type === "PERIGEE_RAISE" && Number.isFinite(targetAltitude) && orbitSummary.apogeeAltitudeKm != null && targetAltitude >= orbitSummary.apogeeAltitudeKm - 1) {
-      validationMessages.push({ tone: "error", message: "Target perigee altitude must remain below the current apogee altitude." });
+    if (draft.type === "PERIGEE_RAISE" && Number.isFinite(targetAltitude) && maxPerigeeRaiseTargetKm != null && targetAltitude >= maxPerigeeRaiseTargetKm) {
+      validationMessages.push({ tone: "error", message: `Target perigee altitude must be below the burn apoapsis. Max valid target is ${formatNumber(maxPerigeeRaiseTargetKm, 2)} km.` });
     }
-    if (draft.type === "DEORBIT_BURN" && Number.isFinite(targetAltitude) && orbitSummary.currentAltitudeKm != null && targetAltitude >= orbitSummary.currentAltitudeKm - 1) {
-      validationMessages.push({ tone: "error", message: "Deorbit target altitude must be below the current altitude by at least 1 km." });
+    if (draft.type === "DEORBIT_BURN" && Number.isFinite(targetAltitude) && maxDeorbitTargetKm != null && targetAltitude >= maxDeorbitTargetKm) {
+      validationMessages.push({ tone: "error", message: `Deorbit target altitude must be below current altitude. Max valid target is ${formatNumber(maxDeorbitTargetKm, 2)} km.` });
     }
   }
   const hasBlockingValidation = validationMessages.some((item) => item.tone === "error");
@@ -6532,7 +6535,45 @@ function ManeuverTemplateModal({
             );})}
           </div>
 
-          <div className="mt-5 grid gap-4">
+            <div className="mt-5 grid gap-4">
+            {draft.type !== "PLANE_CHANGE" && (
+              <div className="grid gap-3 border border-cyan-300/15 bg-black/25 p-3 text-xs leading-5 text-zinc-400 md:grid-cols-4">
+                <TemplateMetric label="Current Perigee" value={orbitSummary.perigeeAltitudeKm == null ? "Unavailable" : `${formatNumber(orbitSummary.perigeeAltitudeKm, 2)} km`} />
+                <TemplateMetric label="Current Apogee" value={orbitSummary.apogeeAltitudeKm == null ? "Unavailable" : `${formatNumber(orbitSummary.apogeeAltitudeKm, 2)} km`} />
+                <TemplateMetric
+                  label="Valid Target Range"
+                  value={
+                    draft.type === "PERIGEE_RAISE"
+                      ? maxPerigeeRaiseTargetKm == null ? "Needs apogee" : `< ${formatNumber(maxPerigeeRaiseTargetKm, 2)} km`
+                      : draft.type === "APOGEE_RAISE"
+                        ? minApogeeRaiseTargetKm == null ? "Needs altitude" : `>= ${formatNumber(minApogeeRaiseTargetKm, 2)} km`
+                        : draft.type === "DEORBIT_BURN"
+                          ? maxDeorbitTargetKm == null ? "Needs altitude" : `< ${formatNumber(maxDeorbitTargetKm, 2)} km`
+                          : "Template-defined"
+                  }
+                />
+                {(draft.type === "PERIGEE_RAISE" && maxPerigeeRaiseTargetKm != null) || (draft.type === "DEORBIT_BURN" && maxDeorbitTargetKm != null) || (draft.type === "APOGEE_RAISE" && minApogeeRaiseTargetKm != null) ? (
+                  <button
+                    type="button"
+                    onClick={() => onDraftChange({
+                      ...draft,
+                      targetAltitudeKm: String(
+                        draft.type === "PERIGEE_RAISE"
+                          ? Math.max(0, maxPerigeeRaiseTargetKm! - 1)
+                          : draft.type === "DEORBIT_BURN"
+                            ? Math.max(0, Math.min(120, maxDeorbitTargetKm! - 1))
+                            : minApogeeRaiseTargetKm!,
+                      ),
+                    })}
+                    className="border border-cyan-300/35 px-3 py-2 font-mono text-[10px] uppercase text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-300/10"
+                  >
+                    Use Safe Target
+                  </button>
+                ) : (
+                  <TemplateMetric label="Suggested Target" value="Unavailable" />
+                )}
+              </div>
+            )}
             <div className="grid gap-2 border border-cyan-300/15 bg-black/25 p-3 text-xs leading-5 text-zinc-400 md:grid-cols-3">
               <p><span className="font-semibold text-cyan-100">What:</span> {selectedGuidance.what}</p>
               <p><span className="font-semibold text-cyan-100">When:</span> {selectedGuidance.when}</p>
