@@ -506,11 +506,34 @@ export type WalkerConstellationAnalysis = {
   summary: string;
 };
 
-export type AerospaceReviewFinding = {
-  area: string;
-  severity: "Info" | "Warning" | "Critical";
-  status: "Implemented" | "Partial" | "Screening Only" | "Missing";
-  finding: string;
+export type FindingSeverity = "INFO" | "WARNING" | "BLOCKER";
+export type MissionFindingCategory =
+  | "MISSION"
+  | "MANEUVER"
+  | "TARGETING"
+  | "FUEL"
+  | "CONSTRAINT"
+  | "TRAJECTORY"
+  | "VALIDATION"
+  | "OPERATIONS";
+
+export type MissionFinding = {
+  id: string;
+  severity: FindingSeverity;
+  category: MissionFindingCategory;
+  source: "VALIDATION" | "CONSTRAINT" | "TRAJECTORY" | "TARGETING" | "FUEL" | "MANEUVER" | "ORBIT";
+  message: string;
+  recommendation: string;
+};
+
+export type CapabilityFinding = {
+  id: string;
+  severity: FindingSeverity;
+  category: "BACKEND_CAPABILITY" | "SOLVER" | "OREKIT" | "ROADMAP";
+  source: "ENGINEERING_AUDIT";
+  capability: string;
+  status: "Implemented" | "Partially Integrated" | "Screening Only" | "Unused" | "Missing";
+  message: string;
   recommendation: string;
 };
 
@@ -1275,127 +1298,236 @@ export function walkerConstellationAnalysis(config: WalkerConstellationConfig): 
   };
 }
 
-export function aerospaceReviewFindings({
+export function missionAnalysisFindings({
   events,
   orbitSummary,
   profile,
-  solver,
-  relativeMotion,
-  stationAccess,
-  coverage,
-  constellation,
+  validation,
+  constraintViolations,
+  trajectoryStale,
+  targetSolver,
 }: {
   events: BackendMissionTimelineEvent[];
   orbitSummary: OrbitSummary;
   profile: BackendPropagationProfile | null;
-  solver: TargetSolverResult;
-  relativeMotion: RelativeMotionAnalysis;
-  stationAccess: GroundStationAccess;
-  coverage: CoverageAnalysis;
-  constellation: WalkerConstellationAnalysis;
-}): AerospaceReviewFinding[] {
-  const findings: AerospaceReviewFinding[] = [
+  validation: MissionValidationResult;
+  constraintViolations: MissionConstraintViolation[];
+  trajectoryStale: boolean;
+  targetSolver: TargetSolverResult;
+}): MissionFinding[] {
+  const findings: MissionFinding[] = [];
+  const enabledBurns = events.filter((event) => event.enabled && event.type !== "COAST");
+  const enabledCoasts = events.filter((event) => event.enabled && event.type === "COAST");
+
+  const addFinding = (finding: MissionFinding) => {
+    if (!findings.some((existing) => existing.id === finding.id)) {
+      findings.push(finding);
+    }
+  };
+
+  if (trajectoryStale) {
+    addFinding({
+      id: "trajectory-stale",
+      category: "TRAJECTORY",
+      source: "TRAJECTORY",
+      severity: "WARNING",
+      message: "Generated trajectory products are out of date relative to the current mission design.",
+      recommendation: "Regenerate the trajectory before accepting delta-V, fuel, final orbit, or event timing products.",
+    });
+  }
+
+  if (enabledBurns.length === 0) {
+    addFinding({
+      id: enabledCoasts.length > 0 ? "coast-only-propagation" : "propagation-only",
+      category: "MISSION",
+      source: "VALIDATION",
+      severity: "INFO",
+      message: enabledCoasts.length > 0
+        ? "Mission configured as coast-only propagation. Target-orbit changes will not be executed because no maneuver plan exists."
+        : "Mission configured as propagation-only. The current orbit will be propagated without maneuver execution.",
+      recommendation: "This is valid for propagation, TLE prediction, lifetime, and coast-only workflows. Add a maneuver sequence only when the mission objective requires changing the orbit.",
+    });
+  }
+
+  validation.errors.forEach((error) => {
+    addFinding({
+      id: `validation-blocker-${error}`,
+      category: "VALIDATION",
+      source: "VALIDATION",
+      severity: "BLOCKER",
+      message: error,
+      recommendation: "Resolve the blocking validation item before generating or accepting mission results.",
+    });
+  });
+
+  validation.warnings.forEach((warning) => {
+    addFinding({
+      id: `validation-warning-${warning}`,
+      category: "VALIDATION",
+      source: "VALIDATION",
+      severity: "WARNING",
+      message: warning,
+      recommendation: "Review the mission assumption and regenerate trajectory if the design intent changed.",
+    });
+  });
+
+  constraintViolations.forEach((violation) => {
+    addFinding({
+      id: `constraint-${violation.constraint}-${violation.message}`,
+      category: "CONSTRAINT",
+      source: "CONSTRAINT",
+      severity: violation.severity === "Violation" ? "BLOCKER" : "WARNING",
+      message: `${violation.constraint}: ${violation.message}`,
+      recommendation: violation.severity === "Violation"
+        ? "Resolve this constraint violation before mission acceptance."
+        : "Review this constraint warning during mission readiness assessment.",
+    });
+  });
+
+  if (profile?.maneuverModelEnabled === false && enabledBurns.length > 0) {
+    addFinding({
+      id: "maneuver-model-disabled",
+      category: "MANEUVER",
+      source: "MANEUVER",
+      severity: "BLOCKER",
+      message: "Enabled burn events exist while the mission propagation profile has maneuver execution disabled.",
+      recommendation: "Enable the maneuver model or disable burn events before generating trajectory products.",
+    });
+  }
+
+  if (orbitSummary.perigeeAltitudeKm != null && orbitSummary.perigeeAltitudeKm < 160) {
+    addFinding({
+      id: "unsafe-perigee",
+      category: "OPERATIONS",
+      source: "ORBIT",
+      severity: "WARNING",
+      message: `Current perigee is ${orbitSummary.perigeeAltitudeKm.toFixed(1)} km, near or inside the operational reentry regime.`,
+      recommendation: "Treat the mission as a disposal/reentry case or raise perigee before operational approval.",
+    });
+  }
+
+  if (targetSolver.status !== "Converged" && targetSolver.status !== "Unavailable" && targetSolver.residuals.length > 0) {
+    addFinding({
+      id: "target-residuals",
+      category: "TARGETING",
+      source: "TARGETING",
+      severity: "WARNING",
+      message: `Target solver status is ${targetSolver.status}; target residuals remain after the screening solve.`,
+      recommendation: "Use the residuals as a planning cue only and avoid treating this as a converged flight-dynamics target solution.",
+    });
+  }
+
+  return findings;
+}
+
+export function engineeringCapabilityFindings(): CapabilityFinding[] {
+  return [
     {
-      area: "Differential corrector",
-      severity: "Warning",
-      status: "Partial",
-      finding: "The target solver now performs finite-difference Newton iterations, but over a reduced-order altitude/inclination/eccentricity model rather than propagated Cartesian states.",
-      recommendation: "Move correction to backend Orekit propagation with finite-difference state transition sensitivities or Orekit partial derivatives.",
+      id: "capability-differential-corrector",
+      category: "SOLVER",
+      source: "ENGINEERING_AUDIT",
+      capability: "Differential corrector",
+      severity: "INFO",
+      status: "Screening Only",
+      message: "Targeting currently uses a reduced-order frontend solver rather than a backend propagated shooting/correction loop.",
+      recommendation: "When targeting becomes a sprint objective, move correction to a backend Orekit solve with propagated residuals, control variables, and convergence history.",
     },
     {
-      area: "Lambert transfers",
-      severity: "Critical",
+      id: "capability-lambert-transfers",
+      category: "SOLVER",
+      source: "ENGINEERING_AUDIT",
+      capability: "Lambert transfers",
+      severity: "INFO",
       status: "Missing",
-      finding: "No true point-to-point Lambert solver exists. Hohmann estimates only cover circular coplanar transfers.",
-      recommendation: "Add a backend Lambert service for boundary-value transfers, multi-revolution options, and departure/arrival velocity residuals.",
+      message: "No Lambert boundary-value transfer service is wired into the mission planner.",
+      recommendation: "Keep this as a platform roadmap item until rendezvous, interplanetary, or point-to-point transfer objectives are in scope.",
     },
     {
-      area: "Event detection",
-      severity: "Warning",
-      status: "Partial",
-      finding: "Apsis, node, and eclipse events are derived from sampled trajectory points, so event time accuracy is bounded by sample cadence.",
-      recommendation: "Use Orekit event detectors such as ApsideDetector, NodeDetector, EclipseDetector, and AltitudeDetector during propagation.",
+      id: "capability-event-detection",
+      category: "OREKIT",
+      source: "ENGINEERING_AUDIT",
+      capability: "Event detection",
+      severity: "INFO",
+      status: "Partially Integrated",
+      message: "Orekit event detectors are available and impulsive burns already register event detectors, but orbit-event reporting is still sample-derived.",
+      recommendation: "Promote apsis, node, eclipse, altitude, and elevation events to backend Orekit detector outputs when event reporting is prioritized.",
     },
     {
-      area: "Access and coverage",
-      severity: "Warning",
+      id: "capability-coverage",
+      category: "ROADMAP",
+      source: "ENGINEERING_AUDIT",
+      capability: "Coverage",
+      severity: "INFO",
       status: "Screening Only",
-      finding: "Ground access and coverage use spherical geometry over sampled states without refraction, terrain masks, sensor attitude, or exact rise/set root finding.",
-      recommendation: "Move access to backend topocentric-frame elevation event detection and sensor field-of-view geometry.",
+      message: "Coverage analysis is an approximate sampled ground-track/swath estimate, not a sensor field-of-view or terrain-masked access product.",
+      recommendation: "Keep coverage maturity in Engineering Audit unless the active mission is explicitly a coverage mission.",
     },
     {
-      area: "Relative motion",
-      severity: "Warning",
+      id: "capability-relative-motion",
+      category: "ROADMAP",
+      source: "ENGINEERING_AUDIT",
+      capability: "Relative motion",
+      severity: "INFO",
       status: "Screening Only",
-      finding: "Relative motion uses a modeled RIC offset and along-track drift, not independently propagated chief/deputy states.",
-      recommendation: "Add multi-spacecraft propagation with relative PV histories in RIC/LVLH and closest-approach root refinement.",
+      message: "Relative motion uses a modeled deputy offset rather than independently propagated multi-spacecraft states.",
+      recommendation: "Hide relative-motion maturity from single-spacecraft mission analysis; revisit only for rendezvous or formation-flying missions.",
     },
   ];
+}
 
-  if (profile?.maneuverModelEnabled === false && events.some((event) => event.enabled && event.type !== "COAST")) {
-    findings.push({
-      area: "Maneuver execution",
-      severity: "Critical",
-      status: "Partial",
-      finding: "Mission contains enabled burns while the propagation profile maneuver model is disabled.",
-      recommendation: "Enable maneuver execution before accepting trajectory, fuel, or final-orbit products.",
-    });
-  }
-  if (orbitSummary.perigeeAltitudeKm != null && orbitSummary.perigeeAltitudeKm < 160) {
-    findings.push({
-      area: "Reentry safety",
-      severity: "Critical",
-      status: "Implemented",
-      finding: `Current perigee is ${orbitSummary.perigeeAltitudeKm.toFixed(1)} km, which is inside or near the operational reentry regime.`,
-      recommendation: "Treat this as a reentry/disposal trajectory and run high-fidelity drag/lifetime analysis before mission approval.",
-    });
-  }
-  if (solver.status !== "Converged" && solver.status !== "Unavailable") {
-    findings.push({
-      area: "Target convergence",
-      severity: "Critical",
-      status: "Partial",
-      finding: `Target solver status is ${solver.status}; residuals are not flight-design quality.`,
-      recommendation: "Do not turn this solution into an operations timeline until a propagated backend corrector converges.",
-    });
-  }
-  if (stationAccess.accessCount === 0) {
-    findings.push({
-      area: "Ground operations",
-      severity: "Warning",
-      status: "Partial",
-      finding: "No ground station access window is detected in the current trajectory preview.",
-      recommendation: "Verify station coordinates, mission window, elevation mask, and trajectory generation span.",
-    });
-  }
-  if (relativeMotion.closestApproachKm < 1) {
-    findings.push({
-      area: "Rendezvous safety",
-      severity: "Critical",
-      status: "Screening Only",
-      finding: `Modeled closest approach is ${relativeMotion.closestApproachKm.toFixed(3)} km without an independently propagated deputy state.`,
-      recommendation: "Run a two-spacecraft propagated relative-motion analysis before treating this as a safe rendezvous or proximity-operations plan.",
-    });
-  }
-  if (coverage.approximateCoveragePercent > 80) {
-    findings.push({
-      area: "Coverage realism",
-      severity: "Warning",
-      status: "Screening Only",
-      finding: "Approximate coverage is very high for a sample-based swath model.",
-      recommendation: "Validate with sensor footprint clipping, Earth rotation, target grid, and revisit statistics before claiming coverage performance.",
-    });
-  }
-  if (!constellation.valid) {
-    findings.push({
-      area: "Constellation geometry",
-      severity: "Critical",
-      status: "Partial",
-      finding: "Walker constellation definition is invalid because satellites are not evenly distributed across planes.",
-      recommendation: "Choose a satellite count divisible by plane count or implement mixed-plane custom constellation support.",
-    });
-  }
-  return findings;
+export function orekitEventDetectorCapabilityMatrix(): CapabilityFinding[] {
+  return [
+    {
+      id: "orekit-detector-apside",
+      category: "OREKIT",
+      source: "ENGINEERING_AUDIT",
+      capability: "ApsideDetector",
+      severity: "INFO",
+      status: "Unused",
+      message: "Orekit ApsideDetector is available for exact perigee/apogee event reporting, but the UI currently derives apsides from trajectory samples.",
+      recommendation: "Move apsis event extraction into backend propagation when exact event timing is required.",
+    },
+    {
+      id: "orekit-detector-node",
+      category: "OREKIT",
+      source: "ENGINEERING_AUDIT",
+      capability: "NodeDetector",
+      severity: "INFO",
+      status: "Unused",
+      message: "Orekit NodeDetector is available for ascending/descending node detection, but node markers are currently sample-derived.",
+      recommendation: "Use backend node detectors for node-timed burns or event reports.",
+    },
+    {
+      id: "orekit-detector-eclipse",
+      category: "OREKIT",
+      source: "ENGINEERING_AUDIT",
+      capability: "EclipseDetector",
+      severity: "INFO",
+      status: "Unused",
+      message: "Orekit EclipseDetector is available, while eclipse markers are currently estimated from sampled states.",
+      recommendation: "Use backend eclipse detectors for operations products involving power or thermal constraints.",
+    },
+    {
+      id: "orekit-detector-altitude",
+      category: "OREKIT",
+      source: "ENGINEERING_AUDIT",
+      capability: "AltitudeDetector",
+      severity: "INFO",
+      status: "Unused",
+      message: "Orekit AltitudeDetector is available for threshold crossing events and is not yet surfaced in mission products.",
+      recommendation: "Use altitude detectors for reentry, disposal, or keep-out altitude constraints.",
+    },
+    {
+      id: "orekit-detector-elevation",
+      category: "OREKIT",
+      source: "ENGINEERING_AUDIT",
+      capability: "ElevationDetector",
+      severity: "INFO",
+      status: "Unused",
+      message: "Orekit ElevationDetector is available for access-window root finding and is not yet backend-owned in this planner.",
+      recommendation: "Use elevation detectors only when ground access becomes an active mission objective.",
+    },
+  ];
 }
 
 export function capabilityMatrix(): CapabilityMatrixItem[] {
@@ -1799,9 +1931,27 @@ export function buildMissionReport({
     },
     objectives: targets ? missionObjectiveProgress(orbitSummary, targets) : [],
     lifetime: orbitLifetimeEstimate(orbitSummary),
-    aerospaceReview: solver && relativeMotion && access && coverage && constellationAnalysis
-      ? aerospaceReviewFindings({ events, orbitSummary, profile, solver, relativeMotion, stationAccess: access, coverage, constellation: constellationAnalysis })
-      : [],
+    missionFindings: missionAnalysisFindings({
+      events,
+      orbitSummary,
+      profile,
+      validation,
+      constraintViolations: constraints ? missionConstraintViolations(events, analytics, orbitSummary, markers, constraints) : [],
+      trajectoryStale: Boolean(trajectoryOverlay?.stale),
+      targetSolver: solver ?? {
+        status: "Unavailable",
+        iterations: 0,
+        totalDeltaVMps: 0,
+        estimatedFuelKg: 0,
+        residuals: [],
+        plan: [],
+        rationale: "No targeting request was included in this report.",
+      },
+    }),
+    engineeringAudit: {
+      capabilityFindings: engineeringCapabilityFindings(),
+      eventDetectorStatus: orekitEventDetectorCapabilityMatrix(),
+    },
     capabilityMatrix: capabilityMatrix(),
     validation,
   };

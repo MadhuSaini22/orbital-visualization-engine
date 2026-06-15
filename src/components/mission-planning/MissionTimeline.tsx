@@ -7,10 +7,10 @@ import { OrbitSummaryPanel } from "./OrbitSummaryPanel";
 import type { OrbitSummary } from "./OrbitSummaryPanel";
 import { DetailMetric, HudPanel } from "./ui";
 import type { MissionGenerationSnapshot, MissionTrajectoryOverlay, TimelineLayoutModel, TimelineSnapMode, TimelineTimeMode, TimelineZoomPreset, TimelineInteractionModel } from "./types";
-import { aerospaceReviewFindings, buildMissionReport, buildTimelineLayoutModel, compactIsoUtc, coverageAnalysis, deltaVBreakdown, detectOrbitEventMarkers, displayTimelineTime, estimatedEventDeltaVMps, eventScheduleMode, forceModelSummary, groundStationAccess, integratorSummary, maneuverQualityAnalysis, metOffsetLabelFromSeconds, missionConstraintViolations, missionDurationSeconds, missionObjectiveProgress, missionTargetingSolutions, missionTimelineAnalytics, missionTrajectoryMaxStepSeconds, missionTrajectoryMinStepSeconds, monteCarloDispersion, optimizationCandidates, orbitLifetimeEstimate, readNumberParameter, readStringParameter, relativeMotionAnalysis, secondsToDurationLabel, solveTargetingProblem, spacecraftPerformanceStatus, timelineAnalysis, timelineSnapOptions, timelineZoomOptions, tradeStudySolutions, validateMissionPlan, walkerConstellationAnalysis } from "./utils";
+import { buildMissionReport, buildTimelineLayoutModel, capabilityMatrix, compactIsoUtc, deltaVBreakdown, detectOrbitEventMarkers, displayTimelineTime, engineeringCapabilityFindings, estimatedEventDeltaVMps, eventScheduleMode, forceModelSummary, integratorSummary, maneuverQualityAnalysis, metOffsetLabelFromSeconds, missionAnalysisFindings, missionConstraintViolations, missionDurationSeconds, missionObjectiveProgress, missionTargetingSolutions, missionTimelineAnalytics, missionTrajectoryMaxStepSeconds, missionTrajectoryMinStepSeconds, monteCarloDispersion, optimizationCandidates, orbitLifetimeEstimate, orekitEventDetectorCapabilityMatrix, readNumberParameter, readStringParameter, secondsToDurationLabel, solveTargetingProblem, spacecraftPerformanceStatus, timelineAnalysis, timelineSnapOptions, timelineZoomOptions, tradeStudySolutions, validateMissionPlan } from "./utils";
 import type { CoverageSettings, GroundStationConfig, MissionConstraints, MissionDesignTargets, MonteCarloSettings, MissionOrbitEventMarker, RelativeMotionSettings, WalkerConstellationConfig } from "./utils";
 
-type AnalysisWorkspaceTab = "TRAJECTORY" | "HEALTH" | "OPTIMIZATION" | "OPERATIONS";
+type AnalysisWorkspaceTab = "TRAJECTORY" | "HEALTH" | "OPTIMIZATION" | "OPERATIONS" | "AUDIT";
 type MissionPlannerPhase = "DEFINITION" | "CURRENT_ORBIT" | "TARGET_ORBIT" | "STRATEGY" | "VALIDATION" | "ANALYSIS" | "REPORTS";
 type MissionExecutionMode = "PROPAGATION_ONLY" | "COAST_MISSION" | "MANEUVER_MISSION";
 
@@ -19,6 +19,7 @@ const analysisWorkspaceTabs: Array<{ id: AnalysisWorkspaceTab; label: string }> 
   { id: "HEALTH", label: "Flight Dynamics" },
   { id: "OPTIMIZATION", label: "Optimization" },
   { id: "OPERATIONS", label: "Operations" },
+  { id: "AUDIT", label: "Engineering Audit" },
 ];
 
 const missionPlannerPhases: Array<{ id: MissionPlannerPhase; label: string; helper: string }> = [
@@ -36,6 +37,17 @@ const missionExecutionModes: Array<{ id: MissionExecutionMode; label: string; he
   { id: "COAST_MISSION", label: "Coast Mission", helper: "Use scheduled coast segments without burns." },
   { id: "MANEUVER_MISSION", label: "Maneuver Mission", helper: "Execute enabled coast and burn timeline events." },
 ];
+
+function deriveExecutionMode(events: BackendMissionTimelineEvent[]): MissionExecutionMode {
+  const enabledEvents = events.filter((event) => event.enabled);
+  if (enabledEvents.some((event) => event.type === "FINITE_BURN" || event.type === "IMPULSIVE_BURN")) {
+    return "MANEUVER_MISSION";
+  }
+  if (enabledEvents.some((event) => event.type === "COAST")) {
+    return "COAST_MISSION";
+  }
+  return "PROPAGATION_ONLY";
+}
 
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") {
@@ -198,11 +210,6 @@ export function MissionTimelinePanel({
   const [objectiveType, setObjectiveType] = useState(generatedMissionDesign?.objectiveType ?? "REACH_TARGET_ALTITUDE");
   const [advancedObjectiveOpen, setAdvancedObjectiveOpen] = useState(false);
   const [strategyAdvancedOpen, setStrategyAdvancedOpen] = useState(true);
-  const [executionMode, setExecutionMode] = useState<MissionExecutionMode>(
-    generatedMissionDesign?.executionMode === "COAST_MISSION" || generatedMissionDesign?.executionMode === "MANEUVER_MISSION"
-      ? generatedMissionDesign.executionMode
-      : "PROPAGATION_ONLY",
-  );
   const [targetTrueAnomalyDeg, setTargetTrueAnomalyDeg] = useState<number | null>(
     typeof generatedMissionDesign?.targetOrbit.targetTrueAnomalyDeg === "number" ? generatedMissionDesign.targetOrbit.targetTrueAnomalyDeg : null,
   );
@@ -226,22 +233,22 @@ export function MissionTimelinePanel({
     minPerigeeAltitudeKm: typeof generatedMissionDesign?.missionConstraints.minPerigeeAltitudeKm === "number" ? generatedMissionDesign.missionConstraints.minPerigeeAltitudeKm : 160,
     maxEclipseDurationSeconds: typeof generatedMissionDesign?.missionConstraints.maxEclipseDurationSeconds === "number" ? generatedMissionDesign.missionConstraints.maxEclipseDurationSeconds : 2400,
   });
-  const [relativeMotionSettings, setRelativeMotionSettings] = useState<RelativeMotionSettings>({
+  const [relativeMotionSettings] = useState<RelativeMotionSettings>({
     radialOffsetKm: 0.2,
     alongTrackOffsetKm: 5,
     crossTrackOffsetKm: 0.1,
     relativeDriftMps: -0.05,
   });
-  const [groundStation, setGroundStation] = useState<GroundStationConfig>({
+  const [groundStation] = useState<GroundStationConfig>({
     latitudeDeg: 13.73,
     longitudeDeg: 80.23,
     elevationMaskDeg: 10,
   });
-  const [coverageSettings, setCoverageSettings] = useState<CoverageSettings>({
+  const [coverageSettings] = useState<CoverageSettings>({
     swathWidthKm: 120,
     minimumElevationDeg: 10,
   });
-  const [constellationConfig, setConstellationConfig] = useState<WalkerConstellationConfig>({
+  const [constellationConfig] = useState<WalkerConstellationConfig>({
     pattern: "DELTA",
     satelliteCount: 24,
     planeCount: 6,
@@ -255,6 +262,7 @@ export function MissionTimelinePanel({
     customVisibleSeconds: Math.max(60, Number(customZoomHours) * 3600 || 3 * 3600),
   }), [customZoomHours, snapMode, zoomPreset]);
   const analysis = useMemo(() => timelineAnalysis(mission, events), [events, mission]);
+  const executionMode = useMemo(() => deriveExecutionMode(events), [events]);
   const missionAnalytics = useMemo(() => missionTimelineAnalytics(mission, events, propagationProfile), [events, mission, propagationProfile]);
   const orbitEventMarkers = useMemo(() => detectOrbitEventMarkers(trajectoryOverlay?.mission?.trajectory), [trajectoryOverlay]);
   const dvBreakdown = useMemo(() => deltaVBreakdown(events), [events]);
@@ -266,20 +274,6 @@ export function MissionTimelinePanel({
   const tradeStudy = useMemo(() => tradeStudySolutions(targetingSolutions, missionAnalytics), [missionAnalytics, targetingSolutions]);
   const targetSolver = useMemo(() => solveTargetingProblem(orbitSummary, missionTargets, propagationProfile), [missionTargets, orbitSummary, propagationProfile]);
   const maneuverOptimization = useMemo(() => optimizationCandidates(targetSolver, missionAnalytics), [missionAnalytics, targetSolver]);
-  const relativeMotion = useMemo(() => relativeMotionAnalysis(trajectoryOverlay, relativeMotionSettings), [relativeMotionSettings, trajectoryOverlay]);
-  const stationAccess = useMemo(() => groundStationAccess(trajectoryOverlay, groundStation), [groundStation, trajectoryOverlay]);
-  const coverage = useMemo(() => coverageAnalysis(trajectoryOverlay, coverageSettings), [coverageSettings, trajectoryOverlay]);
-  const constellation = useMemo(() => walkerConstellationAnalysis(constellationConfig), [constellationConfig]);
-  const aerospaceFindings = useMemo(() => aerospaceReviewFindings({
-    events,
-    orbitSummary,
-    profile: propagationProfile,
-    solver: targetSolver,
-    relativeMotion,
-    stationAccess,
-    coverage,
-    constellation,
-  }), [constellation, coverage, events, orbitSummary, propagationProfile, relativeMotion, stationAccess, targetSolver]);
   const templateGroups = useMemo(() => templateEventGroups(events), [events]);
   const missionValidation = useMemo(() => validateMissionPlan(mission, events, propagationProfile), [events, mission, propagationProfile]);
   const performanceStatus = spacecraftPerformanceStatus(missionAnalytics.fuelBudget);
@@ -367,21 +361,12 @@ export function MissionTimelinePanel({
   const inclinationDeltaDeg = orbitSummary.inclinationDeg != null && missionTargets.targetInclinationDeg != null
     ? missionTargets.targetInclinationDeg - orbitSummary.inclinationDeg
     : null;
-  const targetOrbitDiffers = Boolean(
-    (altitudeDeltaKm != null && Math.abs(altitudeDeltaKm) >= 1)
-    || (inclinationDeltaDeg != null && Math.abs(inclinationDeltaDeg) >= 0.01)
-    || (orbitSummary.eccentricity != null && missionTargets.targetEccentricity != null && Math.abs(missionTargets.targetEccentricity - orbitSummary.eccentricity) >= 0.001)
-    || (orbitSummary.raanDeg != null && missionTargets.targetRaanDeg != null && Math.abs(missionTargets.targetRaanDeg - orbitSummary.raanDeg) >= 0.01)
-    || (orbitSummary.argumentOfPerigeeDeg != null && missionTargets.targetArgumentOfPerigeeDeg != null && Math.abs(missionTargets.targetArgumentOfPerigeeDeg - orbitSummary.argumentOfPerigeeDeg) >= 0.01)
-  );
   const missionDeltaType = objectiveType === "DEORBIT"
     ? "Deorbit"
     : altitudeDeltaKm == null || Math.abs(altitudeDeltaKm) < 1
       ? inclinationDeltaDeg != null && Math.abs(inclinationDeltaDeg) >= 0.01 ? "Plane Change" : "Orbit Maintenance"
       : altitudeDeltaKm > 0 ? "Orbit Raising" : "Orbit Lowering";
-  const hasEnabledCoastEvents = events.some((event) => event.enabled && event.type === "COAST");
   const hasEnabledBurnEvents = events.some((event) => event.enabled && (event.type === "FINITE_BURN" || event.type === "IMPULSIVE_BURN"));
-  const hasEnabledTimelineEvents = events.some((event) => event.enabled);
   const missionDurationValid = mission ? missionDurationSeconds(mission) > 0 : false;
   const executionModeBlocker = !mission
     ? "Create a mission before validation."
@@ -389,22 +374,32 @@ export function MissionTimelinePanel({
       ? "Mission duration must be greater than zero."
       : !propagationProfile
         ? "Mission execution profile is still loading. Configure propagation before validation."
-        : executionMode === "COAST_MISSION" && !hasEnabledCoastEvents
-          ? "Coast Mission mode requires at least one enabled coast segment."
-          : executionMode === "MANEUVER_MISSION" && !hasEnabledTimelineEvents
-            ? "Maneuver Mission mode requires at least one enabled timeline event."
+        : propagationProfile.propagatorType !== "NUMERICAL" && hasEnabledBurnEvents
+          ? `${propagationProfile.propagatorType.replaceAll("_", " ")} propagation cannot execute burn events. Select Numerical propagation or disable burn events.`
+          : propagationProfile.maneuverModelEnabled === false && hasEnabledBurnEvents
+            ? "Burn events exist, but the mission propagation profile has maneuver execution disabled."
             : null;
-  const executionModeWarnings = [
-    !hasEnabledBurnEvents ? "No maneuvers defined. Trajectory will be propagated using the current orbit and any coast-only timeline events." : null,
-    targetOrbitDiffers && !hasEnabledBurnEvents ? "Target orbit differs from current orbit but no maneuver is planned." : null,
-    executionMode === "PROPAGATION_ONLY" && hasEnabledTimelineEvents ? "Propagation Only mode is selected, but enabled timeline events exist and will still be sent to propagation. Disable them or choose Coast/Maneuver Mission if they are intentional." : null,
-    executionMode === "COAST_MISSION" && hasEnabledBurnEvents ? "Coast Mission mode is selected, but enabled burn events exist. Use Maneuver Mission if burns should execute." : null,
-  ].filter((message): message is string => Boolean(message));
-  const combinedValidationWarnings = [...new Set([...missionValidation.warnings, ...executionModeWarnings])];
-  const missionValidationReview = {
+  const executionModeWarnings = useMemo(() => [] as string[], []);
+  const combinedValidationWarnings = useMemo(
+    () => [...new Set([...missionValidation.warnings, ...executionModeWarnings])],
+    [executionModeWarnings, missionValidation.warnings],
+  );
+  const missionValidationReview = useMemo(() => ({
     errors: executionModeBlocker ? [...new Set([...missionValidation.errors, executionModeBlocker])] : missionValidation.errors,
     warnings: combinedValidationWarnings,
-  };
+  }), [combinedValidationWarnings, executionModeBlocker, missionValidation.errors]);
+  const missionFindings = useMemo(() => missionAnalysisFindings({
+    events,
+    orbitSummary,
+    profile: propagationProfile,
+    validation: missionValidationReview,
+    constraintViolations,
+    trajectoryStale: effectiveTrajectoryStale,
+    targetSolver,
+  }), [constraintViolations, effectiveTrajectoryStale, events, missionValidationReview, orbitSummary, propagationProfile, targetSolver]);
+  const capabilityFindings = useMemo(() => engineeringCapabilityFindings(), []);
+  const eventDetectorCapabilities = useMemo(() => orekitEventDetectorCapabilityMatrix(), []);
+  const backendCapabilityMatrix = useMemo(() => capabilityMatrix(), []);
   const validationStatus = missionValidationReview.errors.length > 0 ? "Blocked" : missionValidationReview.warnings.length > 0 ? "Review" : "Ready";
   const currentPlannerPhaseIndex = missionPlannerPhaseOrder.indexOf(plannerPhase);
   const effectiveFurthestPlannerPhaseIndex = hasGeneratedTrajectory
@@ -465,26 +460,6 @@ export function MissionTimelinePanel({
   const updateConstraint = (key: keyof MissionConstraints, value: string) => {
     const parsed = Number(value);
     setMissionConstraints((current) => ({ ...current, [key]: value.trim() === "" || !Number.isFinite(parsed) ? null : parsed }));
-  };
-  const updateRelativeMotion = (key: keyof RelativeMotionSettings, value: string) => {
-    const parsed = Number(value);
-    setRelativeMotionSettings((current) => ({ ...current, [key]: Number.isFinite(parsed) ? parsed : current[key] }));
-  };
-  const updateGroundStation = (key: keyof GroundStationConfig, value: string) => {
-    const parsed = Number(value);
-    setGroundStation((current) => ({ ...current, [key]: Number.isFinite(parsed) ? parsed : current[key] }));
-  };
-  const updateCoverage = (key: keyof CoverageSettings, value: string) => {
-    const parsed = Number(value);
-    setCoverageSettings((current) => ({ ...current, [key]: Number.isFinite(parsed) ? parsed : current[key] }));
-  };
-  const updateConstellation = (key: keyof WalkerConstellationConfig, value: string) => {
-    if (key === "pattern") {
-      setConstellationConfig((current) => ({ ...current, pattern: value === "STAR" ? "STAR" : "DELTA" }));
-      return;
-    }
-    const parsed = Number(value);
-    setConstellationConfig((current) => ({ ...current, [key]: Number.isFinite(parsed) ? parsed : current[key] }));
   };
 
   return (
@@ -820,7 +795,7 @@ export function MissionTimelinePanel({
 
       {mission && plannerPhase === "ANALYSIS" && hasGeneratedTrajectory && (
         <div className="mt-3 border border-cyan-300/15 bg-black/25 p-2">
-          <div className="grid gap-1 md:grid-cols-4">
+          <div className="grid gap-1 md:grid-cols-5">
             {analysisWorkspaceTabs.map((tab) => (
               <button
                 key={tab.id}
@@ -840,30 +815,40 @@ export function MissionTimelinePanel({
       )}
 
       {mission && plannerPhase === "ANALYSIS" && hasGeneratedTrajectory && analysisTab === "HEALTH" && (
-        <div className="mt-3 border border-rose-300/20 bg-rose-300/[0.035] p-3">
+        <div className="mt-3 border border-cyan-300/15 bg-black/25 p-3">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-rose-200">Aerospace Engineering Review</p>
-              <p className="mt-1 text-[11px] leading-5 text-zinc-500">Brutal flight-dynamics audit: flags screening-only analyses, missing backend Orekit capabilities, and operations risks.</p>
+              <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Mission Findings</p>
+              <p className="mt-1 text-[11px] leading-5 text-zinc-500">Mission-specific propagation, maneuver, target, fuel, constraint, and readiness findings only.</p>
             </div>
-            <span className="border border-rose-300/35 px-2 py-1 font-mono text-[10px] uppercase text-rose-100">
-              {aerospaceFindings.filter((finding) => finding.severity === "Critical").length} Critical
+            <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${
+              missionFindings.some((finding) => finding.severity === "BLOCKER")
+                ? "border-rose-300/40 text-rose-100"
+                : missionFindings.some((finding) => finding.severity === "WARNING")
+                  ? "border-amber-300/40 text-amber-100"
+                  : "border-lime-300/40 text-lime-100"
+            }`}>
+              {missionFindings.length === 0 ? "Nominal" : `${missionFindings.length} Finding${missionFindings.length === 1 ? "" : "s"}`}
             </span>
           </div>
           <div className="mt-3 grid gap-2">
-            {aerospaceFindings.slice(0, 6).map((finding) => (
-              <div key={`${finding.area}-${finding.finding}`} className={`border px-3 py-2 ${
-                finding.severity === "Critical"
+            {missionFindings.length === 0 ? (
+              <p className="border border-lime-300/15 bg-lime-300/[0.03] px-3 py-2 text-xs text-lime-100">
+                No mission-specific blocking findings. Engineering capability maturity is tracked separately in Engineering Audit.
+              </p>
+            ) : missionFindings.map((finding) => (
+              <div key={finding.id} className={`border px-3 py-2 ${
+                finding.severity === "BLOCKER"
                   ? "border-rose-300/30 bg-rose-300/[0.06]"
-                  : finding.severity === "Warning"
+                  : finding.severity === "WARNING"
                     ? "border-amber-300/25 bg-amber-300/[0.045]"
                     : "border-cyan-300/20 bg-cyan-300/[0.035]"
-              }`}>
+                }`}>
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-xs font-semibold text-white">{finding.area}</p>
-                  <p className="font-mono text-[10px] uppercase text-zinc-400">{finding.status} · {finding.severity}</p>
+                  <p className="text-xs font-semibold text-white">{finding.category}</p>
+                  <p className="font-mono text-[10px] uppercase text-zinc-400">{finding.severity}</p>
                 </div>
-                <p className="mt-1 text-[11px] leading-5 text-zinc-400">{finding.finding}</p>
+                <p className="mt-1 text-[11px] leading-5 text-zinc-400">{finding.message}</p>
                 <p className="mt-1 text-[11px] leading-5 text-zinc-500">{finding.recommendation}</p>
               </div>
             ))}
@@ -922,18 +907,18 @@ export function MissionTimelinePanel({
                 <p className="mt-1 text-[11px] leading-5 text-zinc-500">Post-generation check against the mission constraints defined during setup.</p>
               </div>
               <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${constraintViolations.length > 0 ? "border-amber-300/40 text-amber-100" : "border-lime-300/40 text-lime-100"}`}>
-                {constraintViolations.length} Findings
+                {constraintViolations.length > 0 ? `${constraintViolations.length} Findings` : "Clear"}
               </span>
             </div>
-            <div className="mt-3 grid gap-2">
-              {constraintViolations.length === 0 ? (
-                <p className="border border-lime-300/15 bg-lime-300/[0.03] px-3 py-2 text-xs text-lime-100">No active constraint violations detected.</p>
-              ) : constraintViolations.map((violation) => (
+            {constraintViolations.length > 0 && (
+              <div className="mt-3 grid gap-2">
+                {constraintViolations.map((violation) => (
                 <p key={`${violation.constraint}-${violation.message}`} className={`border px-3 py-2 text-xs leading-5 ${violation.severity === "Violation" ? "border-rose-300/30 bg-rose-300/[0.06] text-rose-100" : "border-amber-300/30 bg-amber-300/[0.06] text-amber-100"}`}>
                   {violation.constraint}: {violation.message}
                 </p>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1155,90 +1140,69 @@ export function MissionTimelinePanel({
           <div className="border border-cyan-300/15 bg-black/25 p-3">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Relative Motion & Ground Access</p>
-                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Rendezvous screening with a modeled deputy plus ground station pass prediction.</p>
+                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Mission Readiness</p>
+                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Operational state of the generated mission design. Platform maturity is tracked in Engineering Audit.</p>
               </div>
-              <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
-                {relativeMotion.separationTrend}
+              <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${
+                validationStatus === "Blocked"
+                  ? "border-rose-300/40 text-rose-100"
+                  : effectiveTrajectoryStale
+                    ? "border-amber-300/40 text-amber-100"
+                    : "border-lime-300/40 text-lime-100"
+              }`}>
+                {effectiveTrajectoryStale ? "Regenerate" : validationStatus}
               </span>
             </div>
             <div className="mt-3 grid gap-2 md:grid-cols-4">
-              <TargetInput label="Radial km" value={relativeMotionSettings.radialOffsetKm} onChange={(value) => updateRelativeMotion("radialOffsetKm", value)} />
-              <TargetInput label="Along km" value={relativeMotionSettings.alongTrackOffsetKm} onChange={(value) => updateRelativeMotion("alongTrackOffsetKm", value)} />
-              <TargetInput label="Cross km" value={relativeMotionSettings.crossTrackOffsetKm} onChange={(value) => updateRelativeMotion("crossTrackOffsetKm", value)} />
-              <TargetInput label="Drift m/s" value={relativeMotionSettings.relativeDriftMps} onChange={(value) => updateRelativeMotion("relativeDriftMps", value)} />
+              <DetailMetric label="Trajectory" value={trajectoryStatus} />
+              <DetailMetric label="Execution Mode" value={missionExecutionModes.find((mode) => mode.id === executionMode)?.label ?? executionMode.replaceAll("_", " ")} />
+              <DetailMetric label="Enabled Events" value={String(events.filter((event) => event.enabled).length)} />
+              <DetailMetric label="Enabled Burns" value={String(hasEnabledBurnEvents ? events.filter((event) => event.enabled && event.type !== "COAST").length : 0)} />
             </div>
-            <div className="mt-3 grid gap-2 md:grid-cols-4">
-              <DetailMetric label="Initial Sep" value={`${formatNumber(relativeMotion.relativePositionKm, 3)} km`} />
-              <DetailMetric label="Rel Velocity" value={`${formatNumber(relativeMotion.relativeVelocityMps, 3)} m/s`} />
-              <DetailMetric label="Closest Approach" value={`${formatNumber(relativeMotion.closestApproachKm, 3)} km`} />
-              <DetailMetric label="CA Time" value={relativeMotion.closestApproachTimeUtc ? compactIsoUtc(relativeMotion.closestApproachTimeUtc) : "Generate trajectory"} />
-            </div>
-            <p className="mt-2 text-[11px] leading-5 text-zinc-500">{relativeMotion.rationale}</p>
-
-            <div className="mt-4 border-t border-white/10 pt-3">
-              <div className="grid gap-2 md:grid-cols-3">
-                <TargetInput label="Station lat" value={groundStation.latitudeDeg} onChange={(value) => updateGroundStation("latitudeDeg", value)} />
-                <TargetInput label="Station lon" value={groundStation.longitudeDeg} onChange={(value) => updateGroundStation("longitudeDeg", value)} />
-                <TargetInput label="Mask deg" value={groundStation.elevationMaskDeg} onChange={(value) => updateGroundStation("elevationMaskDeg", value)} />
-              </div>
-              <div className="mt-3 grid gap-2 md:grid-cols-4">
-                <DetailMetric label="Next Pass" value={stationAccess.nextPassStartUtc ? compactIsoUtc(stationAccess.nextPassStartUtc) : "No pass"} />
-                <DetailMetric label="Duration" value={secondsToDurationLabel(stationAccess.passDurationSeconds)} />
-                <DetailMetric label="Max Elevation" value={`${formatNumber(stationAccess.maxElevationDeg, 2)} deg`} />
-                <DetailMetric label="Pass Count" value={String(stationAccess.accessCount)} />
-              </div>
+            <div className="mt-3 grid gap-2">
+              {missionFindings.filter((finding) => finding.severity !== "INFO").length === 0 ? (
+                <p className="border border-lime-300/15 bg-lime-300/[0.03] px-3 py-2 text-xs text-lime-100">No mission-specific operational warnings are active.</p>
+              ) : missionFindings.filter((finding) => finding.severity !== "INFO").map((finding) => (
+                <p key={finding.id} className={`border px-3 py-2 text-xs leading-5 ${
+                  finding.severity === "BLOCKER" ? "border-rose-300/30 bg-rose-300/[0.06] text-rose-100" : "border-amber-300/30 bg-amber-300/[0.06] text-amber-100"
+                }`}>
+                  {finding.category}: {finding.message}
+                </p>
+              ))}
             </div>
           </div>
 
           <div className="border border-cyan-300/15 bg-black/25 p-3">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Coverage & Constellation</p>
-                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Earth-observation coverage screening and basic Walker constellation geometry.</p>
+                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Execution Risks</p>
+                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Mission-specific risks from the active trajectory, validation, constraints, and spacecraft profile.</p>
               </div>
-              <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${constellation.valid ? "border-lime-300/40 text-lime-100" : "border-amber-300/40 text-amber-100"}`}>
-                Walker {constellation.valid ? "Valid" : "Review"}
+              <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${
+                performanceStatus === "Critical"
+                  ? "border-rose-300/40 text-rose-100"
+                  : performanceStatus === "Caution"
+                    ? "border-amber-300/40 text-amber-100"
+                    : "border-lime-300/40 text-lime-100"
+              }`}>
+                {performanceStatus}
               </span>
             </div>
-            <div className="mt-3 grid gap-2 md:grid-cols-2">
-              <TargetInput label="Swath km" value={coverageSettings.swathWidthKm} onChange={(value) => updateCoverage("swathWidthKm", value)} />
-              <TargetInput label="Min elev deg" value={coverageSettings.minimumElevationDeg} onChange={(value) => updateCoverage("minimumElevationDeg", value)} />
+            <div className="mt-3 grid gap-2 md:grid-cols-4">
+              <DetailMetric label="Total dV" value={`${formatNumber(missionAnalytics.totalDeltaVMps, 2)} m/s`} />
+              <DetailMetric label="Fuel Used" value={`${formatNumber(missionAnalytics.fuelBudget.consumedFuelKg, 3)} kg`} />
+              <DetailMetric label="Fuel Margin" value={missionAnalytics.fuelBudget.fuelMarginPercent == null ? "Profile not loaded" : `${formatNumber(missionAnalytics.fuelBudget.fuelMarginPercent, 1)}%`} />
+              <DetailMetric label="Constraints" value={constraintViolations.length === 0 ? "Clear" : `${constraintViolations.length} Finding${constraintViolations.length === 1 ? "" : "s"}`} />
             </div>
-            <div className="mt-3 grid gap-2 md:grid-cols-3">
-              <DetailMetric label="Coverage" value={`${formatNumber(coverage.approximateCoveragePercent, 2)}%`} />
-              <DetailMetric label="Opportunities" value={String(coverage.accessOpportunities)} />
-              <DetailMetric label="Revisit" value={coverage.revisitTimeSeconds == null ? "Generate trajectory" : secondsToDurationLabel(coverage.revisitTimeSeconds)} />
-            </div>
-            <p className="mt-2 text-[11px] leading-5 text-zinc-500">{coverage.rationale}</p>
-
-            <div className="mt-4 border-t border-white/10 pt-3">
-              <div className="grid gap-2 md:grid-cols-6">
-                <label className="grid gap-1">
-                  <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-cyan-300/60">Pattern</span>
-                  <select
-                    value={constellationConfig.pattern}
-                    onChange={(event) => updateConstellation("pattern", event.target.value)}
-                    className="border border-cyan-300/20 bg-black/45 px-2 py-1.5 font-mono text-[11px] text-cyan-100 outline-none"
-                  >
-                    <option value="DELTA">Walker Delta</option>
-                    <option value="STAR">Walker Star</option>
-                  </select>
-                </label>
-                <TargetInput label="Sats" value={constellationConfig.satelliteCount} onChange={(value) => updateConstellation("satelliteCount", value)} />
-                <TargetInput label="Planes" value={constellationConfig.planeCount} onChange={(value) => updateConstellation("planeCount", value)} />
-                <TargetInput label="Phasing" value={constellationConfig.phasing} onChange={(value) => updateConstellation("phasing", value)} />
-                <TargetInput label="Alt km" value={constellationConfig.altitudeKm} onChange={(value) => updateConstellation("altitudeKm", value)} />
-                <TargetInput label="Inc deg" value={constellationConfig.inclinationDeg} onChange={(value) => updateConstellation("inclinationDeg", value)} />
+            {constraintViolations.length > 0 && (
+              <div className="mt-3 grid gap-2">
+                {constraintViolations.map((violation) => (
+                <p key={`${violation.constraint}-${violation.message}`} className={`border px-3 py-2 text-xs leading-5 ${violation.severity === "Violation" ? "border-rose-300/30 bg-rose-300/[0.06] text-rose-100" : "border-amber-300/30 bg-amber-300/[0.06] text-amber-100"}`}>
+                  {violation.constraint}: {violation.message}
+                </p>
+                ))}
               </div>
-              <div className="mt-3 grid gap-2 md:grid-cols-4">
-                <DetailMetric label="Sats/Plane" value={String(constellation.satellitesPerPlane)} />
-                <DetailMetric label="RAAN Spacing" value={`${formatNumber(constellation.raanSpacingDeg, 2)} deg`} />
-                <DetailMetric label="In-Plane Spacing" value={`${formatNumber(constellation.inPlaneSpacingDeg, 2)} deg`} />
-                <DetailMetric label="Phase" value={`${formatNumber(constellation.relativePhaseDeg, 2)} deg`} />
-              </div>
-              <p className="mt-2 text-[11px] leading-5 text-zinc-500">{constellation.summary}</p>
-            </div>
+            )}
           </div>
         </div>
       )}
@@ -1348,6 +1312,79 @@ export function MissionTimelinePanel({
         </div>
       )}
 
+      {mission && plannerPhase === "ANALYSIS" && hasGeneratedTrajectory && analysisTab === "AUDIT" && (
+        <div className="mt-3 grid gap-3 xl:grid-cols-2">
+          <div className="border border-cyan-300/15 bg-black/25 p-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Backend Capability Review</p>
+                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Platform maturity notes. These are not current mission failures unless explicitly required by the mission objective.</p>
+              </div>
+              <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
+                {capabilityFindings.length} Items
+              </span>
+            </div>
+            <div className="mt-3 grid gap-2">
+              {capabilityFindings.map((finding) => (
+                <div key={finding.id} className="border border-white/10 bg-black/20 px-3 py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs font-semibold text-white">{finding.capability}</p>
+                    <p className="font-mono text-[10px] uppercase text-cyan-100">{finding.status} · {finding.severity}</p>
+                  </div>
+                  <p className="mt-1 text-[11px] leading-5 text-zinc-400">{finding.message}</p>
+                  <p className="mt-1 text-[11px] leading-5 text-zinc-500">{finding.recommendation}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="border border-cyan-300/15 bg-black/25 p-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Orekit Event Detector Status</p>
+                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Available Orekit detector classes and current integration status.</p>
+              </div>
+              <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
+                Orekit 13
+              </span>
+            </div>
+            <div className="mt-3 grid gap-2">
+              {eventDetectorCapabilities.map((finding) => (
+                <div key={finding.id} className="border border-white/10 bg-black/20 px-3 py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs font-semibold text-white">{finding.capability}</p>
+                    <p className="font-mono text-[10px] uppercase text-cyan-100">{finding.status}</p>
+                  </div>
+                  <p className="mt-1 text-[11px] leading-5 text-zinc-400">{finding.message}</p>
+                  <p className="mt-1 text-[11px] leading-5 text-zinc-500">{finding.recommendation}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="border border-cyan-300/15 bg-black/25 p-3 xl:col-span-2">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Solver Capability Matrix</p>
+                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Capability maturity versus professional flight-dynamics tool expectations.</p>
+              </div>
+              <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
+                Audit Only
+              </span>
+            </div>
+            <div className="mt-3 grid gap-2">
+              {backendCapabilityMatrix.map((item) => (
+                <div key={item.capability} className="grid gap-2 border border-white/10 bg-black/20 p-2 md:grid-cols-[1.2fr_0.8fr_2fr]">
+                  <p className="text-xs font-semibold text-white">{item.capability}</p>
+                  <p className="font-mono text-[10px] uppercase text-cyan-100">Current {item.currentStatus}</p>
+                  <p className="text-[11px] leading-5 text-zinc-500">{item.note}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {mission && plannerPhase === "REPORTS" && hasGeneratedTrajectory && (
         <div className="mt-3 border border-cyan-300/15 bg-black/25 p-3">
           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1363,7 +1400,7 @@ export function MissionTimelinePanel({
             <DetailMetric label="Mission Report" value="JSON" />
             <DetailMetric label="Analysis Report" value="Included" />
             <DetailMetric label="Delta-V Report" value={`${formatNumber(missionAnalytics.totalDeltaVMps, 2)} m/s`} />
-            <DetailMetric label="Coverage Report" value={`${formatNumber(coverage.approximateCoveragePercent, 2)}%`} />
+            <DetailMetric label="Engineering Audit" value={`${capabilityFindings.length + eventDetectorCapabilities.length} Items`} />
           </div>
           <button
             type="button"
@@ -1456,28 +1493,34 @@ export function MissionTimelinePanel({
                 {validationStatus}
               </span>
             </div>
-            <div className="mt-3 grid gap-2 md:grid-cols-2">
-              <div className="border border-rose-300/20 bg-rose-300/[0.04] p-3">
-                <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-rose-100">Blockers</p>
-                <div className="mt-2 space-y-1">
-                  {missionValidationReview.errors.length > 0 ? missionValidationReview.errors.map((error) => (
-                    <p key={error} className="text-xs leading-5 text-rose-100">{error}</p>
-                  )) : (
-                    <p className="text-xs leading-5 text-zinc-500">No blocking validation errors.</p>
-                  )}
-                </div>
+            {missionValidationReview.errors.length === 0 && missionValidationReview.warnings.length === 0 ? (
+              <p className="mt-3 border border-lime-300/15 bg-lime-300/[0.03] px-3 py-2 text-xs text-lime-100">
+                Mission status healthy. No active validation findings.
+              </p>
+            ) : (
+              <div className="mt-3 grid gap-2 md:grid-cols-2">
+                {missionValidationReview.errors.length > 0 && (
+                  <div className="border border-rose-300/20 bg-rose-300/[0.04] p-3">
+                    <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-rose-100">Blockers</p>
+                    <div className="mt-2 space-y-1">
+                      {missionValidationReview.errors.map((error) => (
+                        <p key={error} className="text-xs leading-5 text-rose-100">{error}</p>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {missionValidationReview.warnings.length > 0 && (
+                  <div className="border border-amber-300/20 bg-amber-300/[0.04] p-3">
+                    <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-amber-100">Warnings</p>
+                    <div className="mt-2 space-y-1">
+                      {missionValidationReview.warnings.map((warning) => (
+                        <p key={warning} className="text-xs leading-5 text-amber-100">{warning}</p>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
-              <div className="border border-amber-300/20 bg-amber-300/[0.04] p-3">
-                <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-amber-100">Warnings</p>
-                <div className="mt-2 space-y-1">
-                  {missionValidationReview.warnings.length > 0 ? missionValidationReview.warnings.map((warning) => (
-                    <p key={warning} className="text-xs leading-5 text-amber-100">{warning}</p>
-                  )) : (
-                    <p className="text-xs leading-5 text-zinc-500">No mission-design warnings.</p>
-                  )}
-                </div>
-              </div>
-            </div>
+            )}
           </div>
 
           <div className="border border-cyan-300/15 bg-black/25 p-3 xl:col-span-2">
@@ -1520,21 +1563,22 @@ export function MissionTimelinePanel({
               <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Mission Execution Mode</p>
               <div className="mt-2 grid gap-2 md:grid-cols-3">
                 {missionExecutionModes.map((mode) => (
-                  <button
+                  <div
                     key={mode.id}
-                    type="button"
-                    onClick={() => setExecutionMode(mode.id)}
                     className={`border p-3 text-left transition ${
                       executionMode === mode.id
                         ? "border-cyan-300 bg-cyan-300 text-slate-950"
-                        : "border-white/10 text-zinc-300 hover:border-cyan-300/50 hover:text-cyan-100"
+                        : "border-white/10 text-zinc-500"
                     }`}
                   >
                     <span className="block font-mono text-[10px] uppercase tracking-[0.1em]">{mode.label}</span>
                     <span className={`mt-1 block text-[11px] leading-5 ${executionMode === mode.id ? "text-slate-800" : "text-zinc-500"}`}>{mode.helper}</span>
-                  </button>
+                  </div>
                 ))}
               </div>
+              <p className="mt-2 text-[11px] leading-5 text-zinc-500">
+                Execution mode is derived from enabled timeline events: burns create a Maneuver Mission, coast-only timelines create a Coast Mission, and empty timelines remain Propagation Only.
+              </p>
             </div>
             <button type="button" onClick={onOpenManeuverTemplates} className="border border-cyan-300/45 px-3 py-2 font-mono text-[10px] uppercase text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-300/10">
               Maneuver Templates
