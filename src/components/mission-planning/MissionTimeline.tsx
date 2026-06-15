@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { BackendCapabilityRegistry, BackendMission, BackendMissionTimelineEvent, BackendPropagationProfile, UpdatePropagationProfileRequest } from "@/services/orbitServerApi";
 import { formatNumber, formatUtc } from "@/geometry/format";
@@ -36,6 +36,50 @@ const missionExecutionModes: Array<{ id: MissionExecutionMode; label: string; he
   { id: "COAST_MISSION", label: "Coast Mission", helper: "Use scheduled coast segments without burns." },
   { id: "MANEUVER_MISSION", label: "Maneuver Mission", helper: "Execute enabled coast and burn timeline events." },
 ];
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, entryValue]) => entryValue !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right));
+  return `{${entries.map(([key, entryValue]) => `${JSON.stringify(key)}:${stableStringify(entryValue)}`).join(",")}}`;
+}
+
+function flattenSnapshot(value: unknown, prefix = "", output: Record<string, string> = {}) {
+  if (value === null || typeof value !== "object") {
+    output[prefix || "value"] = stableStringify(value);
+    return output;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => flattenSnapshot(item, `${prefix}[${index}]`, output));
+    return output;
+  }
+  Object.entries(value as Record<string, unknown>).forEach(([key, entryValue]) => {
+    flattenSnapshot(entryValue, prefix ? `${prefix}.${key}` : key, output);
+  });
+  return output;
+}
+
+function diffSnapshotFields(current: MissionGenerationSnapshot | null, generated: MissionGenerationSnapshot | null) {
+  if (!current || !generated) {
+    return [];
+  }
+  const currentFlat = flattenSnapshot(current);
+  const generatedFlat = flattenSnapshot(generated);
+  const keys = [...new Set([...Object.keys(currentFlat), ...Object.keys(generatedFlat)])].sort();
+  return keys
+    .filter((key) => currentFlat[key] !== generatedFlat[key])
+    .map((key) => ({
+      field: key,
+      current: currentFlat[key] ?? "<missing>",
+      generated: generatedFlat[key] ?? "<missing>",
+    }));
+}
 
 function profileGenerationSnapshot(profile: BackendPropagationProfile | null): MissionGenerationSnapshot["executionProfile"] {
   if (!profile) {
@@ -143,6 +187,7 @@ export function MissionTimelinePanel({
   onDropEvent: (sourceEventId: string, targetEventId: string) => void;
   onScheduleEvent: (event: BackendMissionTimelineEvent, targetMetSeconds: number, snapMode: TimelineSnapMode) => void;
 }) {
+  const generatedMissionDesign = trajectoryOverlay?.generationSnapshot ?? null;
   const [timeMode, setTimeMode] = useState<TimelineTimeMode>("UTC");
   const [zoomPreset, setZoomPreset] = useState<TimelineZoomPreset>("THREE_HOURS");
   const [customZoomHours, setCustomZoomHours] = useState("3");
@@ -150,17 +195,23 @@ export function MissionTimelinePanel({
   const [plannerPhase, setPlannerPhase] = useState<MissionPlannerPhase>("DEFINITION");
   const [furthestPlannerPhaseIndex, setFurthestPlannerPhaseIndex] = useState(0);
   const [analysisTab, setAnalysisTab] = useState<AnalysisWorkspaceTab>("TRAJECTORY");
-  const [objectiveType, setObjectiveType] = useState("REACH_TARGET_ALTITUDE");
+  const [objectiveType, setObjectiveType] = useState(generatedMissionDesign?.objectiveType ?? "REACH_TARGET_ALTITUDE");
   const [advancedObjectiveOpen, setAdvancedObjectiveOpen] = useState(false);
   const [strategyAdvancedOpen, setStrategyAdvancedOpen] = useState(true);
-  const [executionMode, setExecutionMode] = useState<MissionExecutionMode>("PROPAGATION_ONLY");
-  const [targetTrueAnomalyDeg, setTargetTrueAnomalyDeg] = useState<number | null>(null);
+  const [executionMode, setExecutionMode] = useState<MissionExecutionMode>(
+    generatedMissionDesign?.executionMode === "COAST_MISSION" || generatedMissionDesign?.executionMode === "MANEUVER_MISSION"
+      ? generatedMissionDesign.executionMode
+      : "PROPAGATION_ONLY",
+  );
+  const [targetTrueAnomalyDeg, setTargetTrueAnomalyDeg] = useState<number | null>(
+    typeof generatedMissionDesign?.targetOrbit.targetTrueAnomalyDeg === "number" ? generatedMissionDesign.targetOrbit.targetTrueAnomalyDeg : null,
+  );
   const [missionTargets, setMissionTargets] = useState<MissionDesignTargets>({
-    targetAltitudeKm: 550,
-    targetInclinationDeg: null,
-    targetEccentricity: 0,
-    targetRaanDeg: null,
-    targetArgumentOfPerigeeDeg: null,
+    targetAltitudeKm: typeof generatedMissionDesign?.targetOrbit.targetAltitudeKm === "number" ? generatedMissionDesign.targetOrbit.targetAltitudeKm : 550,
+    targetInclinationDeg: typeof generatedMissionDesign?.targetOrbit.targetInclinationDeg === "number" ? generatedMissionDesign.targetOrbit.targetInclinationDeg : null,
+    targetEccentricity: typeof generatedMissionDesign?.targetOrbit.targetEccentricity === "number" ? generatedMissionDesign.targetOrbit.targetEccentricity : 0,
+    targetRaanDeg: typeof generatedMissionDesign?.targetOrbit.targetRaanDeg === "number" ? generatedMissionDesign.targetOrbit.targetRaanDeg : null,
+    targetArgumentOfPerigeeDeg: typeof generatedMissionDesign?.targetOrbit.targetArgumentOfPerigeeDeg === "number" ? generatedMissionDesign.targetOrbit.targetArgumentOfPerigeeDeg : null,
   });
   const [monteCarloSettings, setMonteCarloSettings] = useState<MonteCarloSettings>({
     samples: 100,
@@ -169,11 +220,11 @@ export function MissionTimelinePanel({
     timingErrorSeconds: 10,
   });
   const [missionConstraints, setMissionConstraints] = useState<MissionConstraints>({
-    maxBurnDurationSeconds: 600,
-    maxSingleBurnDeltaVMps: 250,
-    fuelReservePercent: 10,
-    minPerigeeAltitudeKm: 160,
-    maxEclipseDurationSeconds: 2400,
+    maxBurnDurationSeconds: typeof generatedMissionDesign?.missionConstraints.maxBurnDurationSeconds === "number" ? generatedMissionDesign.missionConstraints.maxBurnDurationSeconds : 600,
+    maxSingleBurnDeltaVMps: typeof generatedMissionDesign?.missionConstraints.maxSingleBurnDeltaVMps === "number" ? generatedMissionDesign.missionConstraints.maxSingleBurnDeltaVMps : 250,
+    fuelReservePercent: typeof generatedMissionDesign?.missionConstraints.fuelReservePercent === "number" ? generatedMissionDesign.missionConstraints.fuelReservePercent : 10,
+    minPerigeeAltitudeKm: typeof generatedMissionDesign?.missionConstraints.minPerigeeAltitudeKm === "number" ? generatedMissionDesign.missionConstraints.minPerigeeAltitudeKm : 160,
+    maxEclipseDurationSeconds: typeof generatedMissionDesign?.missionConstraints.maxEclipseDurationSeconds === "number" ? generatedMissionDesign.missionConstraints.maxEclipseDurationSeconds : 2400,
   });
   const [relativeMotionSettings, setRelativeMotionSettings] = useState<RelativeMotionSettings>({
     radialOffsetKm: 0.2,
@@ -264,18 +315,9 @@ export function MissionTimelinePanel({
           parameters: event.parameters,
         })),
       currentOrbit: {
+        subjectNoradId: mission.subjectNoradId,
+        subjectOrbitId: mission.subjectOrbitId,
         orbitType: orbitSummary.orbitType,
-        classification: orbitSummary.classification,
-        currentAltitudeKm: orbitSummary.currentAltitudeKm,
-        localVelocityKmps: orbitSummary.localVelocityKmps,
-        perigeeAltitudeKm: orbitSummary.perigeeAltitudeKm,
-        apogeeAltitudeKm: orbitSummary.apogeeAltitudeKm,
-        semiMajorAxisKm: orbitSummary.semiMajorAxisKm,
-        inclinationDeg: orbitSummary.inclinationDeg,
-        eccentricity: orbitSummary.eccentricity,
-        raanDeg: orbitSummary.raanDeg,
-        argumentOfPerigeeDeg: orbitSummary.argumentOfPerigeeDeg,
-        periodSeconds: orbitSummary.periodSeconds,
       },
       targetOrbit: {
         targetAltitudeKm: missionTargets.targetAltitudeKm,
@@ -289,14 +331,36 @@ export function MissionTimelinePanel({
       executionMode,
       missionConstraints,
     };
-  }, [events, executionMode, mission, missionConstraints, missionTargets, objectiveType, orbitSummary, propagationProfile, snapshotCadenceSeconds, targetTrueAnomalyDeg]);
-  const missionDesignRunSignature = missionDesignSnapshot ? JSON.stringify(missionDesignSnapshot) : "";
-  const generatedDesignSignature = trajectoryOverlay?.designSignature ?? (trajectoryOverlay?.generationSnapshot ? JSON.stringify(trajectoryOverlay.generationSnapshot) : null);
+  }, [events, executionMode, mission, missionConstraints, missionTargets, objectiveType, orbitSummary.orbitType, propagationProfile, snapshotCadenceSeconds, targetTrueAnomalyDeg]);
+  const missionDesignRunSignature = missionDesignSnapshot ? stableStringify(missionDesignSnapshot) : "";
+  const generatedDesignSignature = trajectoryOverlay?.generationSnapshot
+    ? stableStringify(trajectoryOverlay.generationSnapshot)
+    : trajectoryOverlay?.designSignature ?? null;
+  const designSignatureMismatch = Boolean(generatedDesignSignature && missionDesignRunSignature && generatedDesignSignature !== missionDesignRunSignature);
   const effectiveTrajectoryStale = Boolean(
     trajectoryOverlay
-      && (trajectoryStale || trajectoryOverlay.stale || (generatedDesignSignature && missionDesignRunSignature && generatedDesignSignature !== missionDesignRunSignature)),
+      && (generatedDesignSignature ? designSignatureMismatch : trajectoryStale || trajectoryOverlay.stale),
   );
   const trajectoryStatus = !trajectoryOverlay ? "Not Generated" : effectiveTrajectoryStale ? "Out of Date" : "Generated";
+  const staleDebugKeyRef = useRef("");
+  useEffect(() => {
+    if (!effectiveTrajectoryStale || !trajectoryOverlay || !missionDesignSnapshot) {
+      return;
+    }
+    const generatedSnapshot = trajectoryOverlay.generationSnapshot ?? null;
+    const debugKey = `${missionDesignRunSignature}::${generatedDesignSignature ?? ""}::${trajectoryOverlay.stale}::${trajectoryStale}`;
+    if (staleDebugKeyRef.current === debugKey) {
+      return;
+    }
+    staleDebugKeyRef.current = debugKey;
+    console.debug("[Mission Planner] trajectory stale debug", {
+      currentDesignSignature: missionDesignRunSignature,
+      generationSnapshotSignature: generatedDesignSignature,
+      overlayStaleFlag: trajectoryOverlay.stale,
+      parentTrajectoryStale: trajectoryStale,
+      diffFields: diffSnapshotFields(missionDesignSnapshot, generatedSnapshot),
+    });
+  }, [effectiveTrajectoryStale, generatedDesignSignature, missionDesignRunSignature, missionDesignSnapshot, trajectoryOverlay, trajectoryStale]);
   const altitudeDeltaKm = orbitSummary.currentAltitudeKm != null && missionTargets.targetAltitudeKm != null
     ? missionTargets.targetAltitudeKm - orbitSummary.currentAltitudeKm
     : null;

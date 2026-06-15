@@ -1568,7 +1568,6 @@ function missionRunSignature(
         enabled: event.enabled,
         executionTime: event.executionTime,
         parameters: event.parameters,
-        updatedAt: event.updatedAt,
       })),
   });
 }
