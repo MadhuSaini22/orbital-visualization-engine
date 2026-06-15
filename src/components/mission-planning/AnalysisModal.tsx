@@ -3,13 +3,12 @@ import type { SatelliteObject, SatelliteSnapshot } from "@/domain/orbit";
 import type { ConjunctionSnapshot } from "@/domain/conjunction";
 import { getConjunctionTone } from "@/domain/conjunction";
 import { formatNumber, formatUtc } from "@/geometry/format";
-import type { AnalysisPresetId, BackendAnalysisConfigResponse, BackendCapabilityRegistry, BackendMissionTimelineEvent, BackendPropagationProfile, UpdatePropagationProfileRequest } from "@/services/orbitServerApi";
+import type { AnalysisPresetId, BackendAnalysisConfigResponse, BackendCapabilityRegistry, BackendMissionTimelineEvent, BackendPropagationProfile } from "@/services/orbitServerApi";
 import type { MissionTrajectoryOverlay } from "./types";
-import { PropagationProfileEditor } from "./PropagationProfileEditor";
 import { OrbitSummaryPanel } from "./OrbitSummaryPanel";
 import type { OrbitSummary } from "./OrbitSummaryPanel";
 import { DetailMetric, HudPanel } from "./ui";
-import { compactIsoUtc, deltaVBreakdown, detectOrbitEventMarkers, estimatedEventDeltaVMps, maneuverQualityAnalysis, readNumberParameter, readStringParameter, secondsToDurationLabel } from "./utils";
+import { compactIsoUtc, deltaVBreakdown, detectOrbitEventMarkers, estimatedEventDeltaVMps, forceModelSummary, integratorSummary, maneuverQualityAnalysis, readNumberParameter, readStringParameter, secondsToDurationLabel } from "./utils";
 
 const analysisPresetOptions = [
   { id: "FAST_PREVIEW", label: "Fast" },
@@ -44,7 +43,6 @@ export function AnalysisModalContent({
   analysisConfig,
   missionPropagationProfile,
   capabilities,
-  propagationProfileStatus,
   analysisMessage,
   rangePrimaryId,
   rangeSecondaryId,
@@ -61,9 +59,6 @@ export function AnalysisModalContent({
   trajectoryOverlay,
   onApplyPreset,
   onToggleMode,
-  pendingPropagationProfileUpdate,
-  onStagePropagationProfile,
-  onCommitPropagationProfileDraft,
   onToggleRangeCheck,
   onUpdateRangePrimary,
   onUpdateRangeSecondary,
@@ -75,7 +70,6 @@ export function AnalysisModalContent({
   analysisConfig: BackendAnalysisConfigResponse | null;
   missionPropagationProfile: BackendPropagationProfile | null;
   capabilities: BackendCapabilityRegistry;
-  propagationProfileStatus: string | null;
   analysisMessage: string | null;
   rangePrimaryId: string;
   rangeSecondaryId: string;
@@ -92,9 +86,6 @@ export function AnalysisModalContent({
   trajectoryOverlay: MissionTrajectoryOverlay | null;
   onApplyPreset: (preset: AnalysisPresetId) => void;
   onToggleMode: (mode: string, enabled: boolean) => void;
-  pendingPropagationProfileUpdate: UpdatePropagationProfileRequest | null;
-  onStagePropagationProfile: (request: UpdatePropagationProfileRequest) => void;
-  onCommitPropagationProfileDraft: () => void;
   onToggleRangeCheck: () => void;
   onUpdateRangePrimary: (satelliteId: string) => void;
   onUpdateRangeSecondary: (satelliteId: string) => void;
@@ -311,44 +302,87 @@ export function AnalysisModalContent({
 
         {tab === "propagation" && (
           <HudPanel>
-            {missionPropagationProfile ? (
-              <PropagationProfileEditor
-                key={`${missionPropagationProfile.id}-${missionPropagationProfile.updatedAt}`}
-                profile={missionPropagationProfile}
-                capabilities={capabilities}
-                status={propagationProfileStatus}
-                surface="analysis"
-                onDraftChange={onStagePropagationProfile}
-              />
-            ) : (
-              <div className="border border-cyan-300/15 bg-black/20 p-3">
-                <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Propagation Setup</p>
-                <p className="mt-2 text-xs leading-5 text-zinc-500">
-                  Open or create a mission to inspect and edit the exact mission propagation profile used by trajectory generation.
-                </p>
-                {visiblePropagationConfig && (
-                  <p className="mt-3 text-xs leading-5 text-zinc-400">
-                    Catalog fallback currently visible: {visiblePropagationConfig.propagatorType.replaceAll("_", " ")}. Mission trajectory generation uses mission profiles, not this fallback.
-                  </p>
-                )}
-                {propagationProfileStatus && <p className="mt-3 text-xs leading-5 text-zinc-500">{propagationProfileStatus}</p>}
-              </div>
-            )}
+            <PropagationResultsPanel
+              profile={missionPropagationProfile}
+              fallbackConfig={visiblePropagationConfig}
+              capabilities={capabilities}
+              trajectoryOverlay={trajectoryOverlay}
+              orbitEventCount={orbitEventMarkers.length}
+            />
           </HudPanel>
         )}
       </div>
-      {tab === "propagation" && missionPropagationProfile && (
-        <div className="sticky bottom-0 z-20 mt-3 border-t border-cyan-300/20 bg-[#071016]/95 pt-3 backdrop-blur">
-          <button
-            type="button"
-            onClick={onCommitPropagationProfileDraft}
-            disabled={!pendingPropagationProfileUpdate}
-            className="w-full border border-cyan-300/70 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-300 hover:text-slate-950 disabled:cursor-not-allowed disabled:border-white/10 disabled:text-zinc-600"
-          >
-            {trajectoryOverlay ? "Update Configuration" : "Save Configuration"}
-          </button>
+    </div>
+  );
+}
+
+function PropagationResultsPanel({
+  profile,
+  fallbackConfig,
+  capabilities,
+  trajectoryOverlay,
+  orbitEventCount,
+}: {
+  profile: BackendPropagationProfile | null;
+  fallbackConfig: BackendPropagationProfile | BackendAnalysisConfigResponse["config"] | null;
+  capabilities: BackendCapabilityRegistry;
+  trajectoryOverlay: MissionTrajectoryOverlay | null;
+  orbitEventCount: number;
+}) {
+  const config = profile ?? fallbackConfig;
+  const trajectorySamples = trajectoryOverlay?.mission?.trajectory?.length ?? 0;
+  const runtimeWindowSeconds = trajectoryOverlay?.mission?.trajectory && trajectoryOverlay.mission.trajectory.length > 1
+    ? Math.max(0, (new Date(trajectoryOverlay.mission.trajectory[trajectoryOverlay.mission.trajectory.length - 1].timeUtc).getTime() - new Date(trajectoryOverlay.mission.trajectory[0].timeUtc).getTime()) / 1000)
+    : 0;
+  const stepCount = Math.max(0, trajectorySamples - 1);
+  const effectiveStepSeconds = trajectoryOverlay?.sampleCadenceSeconds ?? null;
+  const propagationMode = config?.propagatorType.replaceAll("_", " ") ?? "--";
+  const forceModels = config ? forceModelSummary(config as BackendPropagationProfile) : "--";
+  const integrator = profile ? integratorSummary(profile, capabilities) : config && "integratorType" in config ? config.integratorType.replaceAll("_", " ") : "--";
+  const numericalWarnings = [
+    trajectoryOverlay?.stale ? "Trajectory is stale; regenerate from Mission Design before using results." : null,
+    profile && profile.propagatorType !== "NUMERICAL" ? "Non-numerical propagation may not execute maneuver force models." : null,
+  ].filter(Boolean);
+
+  return (
+    <div className="border border-cyan-300/15 bg-black/20 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Propagation Results</p>
+          <p className="mt-2 text-xs leading-5 text-zinc-500">
+            Read-only execution review. Configure propagator, integrator, force models, and spacecraft parameters in Mission Design Strategy before generating trajectory.
+          </p>
         </div>
-      )}
+        <span className="border border-cyan-300/30 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
+          {trajectoryOverlay ? "Generated" : "No Run"}
+        </span>
+      </div>
+      <div className="mt-3 grid gap-2 md:grid-cols-4">
+        <DetailMetric label="Propagator" value={propagationMode} />
+        <DetailMetric label="Integrator" value={integrator} />
+        <DetailMetric label="Force Models" value={forceModels} />
+        <DetailMetric label="Profile" value={profile?.name ?? "Catalog/local analysis"} />
+        <DetailMetric label="Runtime Window" value={runtimeWindowSeconds > 0 ? secondsToDurationLabel(runtimeWindowSeconds) : "--"} />
+        <DetailMetric label="Step Count" value={trajectoryOverlay ? String(stepCount) : "--"} />
+        <DetailMetric label="Sample Cadence" value={effectiveStepSeconds == null ? "--" : `${effectiveStepSeconds}s`} />
+        <DetailMetric label="Orbit Events" value={String(orbitEventCount)} />
+        <DetailMetric label="Convergence" value={trajectoryOverlay ? "Completed" : "--"} />
+        <DetailMetric label="Warnings" value={String(numericalWarnings.length)} />
+        <DetailMetric label="Accuracy Metrics" value={trajectoryOverlay ? "Trajectory samples accepted" : "--"} />
+        <DetailMetric label="Generated" value={trajectoryOverlay ? compactIsoUtc(trajectoryOverlay.generatedAt) : "--"} />
+      </div>
+      <div className="mt-3 border border-white/10 bg-black/25 p-3">
+        <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Numerical Warnings</p>
+        {numericalWarnings.length === 0 ? (
+          <p className="mt-2 text-xs leading-5 text-zinc-500">No propagation warnings detected for the generated trajectory.</p>
+        ) : (
+          <div className="mt-2 space-y-1">
+            {numericalWarnings.map((warning) => (
+              <p key={warning} className="text-xs leading-5 text-amber-100">{warning}</p>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

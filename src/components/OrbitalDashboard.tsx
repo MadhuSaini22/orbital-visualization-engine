@@ -17,6 +17,7 @@ import { AnalysisModalContent } from "@/components/mission-planning/AnalysisModa
 import { MissionTimelinePanel } from "@/components/mission-planning/MissionTimeline";
 import { OrbitSummaryPanel, orbitSummaryFromSnapshot } from "@/components/mission-planning/OrbitSummaryPanel";
 import type { OrbitSummary } from "@/components/mission-planning/OrbitSummaryPanel";
+import type { MissionGenerationSnapshot } from "@/components/mission-planning/types";
 import { parseSatelliteSource } from "@/domain/satelliteConfig";
 import { MAX_TLE_OBJECTS } from "@/domain/tle";
 import { distanceBetweenOrbitStatesKm } from "@/geometry/distance";
@@ -195,6 +196,8 @@ type MissionTrajectoryOverlay = {
   generatedAt: string;
   message: string;
   runSignature: string;
+  designSignature: string | null;
+  generationSnapshot: MissionGenerationSnapshot | null;
   sampleCadenceSeconds: number;
   stale: boolean;
 };
@@ -1528,8 +1531,33 @@ function missionRunSignature(
     missionId: mission.id,
     scenarioStart: mission.scenarioStart,
     scenarioEnd: mission.scenarioEnd,
-    profileId: profile.id,
-    profileUpdatedAt: profile.updatedAt,
+    executionProfile: {
+      id: profile.id,
+      name: profile.name,
+      propagatorType: profile.propagatorType,
+      integratorType: profile.integratorType,
+      integratorMinStep: profile.integratorMinStep,
+      integratorMaxStep: profile.integratorMaxStep,
+      integratorAbsTol: profile.integratorAbsTol,
+      integratorRelTol: profile.integratorRelTol,
+      gravityEnabled: profile.gravityEnabled,
+      gravityDegree: profile.gravityDegree,
+      gravityOrder: profile.gravityOrder,
+      dragEnabled: profile.dragEnabled,
+      solarRadiationPressureEnabled: profile.solarRadiationPressureEnabled,
+      thirdBodySunEnabled: profile.thirdBodySunEnabled,
+      thirdBodyMoonEnabled: profile.thirdBodyMoonEnabled,
+      maneuverModelEnabled: profile.maneuverModelEnabled,
+      dryMassKg: profile.dryMassKg,
+      fuelMassKg: profile.fuelMassKg,
+      dragAreaM2: profile.dragAreaM2,
+      dragCoefficient: profile.dragCoefficient,
+      srpAreaM2: profile.srpAreaM2,
+      reflectivityCoefficient: profile.reflectivityCoefficient,
+      nominalThrustN: profile.nominalThrustN,
+      nominalIspS: profile.nominalIspS,
+      notes: profile.notes,
+    },
     sampleCadenceSeconds,
     events: events
       .toSorted((a, b) => a.sequenceIndex - b.sequenceIndex)
@@ -2297,8 +2325,8 @@ export function OrbitalDashboard() {
   }, [activeWorkspaceMissionId, mission, missionLibrary.missions]);
   const missionSummaryAnalysis = useMemo(() => timelineAnalysis(mission, missionTimelineEvents), [mission, missionTimelineEvents]);
   const currentMissionRunSignature = useMemo(
-    () => missionRunSignature(mission, missionTimelineEvents, missionPropagationProfile, missionTrajectoryCadenceSeconds),
-    [mission, missionPropagationProfile, missionTimelineEvents, missionTrajectoryCadenceSeconds],
+    () => missionRunSignature(mission, missionTimelineEvents, profileWithPendingUpdate(missionPropagationProfile, pendingMissionPropagationProfileUpdate), missionTrajectoryCadenceSeconds),
+    [mission, missionPropagationProfile, missionTimelineEvents, missionTrajectoryCadenceSeconds, pendingMissionPropagationProfileUpdate],
   );
   const missionTrajectoryIsStale = Boolean(missionTrajectoryOverlay && missionTrajectoryOverlay.runSignature !== currentMissionRunSignature);
   const dependencyCount = useMemo(() => missionTimelineEvents.filter((event) => eventScheduleMode(event) === "AFTER_EVENT").length, [missionTimelineEvents]);
@@ -3080,31 +3108,6 @@ export function OrbitalDashboard() {
       : null);
   }, []);
 
-  const updateMissionPropagationProfileAction = useCallback(async (request: UpdatePropagationProfileRequest) => {
-    if (!mission) {
-      const message = "Open a mission before editing its propagation profile.";
-      setPropagationProfileStatus(message);
-      toast.error(message);
-      return;
-    }
-    try {
-      setPropagationProfileStatus("Updating mission propagation profile...");
-      setActiveOperationLabel("Saving propagation setup...");
-      const updated = await updateMissionPropagationProfile(mission.id, request);
-      setMissionPropagationProfile(updated);
-      setPendingMissionPropagationProfileUpdate(null);
-      markMissionTrajectoryStale();
-      setPropagationProfileStatus("Mission propagation profile updated.");
-      toast.success("Propagation profile updated.");
-    } catch (error) {
-      const message = userErrorMessage(error, "Unable to update propagation profile.");
-      setPropagationProfileStatus(message);
-      toast.error(message);
-    } finally {
-      setActiveOperationLabel(null);
-    }
-  }, [markMissionTrajectoryStale, mission]);
-
   const stageMissionPropagationProfileUpdate = useCallback((request: UpdatePropagationProfileRequest) => {
     setPendingMissionPropagationProfileUpdate(request);
     setPropagationProfileStatus("Propagation setup changes are staged. They will be saved when you update configuration or generate trajectory.");
@@ -3523,7 +3526,7 @@ export function OrbitalDashboard() {
     }
   }, [markMissionTrajectoryStale, mission, missionTimelineEvents, refreshMissionTimeline]);
 
-  const generateMissionTrajectory = useCallback(async () => {
+  const generateMissionTrajectory = useCallback(async (generationSnapshot?: MissionGenerationSnapshot) => {
     if (!mission || !missionSubjectSnapshot?.satellite) {
       const message = "Initialize a mission before generating a trajectory.";
       setTimelineStatus(message);
@@ -3560,6 +3563,7 @@ export function OrbitalDashboard() {
         setActiveOperationLabel("Generating trajectory...");
       }
       const runSignature = missionRunSignature(mission, missionTimelineEvents, profileForRun, missionTrajectoryCadenceSeconds);
+      const designSignature = generationSnapshot ? JSON.stringify(generationSnapshot) : null;
       const missionResponse = await fetchMissionTrajectory(mission.id, start.toISOString(), end.toISOString(), missionTrajectoryCadenceSeconds);
       const missionSatellite = missionOverlaySatellite(missionSubjectSnapshot.satellite, "mission");
       setMissionTrajectoryOverlay({
@@ -3568,6 +3572,8 @@ export function OrbitalDashboard() {
         generatedAt: new Date().toISOString(),
         message: `${missionResponse.model} · ${missionResponse.states.length} mission samples generated at ${missionTrajectoryCadenceSeconds}s cadence.`,
         runSignature,
+        designSignature,
+        generationSnapshot: generationSnapshot ?? null,
         sampleCadenceSeconds: missionTrajectoryCadenceSeconds,
         stale: false,
       });
@@ -4650,7 +4656,6 @@ export function OrbitalDashboard() {
             analysisConfig={analysisConfig}
             missionPropagationProfile={profileWithPendingUpdate(missionPropagationProfile, pendingMissionPropagationProfileUpdate)}
             capabilities={capabilities}
-            propagationProfileStatus={propagationProfileStatus}
             analysisMessage={analysisMessage}
             rangePrimaryId={rangePrimaryId}
             rangeSecondaryId={rangeSecondaryId}
@@ -4667,13 +4672,6 @@ export function OrbitalDashboard() {
             trajectoryOverlay={missionTrajectoryOverlay}
             onApplyPreset={applySelectedPreset}
             onToggleMode={toggleSelectedMode}
-            pendingPropagationProfileUpdate={pendingMissionPropagationProfileUpdate}
-            onStagePropagationProfile={stageMissionPropagationProfileUpdate}
-            onCommitPropagationProfileDraft={() => {
-              if (pendingMissionPropagationProfileUpdate) {
-                void updateMissionPropagationProfileAction(pendingMissionPropagationProfileUpdate);
-              }
-            }}
             onToggleRangeCheck={toggleRangeCheck}
             onUpdateRangePrimary={updateRangePrimary}
             onUpdateRangeSecondary={updateRangeSecondary}

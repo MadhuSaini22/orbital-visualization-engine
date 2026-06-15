@@ -78,12 +78,12 @@ export function PropagationProfileEditor({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-cyan-300">
-            {surface === "planner" ? "Mission Definition: Propagation Setup" : "Analysis: Propagation Setup"}
+            {surface === "planner" ? "Strategy: Advanced Execution Settings" : "Propagation Setup"}
           </p>
           <p className="mt-1 text-xs text-zinc-500">
             {surface === "planner"
-              ? `${profile.name} · system defaults are visible here before the first run; edits are saved to the backend mission profile used by trajectory generation and Orekit propagator construction.`
-              : `${profile.name} · review or edit the mission profile that generated, or will regenerate, trajectory results.`}
+              ? `${profile.name} · configure the mission execution profile before trajectory generation. These settings are saved to the backend mission profile used by Orekit propagation.`
+              : `${profile.name} · propagation setup is owned by Mission Design before trajectory generation.`}
           </p>
         </div>
         <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
@@ -198,7 +198,7 @@ export function PropagationProfileEditor({
       )}
 
       <p className="mt-3 text-xs leading-5 text-zinc-500">
-        {status ?? "Edits are staged locally and saved by the Mission Planner trajectory action or the Analysis footer action."}
+        {status ?? "Edits are staged locally and saved when the Mission Planner generates the trajectory."}
       </p>
     </div>
   );
