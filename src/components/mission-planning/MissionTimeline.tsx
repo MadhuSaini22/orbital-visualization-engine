@@ -264,7 +264,11 @@ export function MissionTimelinePanel({
   const analysis = useMemo(() => timelineAnalysis(mission, events), [events, mission]);
   const executionMode = useMemo(() => deriveExecutionMode(events), [events]);
   const missionAnalytics = useMemo(() => missionTimelineAnalytics(mission, events, propagationProfile), [events, mission, propagationProfile]);
-  const orbitEventMarkers = useMemo(() => detectOrbitEventMarkers(trajectoryOverlay?.mission?.trajectory), [trajectoryOverlay]);
+  const backendEventDetectionActive = false;
+  const orbitEventMarkers = useMemo(
+    () => backendEventDetectionActive ? detectOrbitEventMarkers(trajectoryOverlay?.mission?.trajectory) : [],
+    [backendEventDetectionActive, trajectoryOverlay],
+  );
   const dvBreakdown = useMemo(() => deltaVBreakdown(events), [events]);
   const targetingSolutions = useMemo(() => missionTargetingSolutions(orbitSummary, missionTargets, propagationProfile), [missionTargets, orbitSummary, propagationProfile]);
   const objectiveProgress = useMemo(() => missionObjectiveProgress(orbitSummary, missionTargets), [missionTargets, orbitSummary]);
@@ -397,6 +401,10 @@ export function MissionTimelinePanel({
     trajectoryStale: effectiveTrajectoryStale,
     targetSolver,
   }), [constraintViolations, effectiveTrajectoryStale, events, missionValidationReview, orbitSummary, propagationProfile, targetSolver]);
+  const actionableMissionFindings = useMemo(
+    () => missionFindings.filter((finding) => finding.severity !== "INFO"),
+    [missionFindings],
+  );
   const capabilityFindings = useMemo(() => engineeringCapabilityFindings(), []);
   const eventDetectorCapabilities = useMemo(() => orekitEventDetectorCapabilityMatrix(), []);
   const backendCapabilityMatrix = useMemo(() => capabilityMatrix(), []);
@@ -814,29 +822,32 @@ export function MissionTimelinePanel({
         </div>
       )}
 
-      {mission && plannerPhase === "ANALYSIS" && hasGeneratedTrajectory && analysisTab === "HEALTH" && (
+      {mission && plannerPhase === "ANALYSIS" && hasGeneratedTrajectory && analysisTab === "HEALTH" && actionableMissionFindings.length === 0 && (
+        <div className="mt-3 flex justify-end">
+          <span className="border border-lime-300/40 px-2 py-1 font-mono text-[10px] uppercase text-lime-100">
+            NOMINAL
+          </span>
+        </div>
+      )}
+
+      {mission && plannerPhase === "ANALYSIS" && hasGeneratedTrajectory && analysisTab === "HEALTH" && actionableMissionFindings.length > 0 && (
         <div className="mt-3 border border-cyan-300/15 bg-black/25 p-3">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Mission Findings</p>
-              <p className="mt-1 text-[11px] leading-5 text-zinc-500">Mission-specific propagation, maneuver, target, fuel, constraint, and readiness findings only.</p>
             </div>
             <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${
-              missionFindings.some((finding) => finding.severity === "BLOCKER")
+              actionableMissionFindings.some((finding) => finding.severity === "BLOCKER")
                 ? "border-rose-300/40 text-rose-100"
-                : missionFindings.some((finding) => finding.severity === "WARNING")
+                : actionableMissionFindings.some((finding) => finding.severity === "WARNING")
                   ? "border-amber-300/40 text-amber-100"
                   : "border-lime-300/40 text-lime-100"
             }`}>
-              {missionFindings.length === 0 ? "Nominal" : `${missionFindings.length} Finding${missionFindings.length === 1 ? "" : "s"}`}
+              {`${actionableMissionFindings.length} Finding${actionableMissionFindings.length === 1 ? "" : "s"}`}
             </span>
           </div>
           <div className="mt-3 grid gap-2">
-            {missionFindings.length === 0 ? (
-              <p className="border border-lime-300/15 bg-lime-300/[0.03] px-3 py-2 text-xs text-lime-100">
-                No mission-specific blocking findings. Engineering capability maturity is tracked separately in Engineering Audit.
-              </p>
-            ) : missionFindings.map((finding) => (
+            {actionableMissionFindings.map((finding) => (
               <div key={finding.id} className={`border px-3 py-2 ${
                 finding.severity === "BLOCKER"
                   ? "border-rose-300/30 bg-rose-300/[0.06]"
@@ -876,10 +887,9 @@ export function MissionTimelinePanel({
                 {lifetimeEstimate.classification}
               </span>
             </div>
-            <div className="mt-3 grid gap-2">
-              {objectiveProgress.length === 0 ? (
-                <p className="border border-white/10 bg-black/20 px-3 py-2 text-xs text-zinc-500">No active objectives. Add targets in the setup targeting panel.</p>
-              ) : objectiveProgress.map((objective) => (
+            {objectiveProgress.length > 0 && (
+              <div className="mt-3 grid gap-2">
+                {objectiveProgress.map((objective) => (
                 <div key={objective.label} className="grid gap-2 border border-white/10 bg-black/20 p-2">
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-xs text-zinc-100">{objective.label}</span>
@@ -890,8 +900,9 @@ export function MissionTimelinePanel({
                   </div>
                   <p className="font-mono text-[10px] text-zinc-500">{objective.current} to {objective.target}</p>
                 </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
             <div className="mt-3 grid gap-2 md:grid-cols-3">
               <DetailMetric label="Lifetime" value={lifetimeEstimate.estimatedLifetime} />
               <DetailMetric label="Drag Sensitivity" value={lifetimeEstimate.dragSensitivity} />
@@ -900,26 +911,25 @@ export function MissionTimelinePanel({
             <p className="mt-2 text-[11px] leading-5 text-zinc-500">{lifetimeEstimate.rationale}</p>
           </div>
 
-          <div className="border border-cyan-300/15 bg-black/25 p-3">
+          {constraintViolations.length > 0 && (
+            <div className="border border-cyan-300/15 bg-black/25 p-3">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Constraint Review</p>
-                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Post-generation check against the mission constraints defined during setup.</p>
               </div>
-              <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${constraintViolations.length > 0 ? "border-amber-300/40 text-amber-100" : "border-lime-300/40 text-lime-100"}`}>
-                {constraintViolations.length > 0 ? `${constraintViolations.length} Findings` : "Clear"}
+              <span className="border border-amber-300/40 px-2 py-1 font-mono text-[10px] uppercase text-amber-100">
+                {constraintViolations.length} Finding{constraintViolations.length === 1 ? "" : "s"}
               </span>
             </div>
-            {constraintViolations.length > 0 && (
-              <div className="mt-3 grid gap-2">
-                {constraintViolations.map((violation) => (
+            <div className="mt-3 grid gap-2">
+              {constraintViolations.map((violation) => (
                 <p key={`${violation.constraint}-${violation.message}`} className={`border px-3 py-2 text-xs leading-5 ${violation.severity === "Violation" ? "border-rose-300/30 bg-rose-300/[0.06] text-rose-100" : "border-amber-300/30 bg-amber-300/[0.06] text-amber-100"}`}>
                   {violation.constraint}: {violation.message}
                 </p>
-                ))}
-              </div>
-            )}
+              ))}
+            </div>
           </div>
+          )}
         </div>
       )}
 
@@ -949,10 +959,9 @@ export function MissionTimelinePanel({
               <DetailMetric label="Solved Fuel" value={`${formatNumber(targetSolver.estimatedFuelKg, 3)} kg`} />
               <DetailMetric label="Plan Steps" value={String(targetSolver.plan.length)} />
             </div>
-            <div className="mt-3 grid gap-2">
-              {targetSolver.residuals.length === 0 ? (
-                <p className="border border-white/10 bg-black/20 px-3 py-2 text-xs text-zinc-500">No active target residuals. Add targeting objectives above.</p>
-              ) : targetSolver.residuals.map((residual) => (
+            {targetSolver.residuals.length > 0 && (
+              <div className="mt-3 grid gap-2">
+                {targetSolver.residuals.map((residual) => (
                 <div key={residual.parameter} className="grid gap-2 border border-white/10 bg-black/20 p-2">
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-xs font-semibold text-zinc-100">{residual.parameter}</span>
@@ -964,8 +973,9 @@ export function MissionTimelinePanel({
                     initial {formatNumber(residual.initialError, residual.unit ? 3 : 6)} {residual.unit} · tolerance {formatNumber(residual.tolerance, residual.unit ? 3 : 6)} {residual.unit}
                   </p>
                 </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
             <div className="mt-3 grid gap-2">
               {targetSolver.plan.slice(0, 5).map((step) => (
                 <div key={`${step.name}-${step.location}`} className="flex flex-wrap items-center justify-between gap-2 border border-white/10 bg-black/20 px-3 py-2">
@@ -1141,7 +1151,6 @@ export function MissionTimelinePanel({
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Mission Readiness</p>
-                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Operational state of the generated mission design. Platform maturity is tracked in Engineering Audit.</p>
               </div>
               <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${
                 validationStatus === "Blocked"
@@ -1159,17 +1168,17 @@ export function MissionTimelinePanel({
               <DetailMetric label="Enabled Events" value={String(events.filter((event) => event.enabled).length)} />
               <DetailMetric label="Enabled Burns" value={String(hasEnabledBurnEvents ? events.filter((event) => event.enabled && event.type !== "COAST").length : 0)} />
             </div>
-            <div className="mt-3 grid gap-2">
-              {missionFindings.filter((finding) => finding.severity !== "INFO").length === 0 ? (
-                <p className="border border-lime-300/15 bg-lime-300/[0.03] px-3 py-2 text-xs text-lime-100">No mission-specific operational warnings are active.</p>
-              ) : missionFindings.filter((finding) => finding.severity !== "INFO").map((finding) => (
+            {actionableMissionFindings.length > 0 && (
+              <div className="mt-3 grid gap-2">
+                {actionableMissionFindings.map((finding) => (
                 <p key={finding.id} className={`border px-3 py-2 text-xs leading-5 ${
                   finding.severity === "BLOCKER" ? "border-rose-300/30 bg-rose-300/[0.06] text-rose-100" : "border-amber-300/30 bg-amber-300/[0.06] text-amber-100"
                 }`}>
                   {finding.category}: {finding.message}
                 </p>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="border border-cyan-300/15 bg-black/25 p-3">
@@ -1280,34 +1289,6 @@ export function MissionTimelinePanel({
               <DetailMetric label="Remaining Propellant" value={missionAnalytics.fuelBudget.remainingFuelKg == null ? "Profile not loaded" : `${formatNumber(missionAnalytics.fuelBudget.remainingFuelKg, 3)} kg`} />
               <DetailMetric label="Mission Margin" value={missionAnalytics.fuelBudget.fuelMarginPercent == null ? "Profile not loaded" : `${formatNumber(missionAnalytics.fuelBudget.fuelMarginPercent, 1)}%`} />
             </div>
-          </div>
-        </div>
-      )}
-
-      {mission && plannerPhase === "ANALYSIS" && hasGeneratedTrajectory && analysisTab === "OPERATIONS" && (
-        <div className="mt-3 border border-cyan-300/15 bg-black/25 p-3">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Orbit Event Detection</p>
-              <p className="mt-1 text-[11px] leading-5 text-zinc-500">Derived from generated trajectory samples: apsides, node crossings, and low-order eclipse estimates.</p>
-            </div>
-            <span className="border border-cyan-300/25 px-2 py-1 font-mono text-[10px] uppercase text-cyan-100">
-              {orbitEventMarkers.length} Markers
-            </span>
-          </div>
-          <div className="mt-3 grid gap-2 md:grid-cols-2">
-            {orbitEventMarkers.length === 0 ? (
-              <p className="border border-white/10 bg-black/20 px-3 py-2 text-xs text-zinc-500 md:col-span-2">Generate a trajectory to detect perigee, apogee, node, and eclipse events.</p>
-            ) : orbitEventMarkers.slice(0, 8).map((marker) => (
-              <div key={marker.id} className="border border-white/10 bg-black/20 p-2">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="font-mono text-[10px] uppercase text-cyan-100">{marker.type.replaceAll("_", " ")}</p>
-                  <p className="font-mono text-[10px] text-zinc-500">{compactIsoUtc(marker.timeUtc)}</p>
-                </div>
-                <p className="mt-1 text-xs text-zinc-300">Alt {formatNumber(marker.altitudeKm, 2)} km · Lat {formatNumber(marker.latitudeDeg, 2)} deg · Lon {formatNumber(marker.longitudeDeg, 2)} deg</p>
-                <p className="mt-1 text-[11px] leading-5 text-zinc-500">{marker.description}</p>
-              </div>
-            ))}
           </div>
         </div>
       )}
@@ -1477,27 +1458,26 @@ export function MissionTimelinePanel({
             )}
           </div>
 
-          <div className="border border-cyan-300/15 bg-black/25 p-3 xl:col-span-2">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Validation Findings</p>
-                <p className="mt-1 text-[11px] leading-5 text-zinc-500">Blocking items prevent generation. Warnings document mission-design assumptions.</p>
-              </div>
-              <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${
-                validationStatus === "Blocked"
-                  ? "border-rose-300/40 text-rose-100"
-                  : validationStatus === "Review"
-                    ? "border-amber-300/40 text-amber-100"
-                    : "border-lime-300/40 text-lime-100"
-              }`}>
-                {validationStatus}
+          {missionValidationReview.errors.length === 0 && missionValidationReview.warnings.length === 0 ? (
+            <div className="flex justify-end xl:col-span-2">
+              <span className="border border-lime-300/40 px-2 py-1 font-mono text-[10px] uppercase text-lime-100">
+                NOMINAL
               </span>
             </div>
-            {missionValidationReview.errors.length === 0 && missionValidationReview.warnings.length === 0 ? (
-              <p className="mt-3 border border-lime-300/15 bg-lime-300/[0.03] px-3 py-2 text-xs text-lime-100">
-                Mission status healthy. No active validation findings.
-              </p>
-            ) : (
+          ) : (
+            <div className="border border-cyan-300/15 bg-black/25 p-3 xl:col-span-2">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Validation Findings</p>
+                </div>
+                <span className={`border px-2 py-1 font-mono text-[10px] uppercase ${
+                  validationStatus === "Blocked"
+                    ? "border-rose-300/40 text-rose-100"
+                    : "border-amber-300/40 text-amber-100"
+                }`}>
+                  {validationStatus}
+                </span>
+              </div>
               <div className="mt-3 grid gap-2 md:grid-cols-2">
                 {missionValidationReview.errors.length > 0 && (
                   <div className="border border-rose-300/20 bg-rose-300/[0.04] p-3">
@@ -1520,8 +1500,8 @@ export function MissionTimelinePanel({
                   </div>
                 )}
               </div>
-            )}
-          </div>
+            </div>
+          )}
 
           <div className="border border-cyan-300/15 bg-black/25 p-3 xl:col-span-2">
             <div className="flex flex-wrap items-start justify-between gap-3">
