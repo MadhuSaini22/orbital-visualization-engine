@@ -1,0 +1,78 @@
+import type { CatalogGroundStation } from "@/domain/groundOperations";
+
+export const groundStationCatalog: CatalogGroundStation[] = [
+  {
+    catalogId: "nasa-nen-wallops",
+    name: "Wallops Flight Facility",
+    latitude: 37.9402,
+    longitude: -75.4664,
+    altitude: 0.012,
+    minimumElevation: 10,
+    network: "NASA NEN",
+  },
+  {
+    catalogId: "nasa-nen-mc-murdo",
+    name: "McMurdo Ground Station",
+    latitude: -77.8463,
+    longitude: 166.6683,
+    altitude: 0.024,
+    minimumElevation: 10,
+    network: "NASA NEN",
+  },
+  {
+    catalogId: "esa-estrack-kourou",
+    name: "Kourou Station",
+    latitude: 5.2514,
+    longitude: -52.8053,
+    altitude: 0.014,
+    minimumElevation: 10,
+    network: "ESA ESTRACK",
+  },
+  {
+    catalogId: "esa-estrack-maspalomas",
+    name: "Maspalomas Station",
+    latitude: 27.7636,
+    longitude: -15.6331,
+    altitude: 0.205,
+    minimumElevation: 10,
+    network: "ESA ESTRACK",
+  },
+  {
+    catalogId: "ksat-svalbard",
+    name: "Svalbard Station",
+    latitude: 78.2306,
+    longitude: 15.3897,
+    altitude: 0.458,
+    minimumElevation: 5,
+    network: "KSAT",
+  },
+  {
+    catalogId: "ksat-troll",
+    name: "Troll Station",
+    latitude: -72.0117,
+    longitude: 2.5351,
+    altitude: 1.27,
+    minimumElevation: 5,
+    network: "KSAT",
+  },
+  {
+    catalogId: "ssc-santiago",
+    name: "Santiago Station",
+    latitude: -33.1502,
+    longitude: -70.6687,
+    altitude: 0.73,
+    minimumElevation: 10,
+    network: "SSC",
+  },
+  {
+    catalogId: "ssc-western-australia",
+    name: "Western Australia Station",
+    latitude: -31.8026,
+    longitude: 115.8854,
+    altitude: 0.055,
+    minimumElevation: 10,
+    network: "SSC",
+  },
+];
+
+export const groundStationNetworks = ["NASA NEN", "ESA ESTRACK", "KSAT", "SSC"] as const;

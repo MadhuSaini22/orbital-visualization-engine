@@ -9,8 +9,10 @@ import "react-toastify/dist/ReactToastify.css";
 import type { OrbitState, SatelliteObject, SatelliteSnapshot, SatelliteVisualSettings } from "@/domain/orbit";
 import { GroundTrackMiniMap } from "@/components/GroundTrackMiniMap";
 import type { GroundTrackRangeId, GroundTrackRangeOption } from "@/components/GroundTrackMiniMap";
+import { GroundOperationsModalContent } from "@/components/ground-operations/GroundOperationsModal";
 import type { ConjunctionEvent, ConjunctionSnapshot } from "@/domain/conjunction";
 import { getConjunctionStatus } from "@/domain/conjunction";
+import type { GroundStation, GroundStationNetwork } from "@/domain/groundOperations";
 import type { ManeuverEvent, ManeuverSnapshot } from "@/domain/maneuver";
 import { getManeuverTone } from "@/domain/maneuver";
 import { AnalysisModalContent } from "@/components/mission-planning/AnalysisModal";
@@ -66,6 +68,7 @@ import {
   duplicateMissionTemplate,
   duplicateOrbit,
   duplicateOrbitTemplate,
+  getOrCreateAnonymousWorkspaceId,
   makeWorkspaceId,
   readMissionLibrary,
   readMissionTemplateLibrary,
@@ -123,6 +126,8 @@ import type {
   StoredWorkspace,
 } from "@/services/workspaceStorage";
 import { StateCacheService } from "@/services/StateCacheService";
+import { GroundStationRepository } from "@/services/GroundStationRepository";
+import { groundStationCatalog } from "@/data/groundStationCatalog";
 
 const CesiumGlobe = dynamic(
   () => import("@/components/CesiumGlobe").then((mod) => mod.CesiumGlobe),
@@ -145,7 +150,7 @@ type TimelineModalMode = "create" | "edit";
 type TimelineScheduleMode = "UTC" | "MET" | "AFTER_EVENT";
 type TimelineSnapMode = "FREE" | "ONE_MIN" | "FIVE_MIN" | "TEN_MIN" | "THIRTY_MIN" | "ONE_HOUR";
 type MissionDurationPreset = "ONE_ORBIT" | "THREE_HOURS" | "TWELVE_HOURS" | "TWENTY_FOUR_HOURS" | "CUSTOM";
-type CommandModalId = "mission" | "analysis" | "workspace" | "templates";
+type CommandModalId = "mission" | "analysis" | "workspace" | "templates" | "ground";
 type TimelineEventDraftType = "COAST" | "FINITE_BURN" | "IMPULSIVE_BURN";
 type ManeuverTemplateDraft = {
   type: ManeuverTemplateType;
@@ -1979,12 +1984,15 @@ export function OrbitalDashboard() {
   const [isManeuverModalOpen, setIsManeuverModalOpen] = useState(false);
   const [mission, setMission] = useState<BackendMission | null>(null);
   const [missionTimelineEvents, setMissionTimelineEvents] = useState<BackendMissionTimelineEvent[]>([]);
+  const [workspaceId] = useState(() => getOrCreateAnonymousWorkspaceId());
   const [orbitLibrary, setOrbitLibrary] = useState<StoredOrbit[]>(() => readOrbitLibrary());
   const [missionLibrary, setMissionLibrary] = useState<MissionLibraryState>(() => readMissionLibrary());
   const [templateLibrary, setTemplateLibrary] = useState<MissionTemplateLibraryState>(() => readMissionTemplateLibrary());
   const [orbitTemplateLibrary, setOrbitTemplateLibrary] = useState<OrbitTemplateLibraryState>(() => readOrbitTemplateLibrary());
   const [activeWorkspaceOrbitId, setActiveWorkspaceOrbitId] = useState<string | null>(null);
   const [activeWorkspaceMissionId, setActiveWorkspaceMissionId] = useState<string | null>(null);
+  const groundStationRepository = useMemo(() => new GroundStationRepository(), []);
+  const [groundStations, setGroundStations] = useState<GroundStation[]>(() => new GroundStationRepository().list(getOrCreateAnonymousWorkspaceId()));
   const workspaceImportInputRef = useRef<HTMLInputElement | null>(null);
   const templateImportInputRef = useRef<HTMLInputElement | null>(null);
   const orbitTemplateImportInputRef = useRef<HTMLInputElement | null>(null);
@@ -2218,6 +2226,19 @@ export function OrbitalDashboard() {
   const selectedConjunction = conjunctionSnapshots.find((snapshot) => snapshot.event.id === selectedConjunctionId) ?? conjunctionSnapshots[0] ?? null;
   const latestSelectedId = selectedSatelliteIds.at(-1) ?? null;
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
+  const groundOperationsTargetSnapshot = useMemo<SatelliteSnapshot | null>(() => {
+    if (!selectedSnapshot) {
+      return null;
+    }
+    const orbitSnapshot = displayOrbitSnapshots.find((item) => item.satellite.id === selectedSnapshot.satellite.id);
+    return {
+      ...selectedSnapshot,
+      trajectory: orbitSnapshot?.trajectory ?? selectedSnapshot.trajectory,
+      futureTrajectory: orbitSnapshot?.futureTrajectory ?? selectedSnapshot.futureTrajectory,
+      pastTrail: orbitSnapshot?.pastTrail ?? selectedSnapshot.pastTrail,
+      groundTrack: orbitSnapshot?.groundTrack ?? selectedSnapshot.groundTrack,
+    };
+  }, [displayOrbitSnapshots, selectedSnapshot]);
   const missionSubjectSnapshot = activeDataSource === "endpoint" && importedMissionSpacecraftId
     ? snapshots.find((item) => item.satellite.id === importedMissionSpacecraftId) ?? selectedSnapshot
     : selectedSnapshot;
@@ -2414,6 +2435,55 @@ export function OrbitalDashboard() {
     setOrbitTemplateLibrary(next);
     writeOrbitTemplateLibrary(next);
   }, []);
+
+  const reloadGroundStations = useCallback(() => {
+    setGroundStations(groundStationRepository.list(workspaceId));
+  }, [groundStationRepository, workspaceId]);
+
+  const createGroundStation = useCallback((station: Omit<GroundStation, "id">) => {
+    groundStationRepository.save({
+      ...station,
+      id: makeWorkspaceId("ground-station"),
+    });
+    reloadGroundStations();
+    toast.success("Ground station created.");
+  }, [groundStationRepository, reloadGroundStations]);
+
+  const updateGroundStation = useCallback((station: GroundStation) => {
+    groundStationRepository.save(station);
+    reloadGroundStations();
+  }, [groundStationRepository, reloadGroundStations]);
+
+  const deleteGroundStationAction = useCallback((station: GroundStation) => {
+    if (!window.confirm(`Delete ground station "${station.name}"?`)) {
+      return;
+    }
+    groundStationRepository.delete(station.id);
+    reloadGroundStations();
+    toast.success("Ground station deleted.");
+  }, [groundStationRepository, reloadGroundStations]);
+
+  const cloneGroundStation = useCallback((station: GroundStation) => {
+    groundStationRepository.clone(station);
+    reloadGroundStations();
+    toast.success("Ground station cloned.");
+  }, [groundStationRepository, reloadGroundStations]);
+
+  const importGroundStation = useCallback((catalogId: string) => {
+    const catalogStation = groundStationCatalog.find((station) => station.catalogId === catalogId);
+    if (!catalogStation) {
+      return;
+    }
+    groundStationRepository.importStation(workspaceId, catalogStation);
+    reloadGroundStations();
+    toast.success("Catalog station imported as editable copy.");
+  }, [groundStationRepository, reloadGroundStations, workspaceId]);
+
+  const importGroundNetwork = useCallback((network: GroundStationNetwork) => {
+    const imported = groundStationRepository.importNetwork(workspaceId, network);
+    reloadGroundStations();
+    toast.success(`Imported ${imported.length} ${network} stations.`);
+  }, [groundStationRepository, reloadGroundStations, workspaceId]);
 
   const rememberOrbit = useCallback((orbit: StoredOrbit) => {
     setActiveWorkspaceOrbitId(orbit.orbitId);
@@ -4155,56 +4225,35 @@ export function OrbitalDashboard() {
 
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_center,transparent_42%,rgba(0,0,0,0.45)_100%)]" />
 
-      <header className="pointer-events-auto absolute top-0 right-0 left-0 z-20 border-b border-cyan-300/20 bg-[#071016]/88 px-4 py-3 shadow-2xl backdrop-blur-md">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h1 className="text-xl font-semibold text-white">Multi-Satellite Orbital Operations</h1>
+      <header className="pointer-events-auto absolute top-0 right-0 left-0 z-20 h-14 border-b border-cyan-300/20 bg-[#071016]/88 px-4 shadow-2xl backdrop-blur-md">
+        <div className="flex h-full items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="truncate text-lg font-semibold text-white">Multi-Satellite Orbital Operations</h1>
           </div>
-          {hasOrbitLoaded && (
-            <div className="flex flex-wrap items-center justify-end gap-3">
-              <button
-                type="button"
-                onClick={() => setIsSourcePickerOpen(true)}
-                className="border border-cyan-300/55 px-4 py-2 font-mono text-xs uppercase tracking-[0.14em] text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-300 hover:text-slate-950"
-              >
-                New Orbit
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveCommandModal("mission")}
-                className="border border-emerald-300/55 px-4 py-2 font-mono text-xs uppercase tracking-[0.14em] text-emerald-100 transition hover:border-emerald-300 hover:bg-emerald-300 hover:text-slate-950"
-              >
-                Plan Mission
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveCommandModal("analysis")}
-                className="border border-white/15 px-4 py-2 font-mono text-xs uppercase tracking-[0.14em] text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100"
-              >
-                Analysis
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveCommandModal("workspace")}
-                className="border border-white/15 px-4 py-2 font-mono text-xs uppercase tracking-[0.14em] text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100"
-              >
-                Workspace
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveCommandModal("templates")}
-                className="border border-white/15 px-4 py-2 font-mono text-xs uppercase tracking-[0.14em] text-zinc-300 transition hover:border-cyan-300 hover:text-cyan-100"
-              >
-                Templates
-              </button>
-              <div className="grid min-w-[520px] grid-cols-4 gap-3 max-lg:min-w-0 max-lg:flex-1 max-sm:grid-cols-2">
+          <div className="flex shrink-0 items-center justify-end gap-2">
+            <nav className="flex items-center gap-1" aria-label="Primary operations">
+              <CompactNavButton label="New Orbit" icon="orbit" onClick={() => setIsSourcePickerOpen(true)} />
+              <CompactNavButton label="Plan Mission" icon="mission" onClick={() => setActiveCommandModal("mission")} disabled={!hasOrbitLoaded} />
+              <CompactNavButton label="Analysis" icon="analysis" onClick={() => setActiveCommandModal("analysis")} disabled={!hasOrbitLoaded} />
+              <CompactNavButton
+                label="Ground Operations"
+                icon="ground"
+                onClick={() => setActiveCommandModal("ground")}
+                disabled={!hasOrbitLoaded}
+                disabledTitle="Load or create an orbit to enable Ground Operations"
+              />
+              <CompactNavButton label="Workspace" icon="workspace" onClick={() => setActiveCommandModal("workspace")} />
+              <CompactNavButton label="Templates" icon="templates" onClick={() => setActiveCommandModal("templates")} />
+            </nav>
+            {hasOrbitLoaded && (
+              <div className="grid w-[420px] grid-cols-4 gap-2 max-xl:w-[340px] max-lg:hidden">
                 <HudMetric label="Satellites" value={`${satellites.length}/${MAX_TLE_OBJECTS}`} />
                 <HudMetric label="Visible" value={String(validCount)} />
                 <HudMetric label="Range" value={effectiveShowRangeCheck && rangeMeasurement ? `${formatNumber(rangeMeasurement.distanceKm, 1)} km` : "--"} />
                 <HudMetric label="Speed" value={`${speed}x`} />
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </header>
 
@@ -4215,7 +4264,7 @@ export function OrbitalDashboard() {
       )}
 
       {hasOrbitLoaded && (
-      <section className="thin-scrollbar pointer-events-auto absolute top-24 bottom-4 left-4 z-20 w-[360px] max-w-[calc(100vw-2rem)] space-y-3 overflow-y-scroll pr-1 max-lg:relative max-lg:top-auto max-lg:bottom-auto max-lg:left-auto max-lg:mt-24 max-lg:ml-4 max-lg:max-h-[calc(100vh-7rem)]">
+      <section className="thin-scrollbar pointer-events-auto absolute top-20 bottom-4 left-4 z-20 w-[360px] max-w-[calc(100vw-2rem)] space-y-3 overflow-y-scroll pr-1 max-lg:relative max-lg:top-auto max-lg:bottom-auto max-lg:left-auto max-lg:mt-20 max-lg:ml-4 max-lg:max-h-[calc(100vh-6rem)]">
         {messages.length > 0 && (
           <HudPanel className="p-3">
             <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-cyan-300">System Message</p>
@@ -4273,7 +4322,7 @@ export function OrbitalDashboard() {
       )}
 
       {hasOrbitLoaded && (
-      <section className="thin-scrollbar pointer-events-auto absolute top-24 right-4 bottom-4 z-20 w-[340px] max-w-[calc(100vw-2rem)] space-y-3 overflow-y-scroll pr-1 max-sm:hidden">
+      <section className="thin-scrollbar pointer-events-auto absolute top-20 right-4 bottom-4 z-20 w-[340px] max-w-[calc(100vw-2rem)] space-y-3 overflow-y-scroll pr-1 max-sm:hidden">
         <HudPanel>
           <div className="flex items-center justify-between gap-3">
             <p className="font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Sat Filter</p>
@@ -4680,6 +4729,23 @@ export function OrbitalDashboard() {
         </CommandModal>
       )}
 
+      {activeCommandModal === "ground" && (
+        <CommandModal title="Ground Operations" onClose={() => setActiveCommandModal(null)} size="ground">
+          <GroundOperationsModalContent
+            workspaceId={workspaceId}
+            targetSnapshot={groundOperationsTargetSnapshot}
+            stations={groundStations}
+            simulationTimeIso={simTime.toISOString()}
+            onCreateStation={createGroundStation}
+            onUpdateStation={updateGroundStation}
+            onDeleteStation={deleteGroundStationAction}
+            onCloneStation={cloneGroundStation}
+            onImportStation={importGroundStation}
+            onImportNetwork={importGroundNetwork}
+          />
+        </CommandModal>
+      )}
+
       {isSourcePickerOpen && (
         <div className="pointer-events-auto fixed inset-0 z-40 grid place-items-center bg-black/72 p-4 backdrop-blur-md" role="dialog" aria-modal="true" aria-label="Select orbit source">
           <div className="w-[min(880px,calc(100vw-2rem))]">
@@ -4770,10 +4836,44 @@ function GlobalOperationOverlay({ label }: { label: string }) {
 
 function HudMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="border border-cyan-300/25 bg-black/30 px-4 py-2 text-center">
-      <p className="text-xs font-semibold text-zinc-400">{label}</p>
-      <p className="font-mono text-lg font-semibold text-white">{value}</p>
+    <div className="border border-cyan-300/25 bg-black/30 px-2 py-1 text-center">
+      <p className="text-[10px] font-semibold text-zinc-400">{label}</p>
+      <p className="font-mono text-sm font-semibold text-white">{value}</p>
     </div>
+  );
+}
+
+function CompactNavButton({
+  label,
+  icon,
+  disabled = false,
+  disabledTitle,
+  onClick,
+}: {
+  label: string;
+  icon: "orbit" | "mission" | "analysis" | "ground" | "workspace" | "templates";
+  disabled?: boolean;
+  disabledTitle?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="grid h-10 w-10 place-items-center border border-cyan-300/25 bg-black/25 text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-300/10 disabled:border-white/10 disabled:text-zinc-600 disabled:hover:bg-black/25"
+      aria-label={label}
+      title={disabled ? disabledTitle ?? label : label}
+    >
+      <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+        {icon === "orbit" && <path d="M4 13c4-8 12-8 16 0M4 11c4 8 12 8 16 0M12 4v16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square" />}
+        {icon === "mission" && <path d="M5 18l4-12 4 7 6-3-4 8-4-4-6 4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square" strokeLinejoin="miter" />}
+        {icon === "analysis" && <path d="M5 18V6M5 18h14M8 15l3-4 3 2 4-6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square" />}
+        {icon === "ground" && <path d="M4 18h16M7 18l5-12 5 12M9 14h6M10 10h4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square" />}
+        {icon === "workspace" && <path d="M5 6h14v12H5zM8 9h8M8 12h5M8 15h7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square" />}
+        {icon === "templates" && <path d="M6 5h12v5H6zM6 14h5v5H6zM15 14h3v5h-3z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square" />}
+      </svg>
+    </button>
   );
 }
 
@@ -4864,10 +4964,12 @@ function CommandModal({
   title: string;
   children: ReactNode;
   onClose: () => void;
-  size?: "normal" | "wide" | "mission" | "analysis";
+  size?: "normal" | "wide" | "mission" | "analysis" | "ground";
 }) {
   const sizeClass = size === "analysis"
     ? "h-[min(78vh,calc(100vh-2rem))] w-[min(1180px,90vw)]"
+    : size === "ground"
+    ? "h-[90vh] w-[min(1320px,95vw)]"
     : size === "mission"
     ? "max-h-[min(85vh,calc(100vh-2rem))] w-[min(1400px,95vw)]"
     : size === "wide"
@@ -4875,6 +4977,8 @@ function CommandModal({
       : "max-h-[min(85vh,calc(100vh-2rem))] w-[min(760px,94vw)]";
   const bodyClass = size === "analysis"
     ? "thin-scrollbar always-scrollbar min-h-0 flex-1 overflow-y-scroll p-5"
+    : size === "ground"
+      ? "min-h-0 flex-1 overflow-hidden p-4"
     : size === "mission"
       ? "thin-scrollbar always-scrollbar min-h-0 overflow-y-scroll p-5"
       : "thin-scrollbar min-h-0 overflow-y-auto p-5";

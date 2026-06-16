@@ -34,25 +34,30 @@ public class OrekitOrbitFactory {
   public OrbitSeed fromManualOrbit(ManualOrbitRecord orbit) {
     try {
       JsonNode payload = mapper.readTree(orbit.payload());
-      return switch (orbit.type()) {
-        case TLE -> OrbitSeed.tle(new TLE(
+      if (orbit.type() == OrbitDefinitionType.TLE) {
+        return OrbitSeed.tle(new TLE(
             payload.path("line1").asText(),
             payload.path("line2").asText()));
-        case CLASSICAL_ELEMENTS -> new OrbitSeed(
+      }
+      if (orbit.type() == OrbitDefinitionType.CLASSICAL_ELEMENTS) {
+        return new OrbitSeed(
             OrbitDefinitionType.CLASSICAL_ELEMENTS,
             orbit.epoch(),
             orbit.frame(),
             orbit.centralBody(),
             null,
             classicalOrbit(payload, orbit.epoch(), orbit.frame()));
-        case CARTESIAN_STATE -> new OrbitSeed(
+      }
+      if (orbit.type() == OrbitDefinitionType.CARTESIAN_STATE) {
+        return new OrbitSeed(
             OrbitDefinitionType.CARTESIAN_STATE,
             orbit.epoch(),
             orbit.frame(),
             orbit.centralBody(),
             null,
             cartesianOrbit(payload, orbit.epoch(), orbit.frame()));
-      };
+      }
+      throw new IllegalArgumentException("Unsupported manual orbit type: " + orbit.type());
     } catch (IllegalArgumentException exception) {
       throw exception;
     } catch (RuntimeException | java.io.IOException exception) {
@@ -68,11 +73,19 @@ public class OrekitOrbitFactory {
     if (request.type() == null) {
       throw new IllegalArgumentException("Orbit definition type is required.");
     }
-    switch (request.type()) {
-      case TLE -> validateTle(request.tle());
-      case CLASSICAL_ELEMENTS -> validateClassical(request);
-      case CARTESIAN_STATE -> validateCartesian(request);
+    if (request.type() == OrbitDefinitionType.TLE) {
+      validateTle(request.tle());
+      return;
     }
+    if (request.type() == OrbitDefinitionType.CLASSICAL_ELEMENTS) {
+      validateClassical(request);
+      return;
+    }
+    if (request.type() == OrbitDefinitionType.CARTESIAN_STATE) {
+      validateCartesian(request);
+      return;
+    }
+    throw new IllegalArgumentException("Unsupported orbit definition type: " + request.type());
   }
 
   public TLE createTle(CreateOrbitRequest.TleOrbitDto tle) {

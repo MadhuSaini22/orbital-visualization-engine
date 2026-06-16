@@ -9,6 +9,7 @@ import type {
 export const ORBIT_LIBRARY_KEY = "orbit-library-v1";
 export const MISSION_LIBRARY_KEY = "mission-library-v1";
 export const WORKSPACE_LIBRARY_KEY = "workspace-library-v1";
+export const ANONYMOUS_WORKSPACE_ID_KEY = "anonymous-workspace-id-v1";
 export const MISSION_TEMPLATE_LIBRARY_KEY = "mission-template-library-v1";
 export const ORBIT_TEMPLATE_LIBRARY_KEY = "orbit-template-library-v1";
 
@@ -164,6 +165,19 @@ export function makeWorkspaceId(prefix: string) {
     return `${prefix}-${crypto.randomUUID()}`;
   }
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+export function getOrCreateAnonymousWorkspaceId() {
+  if (!canUseLocalStorage()) {
+    return makeWorkspaceId("workspace");
+  }
+  const existing = window.localStorage.getItem(ANONYMOUS_WORKSPACE_ID_KEY);
+  if (existing) {
+    return existing;
+  }
+  const workspaceId = makeWorkspaceId("workspace");
+  window.localStorage.setItem(ANONYMOUS_WORKSPACE_ID_KEY, workspaceId);
+  return workspaceId;
 }
 
 function canUseLocalStorage() {
