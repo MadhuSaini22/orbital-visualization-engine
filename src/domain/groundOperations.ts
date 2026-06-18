@@ -56,6 +56,8 @@ export type StationVisibilitySummary = {
   windows: AccessWindow[];
 };
 
+export type GroundStationStatus = "VISIBLE_NOW" | "UPCOMING_PASS" | "NO_ACCESS";
+
 export type GroundOperationsAnalysis = {
   generatedAt: string;
   targetName: string;

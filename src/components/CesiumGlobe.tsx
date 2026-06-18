@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { OrbitState, RangeMeasurement, SatelliteSnapshot } from "@/domain/orbit";
 import type { ConjunctionSnapshot } from "@/domain/conjunction";
 import { getConjunctionTone } from "@/domain/conjunction";
+import type { GroundStation } from "@/domain/groundOperations";
 import type { ManeuverSnapshot } from "@/domain/maneuver";
 import { getManeuverTone } from "@/domain/maneuver";
 import { splitGroundTrackByLongitudeWrap } from "@/geometry/groundTrack";
@@ -41,6 +42,11 @@ type CesiumGlobeProps = {
   conjunctionSnapshots: ConjunctionSnapshot[];
   selectedConjunctionId: string | null;
   showConjunctions: boolean;
+  groundStations?: GroundStation[];
+  groundStationSatelliteState?: OrbitState | null;
+  visibleGroundStationIds?: string[];
+  showGroundStationFootprints?: boolean;
+  showGroundStationContactLines?: boolean;
   onSelectConjunction: (conjunctionId: string) => void;
   onSelectManeuver: (maneuverId: string) => void;
   onToggleSatellite: (satelliteId: string) => void;
@@ -402,6 +408,11 @@ export function CesiumGlobe({
   conjunctionSnapshots,
   selectedConjunctionId,
   showConjunctions,
+  groundStations = [],
+  groundStationSatelliteState = null,
+  visibleGroundStationIds = [],
+  showGroundStationFootprints = true,
+  showGroundStationContactLines = true,
   onSelectConjunction,
   onSelectManeuver,
   onToggleSatellite,
@@ -420,6 +431,7 @@ export function CesiumGlobe({
   const maneuverEntitiesRef = useRef<Map<string, Entity>>(new Map());
   const maneuverGeometryEntitiesRef = useRef<Entity[]>([]);
   const conjunctionEntitiesRef = useRef<Entity[]>([]);
+  const groundStationEntitiesRef = useRef<Entity[]>([]);
   const latestSnapshotsRef = useRef<SatelliteSnapshot[]>(snapshots);
   const latestClockTickMsRef = useRef(0);
   const onClockTickRef = useRef(onClockTick);
@@ -681,6 +693,7 @@ export function CesiumGlobe({
       maneuverEntityMap.clear();
       maneuverGeometryEntitiesRef.current = [];
       conjunctionEntitiesRef.current = [];
+      groundStationEntitiesRef.current = [];
       pathPrimitiveRef.current = null;
       hoverInfoRef.current = null;
       entityMap.clear();
@@ -1149,6 +1162,104 @@ export function CesiumGlobe({
 
     viewer.scene.requestRender();
   }, [conjunctionSnapshots, selectedConjunctionId, showConjunctions, viewerReady]);
+
+  useEffect(() => {
+    const Cesium = cesiumRef.current;
+    const viewer = viewerRef.current;
+    if (!viewerReady || !Cesium || !viewer) {
+      return;
+    }
+
+    groundStationEntitiesRef.current.forEach((entity) => viewer.entities.remove(entity));
+    groundStationEntitiesRef.current = [];
+
+    if (groundStations.length === 0) {
+      viewer.scene.requestRender();
+      return;
+    }
+
+    const visibleIds = new Set(visibleGroundStationIds);
+    const satellitePosition = groundStationSatelliteState
+      ? stateToSpaceCartesian(Cesium, groundStationSatelliteState)
+      : null;
+    const earthRadiusMeters = 6371000;
+    const satelliteAltitudeMeters = Math.max(100000, (groundStationSatelliteState?.altitudeKm ?? 650) * 1000);
+    const horizonAngleRad = Math.acos(earthRadiusMeters / (earthRadiusMeters + satelliteAltitudeMeters));
+    const footprintRadiusMeters = Math.max(350000, Math.min(3200000, earthRadiusMeters * horizonAngleRad));
+
+    groundStations.forEach((station) => {
+      const isVisible = visibleIds.has(station.id);
+      const color = isVisible
+        ? Cesium.Color.fromCssColorString("#63e6be")
+        : Cesium.Color.fromCssColorString("#67e8f9");
+      const surfacePosition = Cesium.Cartesian3.fromDegrees(station.longitude, station.latitude, 0);
+      const markerPosition = Cesium.Cartesian3.fromDegrees(
+        station.longitude,
+        station.latitude,
+        Math.max(0, station.altitude) * 1000,
+      );
+
+      if (showGroundStationFootprints) {
+        groundStationEntitiesRef.current.push(viewer.entities.add({
+          id: `ground-station-${station.id}-footprint`,
+          name: `${station.name} visibility footprint`,
+          position: surfacePosition,
+          ellipse: {
+            semiMajorAxis: footprintRadiusMeters,
+            semiMinorAxis: footprintRadiusMeters,
+            material: color.withAlpha(isVisible ? 0.1 : 0.055),
+            outline: true,
+            outlineColor: color.withAlpha(isVisible ? 0.5 : 0.28),
+            height: 0,
+          },
+        }));
+      }
+
+      groundStationEntitiesRef.current.push(viewer.entities.add({
+        id: `ground-station-${station.id}-marker`,
+        name: station.name,
+        position: markerPosition,
+        point: {
+          pixelSize: isVisible ? 13 : 10,
+          color,
+          outlineColor: Cesium.Color.BLACK,
+          outlineWidth: 2,
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+        label: {
+          text: station.name,
+          font: "700 11px monospace",
+          fillColor: color,
+          outlineColor: Cesium.Color.BLACK,
+          outlineWidth: 2,
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          showBackground: true,
+          backgroundColor: Cesium.Color.BLACK.withAlpha(0.72),
+          backgroundPadding: new Cesium.Cartesian2(6, 4),
+          pixelOffset: new Cesium.Cartesian2(0, -20),
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+      }));
+
+      if (showGroundStationContactLines && isVisible && satellitePosition) {
+        groundStationEntitiesRef.current.push(viewer.entities.add({
+          id: `ground-station-${station.id}-access-link`,
+          name: `${station.name} access link`,
+          polyline: {
+            positions: [markerPosition, satellitePosition],
+            width: 2.4,
+            material: new Cesium.PolylineDashMaterialProperty({
+              color: color.withAlpha(0.9),
+              dashLength: 18,
+            }),
+            arcType: Cesium.ArcType.NONE,
+          },
+        }));
+      }
+    });
+
+    viewer.scene.requestRender();
+  }, [groundStations, groundStationSatelliteState, showGroundStationContactLines, showGroundStationFootprints, visibleGroundStationIds, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;

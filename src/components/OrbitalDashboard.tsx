@@ -9,7 +9,12 @@ import "react-toastify/dist/ReactToastify.css";
 import type { OrbitState, SatelliteObject, SatelliteSnapshot, SatelliteVisualSettings } from "@/domain/orbit";
 import { GroundTrackMiniMap } from "@/components/GroundTrackMiniMap";
 import type { GroundTrackRangeId, GroundTrackRangeOption } from "@/components/GroundTrackMiniMap";
-import { GroundOperationsModalContent } from "@/components/ground-operations/GroundOperationsModal";
+import {
+  GroundOperationsModalContent,
+  groundOpsHorizonOptions,
+  type GroundOpsHorizon,
+  type GroundStationDisplayOptions,
+} from "@/components/ground-operations/GroundOperationsModal";
 import type { ConjunctionEvent, ConjunctionSnapshot } from "@/domain/conjunction";
 import { getConjunctionStatus } from "@/domain/conjunction";
 import type { GroundStation, GroundStationNetwork } from "@/domain/groundOperations";
@@ -128,6 +133,7 @@ import type {
 import { StateCacheService } from "@/services/StateCacheService";
 import { GroundStationRepository } from "@/services/GroundStationRepository";
 import { groundStationCatalog } from "@/data/groundStationCatalog";
+import { VisibilityService } from "@/services/VisibilityService";
 
 const CesiumGlobe = dynamic(
   () => import("@/components/CesiumGlobe").then((mod) => mod.CesiumGlobe),
@@ -706,6 +712,28 @@ function downloadJson(filename: string, value: unknown) {
 
 function isServerDrivenSource(source: ActiveDataSource) {
   return source === "backend" || source === "manual";
+}
+
+function groundOpsHorizonHours(horizon: GroundOpsHorizon) {
+  const option = groundOpsHorizonOptions.find((item) => item.id === horizon.id) ?? groundOpsHorizonOptions[2];
+  if (option.hours !== null) {
+    return option.hours;
+  }
+  const customHours = Number(horizon.customHours);
+  return Number.isFinite(customHours) && customHours > 0 ? Math.min(customHours, 72) : 6;
+}
+
+function groundOpsStepSeconds(hours: number) {
+  if (hours <= 2) {
+    return 20;
+  }
+  if (hours <= 6) {
+    return 30;
+  }
+  if (hours <= 12) {
+    return 60;
+  }
+  return 120;
 }
 
 function eventStateKey(satelliteId: string, timeUtc: string) {
@@ -1993,6 +2021,13 @@ export function OrbitalDashboard() {
   const [activeWorkspaceMissionId, setActiveWorkspaceMissionId] = useState<string | null>(null);
   const groundStationRepository = useMemo(() => new GroundStationRepository(), []);
   const [groundStations, setGroundStations] = useState<GroundStation[]>(() => new GroundStationRepository().list(getOrCreateAnonymousWorkspaceId()));
+  const [groundOpsHorizon, setGroundOpsHorizon] = useState<GroundOpsHorizon>({ id: "SIX_HOURS", customHours: "6" });
+  const [groundStationDisplay, setGroundStationDisplay] = useState<GroundStationDisplayOptions>({
+    stations: true,
+    footprints: true,
+    contactLines: true,
+  });
+  const [groundOpsHorizonSnapshot, setGroundOpsHorizonSnapshot] = useState<SatelliteSnapshot | null>(null);
   const workspaceImportInputRef = useRef<HTMLInputElement | null>(null);
   const templateImportInputRef = useRef<HTMLInputElement | null>(null);
   const orbitTemplateImportInputRef = useRef<HTMLInputElement | null>(null);
@@ -2239,6 +2274,17 @@ export function OrbitalDashboard() {
       groundTrack: orbitSnapshot?.groundTrack ?? selectedSnapshot.groundTrack,
     };
   }, [displayOrbitSnapshots, selectedSnapshot]);
+  const effectiveGroundOperationsTargetSnapshot = groundOpsHorizonSnapshot ?? groundOperationsTargetSnapshot;
+  const groundStationVisibilityService = useMemo(() => new VisibilityService(), []);
+  const visibleGroundStationIds = useMemo(() => {
+    if (!groundStationDisplay.contactLines || activeCommandModal !== "ground" || !effectiveGroundOperationsTargetSnapshot?.state) {
+      return [];
+    }
+    return groundStations
+      .filter((station) => station.enabled)
+      .filter((station) => groundStationVisibilityService.computeSample(station, effectiveGroundOperationsTargetSnapshot.state!)?.visible)
+      .map((station) => station.id);
+  }, [activeCommandModal, effectiveGroundOperationsTargetSnapshot, groundStationDisplay.contactLines, groundStationVisibilityService, groundStations]);
   const missionSubjectSnapshot = activeDataSource === "endpoint" && importedMissionSpacecraftId
     ? snapshots.find((item) => item.satellite.id === importedMissionSpacecraftId) ?? selectedSnapshot
     : selectedSnapshot;
@@ -2314,6 +2360,10 @@ export function OrbitalDashboard() {
           distanceKm: rangeDistanceKm,
         }
       : null;
+  const groundOpsAnalysisAnchorTime = useMemo(
+    () => new Date(Math.floor(simTime.getTime() / 60000) * 60000),
+    [simTime],
+  );
   const loadedNoradIds = useMemo(() => {
     if (activeDataSource === "manual") {
       return [];
@@ -3780,6 +3830,108 @@ export function OrbitalDashboard() {
     let ignore = false;
     const controller = new AbortController();
 
+    async function loadGroundOperationsHorizon() {
+      if (activeCommandModal !== "ground" || !groundOperationsTargetSnapshot) {
+        setGroundOpsHorizonSnapshot(null);
+        return;
+      }
+
+      const hours = groundOpsHorizonHours(groundOpsHorizon);
+      const stepSeconds = groundOpsStepSeconds(hours);
+      const start = groundOpsAnalysisAnchorTime;
+      const end = addMinutes(start, hours * 60);
+      const satellite = groundOperationsTargetSnapshot.satellite;
+      const anchorState = selectedSnapshot?.satellite.id === satellite.id
+        ? selectedSnapshot.state
+        : groundOperationsTargetSnapshot.state;
+
+      try {
+        let states: OrbitState[] = [];
+        if (activeDataSource === "manual") {
+          if (!manualOrbitId || backendRequestsPaused) {
+            setGroundOpsHorizonSnapshot({
+              ...groundOperationsTargetSnapshot,
+              state: anchorState ?? groundOperationsTargetSnapshot.state,
+            });
+            return;
+          }
+          const response = await fetchManualOrbitTrajectory(
+            manualOrbitId,
+            start.toISOString(),
+            end.toISOString(),
+            stepSeconds,
+            { signal: controller.signal },
+          );
+          states = response.states.map((state) => backendStateToOrbitState(satellite.id, state));
+        } else if (activeDataSource === "backend") {
+          const noradId = satellite.noradId ?? satellite.id;
+          if (!noradId || backendRequestsPaused) {
+            setGroundOpsHorizonSnapshot({
+              ...groundOperationsTargetSnapshot,
+              state: anchorState ?? groundOperationsTargetSnapshot.state,
+            });
+            return;
+          }
+          const response = await fetchOrbitTrajectory(
+            noradId,
+            start.toISOString(),
+            end.toISOString(),
+            stepSeconds,
+            { signal: controller.signal },
+          );
+          states = response.states.map((state) => backendStateToOrbitState(satellite.id, state));
+        } else {
+          states = propagator.getTrajectory(
+            satellite.id,
+            start.toISOString(),
+            end.toISOString(),
+            stepSeconds,
+          );
+        }
+
+        if (ignore || controller.signal.aborted) {
+          return;
+        }
+
+        const currentState = anchorState
+          ?? interpolateStateFromSamples(satellite.id, states, simTime.toISOString())
+          ?? states[0]
+          ?? groundOperationsTargetSnapshot.state;
+
+        setGroundOpsHorizonSnapshot({
+          ...groundOperationsTargetSnapshot,
+          state: currentState,
+          trajectory: states,
+          futureTrajectory: states,
+          pastTrail: [],
+          groundTrack: states,
+        });
+      } catch (error) {
+        if (isAbortError(error) || ignore) {
+          return;
+        }
+        if (isServerDrivenSource(activeDataSource)) {
+          pauseBackendRequests(error);
+        }
+        setGroundOpsHorizonSnapshot({
+          ...groundOperationsTargetSnapshot,
+          state: anchorState ?? groundOperationsTargetSnapshot.state,
+        });
+      }
+    }
+
+    loadGroundOperationsHorizon();
+
+    return () => {
+      ignore = true;
+      controller.abort();
+    };
+  }, [activeCommandModal, activeDataSource, backendRequestsPaused, groundOperationsTargetSnapshot, groundOpsAnalysisAnchorTime, groundOpsHorizon, manualOrbitId, pauseBackendRequests, propagator, selectedSnapshot, simTime]);
+
+  useEffect(() => {
+    let ignore = false;
+    const controller = new AbortController();
+
     async function loadServerTrajectoryWindows() {
       if (!isServerDrivenSource(activeDataSource)) {
         setServerOrbitSnapshots(null);
@@ -4212,6 +4364,11 @@ export function OrbitalDashboard() {
             conjunctionSnapshots={conjunctionSnapshots}
             selectedConjunctionId={selectedConjunction?.event.id ?? null}
             showConjunctions={effectiveShowConjunctions}
+            groundStations={activeCommandModal === "ground" && groundStationDisplay.stations ? groundStations.filter((station) => station.enabled) : []}
+            groundStationSatelliteState={activeCommandModal === "ground" ? effectiveGroundOperationsTargetSnapshot?.state ?? null : null}
+            visibleGroundStationIds={visibleGroundStationIds}
+            showGroundStationFootprints={groundStationDisplay.footprints}
+            showGroundStationContactLines={groundStationDisplay.contactLines}
             onSelectConjunction={setSelectedConjunctionId}
             onSelectManeuver={setSelectedManeuverId}
             onToggleSatellite={toggleSatelliteSelection}
@@ -4733,9 +4890,13 @@ export function OrbitalDashboard() {
         <CommandModal title="Ground Operations" onClose={() => setActiveCommandModal(null)} size="ground">
           <GroundOperationsModalContent
             workspaceId={workspaceId}
-            targetSnapshot={groundOperationsTargetSnapshot}
+            targetSnapshot={effectiveGroundOperationsTargetSnapshot}
             stations={groundStations}
             simulationTimeIso={simTime.toISOString()}
+            horizon={groundOpsHorizon}
+            onHorizonChange={setGroundOpsHorizon}
+            groundStationDisplay={groundStationDisplay}
+            onGroundStationDisplayChange={setGroundStationDisplay}
             onCreateStation={createGroundStation}
             onUpdateStation={updateGroundStation}
             onDeleteStation={deleteGroundStationAction}

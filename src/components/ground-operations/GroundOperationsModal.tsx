@@ -18,6 +18,28 @@ type GroundStationDraft = {
   network: GroundStationNetwork;
 };
 
+export type GroundOpsHorizonId = "ONE_ORBIT" | "THREE_ORBITS" | "SIX_HOURS" | "TWELVE_HOURS" | "TWENTY_FOUR_HOURS" | "CUSTOM";
+
+export type GroundOpsHorizon = {
+  id: GroundOpsHorizonId;
+  customHours: string;
+};
+
+export type GroundStationDisplayOptions = {
+  stations: boolean;
+  footprints: boolean;
+  contactLines: boolean;
+};
+
+export const groundOpsHorizonOptions = [
+  { id: "ONE_ORBIT", label: "1 Orbit", hours: 1.55 },
+  { id: "THREE_ORBITS", label: "3 Orbits", hours: 4.65 },
+  { id: "SIX_HOURS", label: "6 Hours", hours: 6 },
+  { id: "TWELVE_HOURS", label: "12 Hours", hours: 12 },
+  { id: "TWENTY_FOUR_HOURS", label: "24 Hours", hours: 24 },
+  { id: "CUSTOM", label: "Custom", hours: null },
+] satisfies Array<{ id: GroundOpsHorizonId; label: string; hours: number | null }>;
+
 const defaultDraft: GroundStationDraft = {
   name: "Custom Ground Station",
   latitude: "13.7199",
@@ -32,6 +54,10 @@ export function GroundOperationsModalContent({
   targetSnapshot,
   stations,
   simulationTimeIso,
+  horizon,
+  onHorizonChange,
+  groundStationDisplay,
+  onGroundStationDisplayChange,
   onCreateStation,
   onUpdateStation,
   onDeleteStation,
@@ -43,6 +69,10 @@ export function GroundOperationsModalContent({
   targetSnapshot: SatelliteSnapshot | null;
   stations: GroundStation[];
   simulationTimeIso: string;
+  horizon: GroundOpsHorizon;
+  onHorizonChange: (horizon: GroundOpsHorizon) => void;
+  groundStationDisplay: GroundStationDisplayOptions;
+  onGroundStationDisplayChange: (display: GroundStationDisplayOptions) => void;
   onCreateStation: (station: Omit<GroundStation, "id">) => void;
   onUpdateStation: (station: GroundStation) => void;
   onDeleteStation: (station: GroundStation) => void;
@@ -58,9 +88,20 @@ export function GroundOperationsModalContent({
   const analysis: GroundOperationsAnalysis | null = useMemo(() => (
     targetSnapshot ? service.analyze(targetSnapshot, stations, simulationTimeIso) : null
   ), [service, simulationTimeIso, stations, targetSnapshot]);
-  const upcomingWindows = analysis?.accessWindows
-    .filter((window) => new Date(window.losUtc).getTime() >= new Date(simulationTimeIso).getTime())
-    .slice(0, 10) ?? [];
+  const horizonOption = groundOpsHorizonOptions.find((option) => option.id === horizon.id) ?? groundOpsHorizonOptions[2];
+  const horizonLabel = horizon.id === "CUSTOM"
+    ? `${horizon.customHours || "Custom"} Hours`
+    : horizonOption.label;
+  const upcomingWindows = useMemo(() => (
+    analysis?.accessWindows
+      .filter((window) => new Date(window.losUtc).getTime() >= new Date(simulationTimeIso).getTime())
+      .slice(0, 10) ?? []
+  ), [analysis, simulationTimeIso]);
+  const stationRankings = useMemo(() => buildStationRankings(analysis), [analysis]);
+  const contactSummary = useMemo(
+    () => buildContactSummary(analysis, upcomingWindows, stationRankings),
+    [analysis, stationRankings, upcomingWindows],
+  );
 
   function updateDraft(patch: Partial<GroundStationDraft>) {
     setDraft((current) => ({ ...current, ...patch }));
@@ -103,12 +144,47 @@ export function GroundOperationsModalContent({
           <div>
             <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-cyan-300">Ground Operations</p>
             <h3 className="mt-1 text-xl font-semibold text-white">{targetSnapshot?.satellite.name ?? "No Orbit Loaded"}</h3>
-            <p className="mt-1 text-sm text-zinc-400">Analyze satellite visibility, contact opportunities, and ground-station access windows.</p>
+            <p className="mt-1 text-sm text-zinc-400">Analysis Horizon: <span className="text-cyan-100">{horizonLabel}</span></p>
           </div>
-          <div className="grid grid-cols-3 gap-2 text-center">
-            <GroundOpsMetric label="Stations" value={String(stations.length)} />
-            <GroundOpsMetric label="Enabled" value={String(stations.filter((station) => station.enabled).length)} />
-            <GroundOpsMetric label="Samples" value={String(analysis?.sampleCount ?? 0)} />
+          <div className="grid gap-2 sm:grid-cols-[220px_auto]">
+            <label className="block">
+              <span className="mb-1 block font-mono text-[9px] uppercase tracking-[0.12em] text-zinc-500">Analysis Horizon</span>
+              <select
+                className="timeline-input py-2 text-xs"
+                value={horizon.id}
+                onChange={(event) => onHorizonChange({ ...horizon, id: event.target.value as GroundOpsHorizonId })}
+              >
+                {groundOpsHorizonOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+              </select>
+            </label>
+            {horizon.id === "CUSTOM" && (
+              <label className="block">
+                <span className="mb-1 block font-mono text-[9px] uppercase tracking-[0.12em] text-zinc-500">Hours</span>
+                <input className="timeline-input py-2 text-xs" value={horizon.customHours} onChange={(event) => onHorizonChange({ ...horizon, customHours: event.target.value })} inputMode="decimal" />
+              </label>
+            )}
+            <div className={`flex items-end gap-2 ${horizon.id === "CUSTOM" ? "sm:col-span-2" : ""}`}>
+              <GroundOpsCommandToggle
+                label="Stations"
+                active={groundStationDisplay.stations}
+                onToggle={() => onGroundStationDisplayChange({ ...groundStationDisplay, stations: !groundStationDisplay.stations })}
+              />
+              <GroundOpsCommandToggle
+                label="Footprints"
+                active={groundStationDisplay.footprints}
+                onToggle={() => onGroundStationDisplayChange({ ...groundStationDisplay, footprints: !groundStationDisplay.footprints })}
+              />
+              <GroundOpsCommandToggle
+                label="Contact Lines"
+                active={groundStationDisplay.contactLines}
+                onToggle={() => onGroundStationDisplayChange({ ...groundStationDisplay, contactLines: !groundStationDisplay.contactLines })}
+              />
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-center sm:col-span-2">
+              <GroundOpsMetric label="Stations" value={String(stations.length)} />
+              <GroundOpsMetric label="Enabled" value={String(stations.filter((station) => station.enabled).length)} />
+              <GroundOpsMetric label="Samples" value={String(analysis?.sampleCount ?? 0)} />
+            </div>
           </div>
         </div>
       </div>
@@ -120,7 +196,17 @@ export function GroundOperationsModalContent({
           </GroundOpsPanel>
         )}
 
-        <GroundOpsPanel title="1. Ground Stations">
+        {targetSnapshot && (
+          <>
+            <MissionContactSummary summary={contactSummary} />
+            <div className="grid gap-4 xl:grid-cols-[1fr_1fr]">
+              <StationRankingPanel rankings={stationRankings} />
+              <CoverageSummaryCard summary={contactSummary} />
+            </div>
+          </>
+        )}
+
+        <GroundOpsPanel title="Ground Stations">
           <div className="grid gap-4 lg:grid-cols-[1fr_1.2fr]">
             <div className="min-w-0">
               <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
@@ -209,41 +295,16 @@ export function GroundOperationsModalContent({
           </div>
         </GroundOpsPanel>
 
-        <GroundOpsPanel title="2. Visibility Analysis">
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {analysis?.stationSummaries.map((summary) => (
-              <div key={summary.station.id} className="border border-white/10 bg-black/25 p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-semibold text-white">{summary.station.name}</p>
-                    <p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">{summary.station.network}</p>
-                  </div>
-                  <span className={`border px-2 py-1 font-mono text-[9px] uppercase ${summary.current?.visible ? "border-emerald-300/45 text-emerald-200" : "border-white/10 text-zinc-500"}`}>
-                    {summary.current?.visible ? "Visible" : "Not Visible"}
-                  </span>
-                </div>
-                <div className="mt-4 grid grid-cols-2 gap-3">
-                  <GroundOpsMetric label="Elevation" value={`${formatNumber(summary.current?.elevationDeg, 1)} deg`} />
-                  <GroundOpsMetric label="Max El" value={`${formatNumber(summary.maxElevationDeg ?? undefined, 1)} deg`} />
-                  <GroundOpsMetric label="Access" value={`${formatNumber(summary.visibilityPercentage, 1)}%`} />
-                  <GroundOpsMetric label="Next Pass" value={summary.nextWindow ? compactIsoUtc(summary.nextWindow.aosUtc) : "--"} />
-                </div>
-              </div>
-            ))}
-            {analysis?.stationSummaries.length === 0 && <p className="text-sm text-zinc-400">Enable at least one ground station to run visibility analysis.</p>}
-          </div>
+        <GroundOpsPanel title="Access Windows">
+          <AccessWindowTable windows={upcomingWindows} stationSummaries={analysis?.stationSummaries ?? []} horizonLabel={horizonLabel} />
         </GroundOpsPanel>
 
-        <GroundOpsPanel title="3. Access Windows">
-          <AccessWindowTable windows={analysis?.accessWindows ?? []} />
+        <GroundOpsPanel title="Pass Prediction">
+          <PassPredictionPanel stationSummaries={analysis?.stationSummaries ?? []} horizonLabel={horizonLabel} />
         </GroundOpsPanel>
 
-        <GroundOpsPanel title="4. Pass Prediction">
-          <AccessWindowTable windows={upcomingWindows} compact />
-        </GroundOpsPanel>
-
-        <GroundOpsPanel title="5. Contact Timeline">
-          <ContactTimeline windows={upcomingWindows} />
+        <GroundOpsPanel title="Mission Contact Timeline">
+          <ContactTimeline windows={upcomingWindows} stationSummaries={analysis?.stationSummaries ?? []} horizonLabel={horizonLabel} />
         </GroundOpsPanel>
       </div>
 
@@ -339,34 +400,253 @@ function GroundOpsMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function AccessWindowTable({ windows, compact = false }: { windows: GroundOperationsAnalysis["accessWindows"]; compact?: boolean }) {
+function GroundOpsCommandToggle({ label, active, onToggle }: { label: string; active: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className={`h-[38px] whitespace-nowrap border px-3 font-mono text-[10px] uppercase tracking-[0.12em] transition ${
+        active
+          ? "border-cyan-300 bg-cyan-300/12 text-cyan-100 shadow-[0_0_18px_rgba(34,211,238,0.12)]"
+          : "border-white/10 bg-black/25 text-zinc-500 hover:border-cyan-300/45 hover:text-cyan-100"
+      }`}
+      aria-pressed={active}
+    >
+      {label} <span className={active ? "text-emerald-200" : "text-zinc-600"}>{active ? "ON" : "OFF"}</span>
+    </button>
+  );
+}
+
+type StationRanking = {
+  stationId: string;
+  stationName: string;
+  passes: number;
+  totalDurationSeconds: number;
+  maxElevationDeg: number | null;
+};
+
+type ContactSummary = {
+  bestStation: string;
+  totalPasses: number;
+  totalContactSeconds: number;
+  longestPassSeconds: number;
+  nextContactUtc: string | null;
+  averageMaxElevationDeg: number | null;
+  averagePassDurationSeconds: number;
+  coverageQuality: "EXCELLENT" | "GOOD" | "LIMITED" | "NO ACCESS";
+};
+
+function buildStationRankings(analysis: GroundOperationsAnalysis | null): StationRanking[] {
+  if (!analysis) {
+    return [];
+  }
+  return analysis.stationSummaries
+    .map((summary) => {
+      const totalDurationSeconds = summary.windows.reduce((total, window) => total + window.durationSeconds, 0);
+      const maxElevationDeg = summary.windows.length > 0
+        ? Math.max(...summary.windows.map((window) => window.maxElevationDeg))
+        : summary.maxElevationDeg;
+      return {
+        stationId: summary.station.id,
+        stationName: summary.station.name,
+        passes: summary.windows.length,
+        totalDurationSeconds,
+        maxElevationDeg,
+      };
+    })
+    .toSorted((a, b) => (
+      b.passes - a.passes ||
+      b.totalDurationSeconds - a.totalDurationSeconds ||
+      (b.maxElevationDeg ?? Number.NEGATIVE_INFINITY) - (a.maxElevationDeg ?? Number.NEGATIVE_INFINITY)
+    ));
+}
+
+function buildContactSummary(
+  analysis: GroundOperationsAnalysis | null,
+  upcomingWindows: GroundOperationsAnalysis["accessWindows"],
+  rankings: StationRanking[],
+): ContactSummary {
+  const allWindows = analysis?.accessWindows ?? [];
+  const totalPasses = allWindows.length;
+  const totalContactSeconds = allWindows.reduce((total, window) => total + window.durationSeconds, 0);
+  const longestPassSeconds = allWindows.reduce((longest, window) => Math.max(longest, window.durationSeconds), 0);
+  const maxElevationValues = allWindows.map((window) => window.maxElevationDeg);
+  const averageMaxElevationDeg = maxElevationValues.length > 0
+    ? maxElevationValues.reduce((total, value) => total + value, 0) / maxElevationValues.length
+    : null;
+  const averagePassDurationSeconds = totalPasses > 0 ? totalContactSeconds / totalPasses : 0;
+  const coverageQuality = totalPasses >= 12 && totalContactSeconds >= 60 * 60
+    ? "EXCELLENT"
+    : totalPasses >= 4 && totalContactSeconds >= 20 * 60
+      ? "GOOD"
+      : totalPasses > 0
+        ? "LIMITED"
+        : "NO ACCESS";
+
+  return {
+    bestStation: rankings[0]?.passes ? rankings[0].stationName : "--",
+    totalPasses,
+    totalContactSeconds,
+    longestPassSeconds,
+    nextContactUtc: upcomingWindows[0]?.aosUtc ?? null,
+    averageMaxElevationDeg,
+    averagePassDurationSeconds,
+    coverageQuality,
+  };
+}
+
+function minuteLabel(seconds: number) {
+  if (seconds <= 0) {
+    return "--";
+  }
+  return `${Math.round(seconds / 60)} min`;
+}
+
+function MissionContactSummary({ summary }: { summary: ContactSummary }) {
+  return (
+    <section className="border border-cyan-300/25 bg-[#071016]/82 p-4">
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-6">
+        <GroundOpsMetric label="Best Station" value={summary.bestStation} />
+        <GroundOpsMetric label="Total Passes" value={String(summary.totalPasses)} />
+        <GroundOpsMetric label="Contact Time" value={minuteLabel(summary.totalContactSeconds)} />
+        <GroundOpsMetric label="Longest Pass" value={minuteLabel(summary.longestPassSeconds)} />
+        <GroundOpsMetric label="Next Contact" value={summary.nextContactUtc ? compactIsoUtc(summary.nextContactUtc) : "--"} />
+        <GroundOpsMetric label="Avg Max Elev" value={summary.averageMaxElevationDeg === null ? "--" : `${formatNumber(summary.averageMaxElevationDeg, 1)} deg`} />
+      </div>
+    </section>
+  );
+}
+
+function StationRankingPanel({ rankings }: { rankings: StationRanking[] }) {
+  return (
+    <GroundOpsPanel title="Station Ranking">
+      {rankings.length === 0 ? (
+        <p className="border border-white/10 bg-black/25 p-3 text-sm text-zinc-400">Enable stations to rank contact performance.</p>
+      ) : (
+        <div className="space-y-2">
+          {rankings.map((ranking, index) => (
+            <div
+              key={ranking.stationId}
+              className={`flex items-center justify-between gap-4 border p-3 ${
+                index === 0 && ranking.passes > 0
+                  ? "border-emerald-300/45 bg-emerald-300/[0.07]"
+                  : "border-white/10 bg-black/25"
+              }`}
+            >
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold text-white" title={ranking.stationName}>#{index + 1} {ranking.stationName}</p>
+                <p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">
+                  {ranking.passes} passes / {minuteLabel(ranking.totalDurationSeconds)}
+                </p>
+              </div>
+              <div className="text-right font-mono text-xs text-cyan-100">
+                {ranking.maxElevationDeg === null ? "--" : `${formatNumber(ranking.maxElevationDeg, 1)} deg`}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </GroundOpsPanel>
+  );
+}
+
+function CoverageSummaryCard({ summary }: { summary: ContactSummary }) {
+  return (
+    <GroundOpsPanel title="Coverage Summary">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <GroundOpsMetric label="Coverage Quality" value={summary.coverageQuality} />
+        <GroundOpsMetric label="Best Station" value={summary.bestStation} />
+        <GroundOpsMetric label="Total Passes" value={String(summary.totalPasses)} />
+        <GroundOpsMetric label="Contact Time" value={minuteLabel(summary.totalContactSeconds)} />
+        <GroundOpsMetric label="Average Pass" value={minuteLabel(summary.averagePassDurationSeconds)} />
+        <GroundOpsMetric label="Longest Pass" value={minuteLabel(summary.longestPassSeconds)} />
+      </div>
+    </GroundOpsPanel>
+  );
+}
+
+function stationStatusLabel(summary: GroundOperationsAnalysis["stationSummaries"][number]) {
+  if (summary.current?.visible) {
+    return "Visible Now";
+  }
+  if (summary.nextWindow) {
+    return "Upcoming Pass";
+  }
+  return "No Access";
+}
+
+function stationStatusClass(summary: GroundOperationsAnalysis["stationSummaries"][number]) {
+  if (summary.current?.visible) {
+    return "border-emerald-300/45 bg-emerald-300/[0.07] text-emerald-200";
+  }
+  if (summary.nextWindow) {
+    return "border-cyan-300/45 bg-cyan-300/[0.07] text-cyan-100";
+  }
+  return "border-white/10 text-zinc-500";
+}
+
+function NoAccessReason({ summary, horizonLabel }: { summary: GroundOperationsAnalysis["stationSummaries"][number]; horizonLabel: string }) {
+  const currentElevation = summary.current?.elevationDeg;
+  const maxElevation = summary.maxElevationDeg;
+  return (
+    <div className="border border-amber-300/25 bg-amber-300/[0.045] p-4 text-sm text-zinc-300">
+      <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-amber-100">No Contacts Found</p>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        <GroundOpsMetric label="Current Elevation" value={`${formatNumber(currentElevation, 1)} deg`} />
+        <GroundOpsMetric label="Maximum Elevation" value={`${formatNumber(maxElevation ?? undefined, 1)} deg`} />
+      </div>
+      <p className="mt-3 text-xs text-zinc-400">No pass crosses the station minimum elevation in the selected {horizonLabel.toLowerCase()} horizon.</p>
+      <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-amber-50/85">
+        <li>Increase analysis horizon</li>
+        <li>Add stations closer to the orbit ground track</li>
+        <li>Reduce minimum elevation threshold</li>
+      </ul>
+    </div>
+  );
+}
+
+function AccessWindowTable({
+  windows,
+  stationSummaries = [],
+  horizonLabel = "",
+  compact = false,
+}: {
+  windows: GroundOperationsAnalysis["accessWindows"];
+  stationSummaries?: GroundOperationsAnalysis["stationSummaries"];
+  horizonLabel?: string;
+  compact?: boolean;
+}) {
   if (windows.length === 0) {
-    return <p className="border border-white/10 bg-black/25 p-3 text-sm text-zinc-400">No access windows in the current trajectory window.</p>;
+    return (
+      <div className="grid gap-3">
+        {stationSummaries.length === 0 ? (
+          <p className="border border-white/10 bg-black/25 p-3 text-sm text-zinc-400">Enable at least one station to generate access windows.</p>
+        ) : stationSummaries.map((summary) => (
+          <NoAccessReason key={summary.station.id} summary={summary} horizonLabel={horizonLabel} />
+        ))}
+      </div>
+    );
   }
   return (
     <div className="thin-scrollbar overflow-x-auto">
-      <table className="w-full min-w-[760px] border-collapse text-left text-xs">
+      <table className={`w-full border-collapse text-left text-xs ${compact ? "min-w-[520px]" : "min-w-[620px]"}`}>
         <thead className="border-b border-cyan-300/20 font-mono uppercase tracking-[0.12em] text-zinc-500">
           <tr>
-            <th className="py-2 pr-3">Pass</th>
             <th className="py-2 pr-3">Station</th>
             <th className="py-2 pr-3">AOS</th>
             <th className="py-2 pr-3">LOS</th>
             <th className="py-2 pr-3">Duration</th>
             <th className="py-2 pr-3">Max Elevation</th>
-            {!compact && <th className="py-2 pr-3">Orbit</th>}
           </tr>
         </thead>
         <tbody>
           {windows.map((window) => (
             <tr key={window.id} className="border-b border-white/5 text-zinc-300 last:border-b-0">
-              <td className="py-2 pr-3 font-mono text-cyan-100">{window.passNumber}</td>
               <td className="py-2 pr-3">{window.stationName}</td>
               <td className="py-2 pr-3 font-mono">{compactIsoUtc(window.aosUtc)}</td>
               <td className="py-2 pr-3 font-mono">{compactIsoUtc(window.losUtc)}</td>
               <td className="py-2 pr-3">{secondsToDurationLabel(window.durationSeconds)}</td>
               <td className="py-2 pr-3">{formatNumber(window.maxElevationDeg, 1)} deg</td>
-              {!compact && <td className="py-2 pr-3">{window.orbitNumber ?? "--"}</td>}
             </tr>
           ))}
         </tbody>
@@ -375,38 +655,88 @@ function AccessWindowTable({ windows, compact = false }: { windows: GroundOperat
   );
 }
 
-function ContactTimeline({ windows }: { windows: GroundOperationsAnalysis["accessWindows"] }) {
-  if (windows.length === 0) {
-    return <p className="border border-white/10 bg-black/25 p-3 text-sm text-zinc-400">No upcoming contacts to render.</p>;
+function PassPredictionPanel({
+  stationSummaries,
+  horizonLabel,
+}: {
+  stationSummaries: GroundOperationsAnalysis["stationSummaries"];
+  horizonLabel: string;
+}) {
+  if (stationSummaries.length === 0) {
+    return <p className="border border-white/10 bg-black/25 p-3 text-sm text-zinc-400">Enable at least one station to predict passes.</p>;
   }
-  const startMs = Math.min(...windows.map((window) => new Date(window.aosUtc).getTime()));
-  const endMs = Math.max(...windows.map((window) => new Date(window.losUtc).getTime()));
-  const spanMs = Math.max(1, endMs - startMs);
-  const byStation = windows.reduce<Map<string, typeof windows>>((groups, window) => {
-    const stationWindows = groups.get(window.stationName) ?? [];
-    groups.set(window.stationName, [...stationWindows, window]);
-    return groups;
-  }, new Map());
 
   return (
-    <div className="space-y-3">
-      {[...byStation.entries()].map(([stationName, stationWindows]) => (
-        <div key={stationName} className="grid gap-2 md:grid-cols-[180px_1fr]">
-          <p className="truncate text-sm text-zinc-300" title={stationName}>{stationName}</p>
-          <div className="relative h-9 border border-white/10 bg-black/30">
-            {stationWindows.map((window) => {
-              const left = ((new Date(window.aosUtc).getTime() - startMs) / spanMs) * 100;
-              const width = Math.max(1.5, ((new Date(window.losUtc).getTime() - new Date(window.aosUtc).getTime()) / spanMs) * 100);
-              return (
-                <div
-                  key={window.id}
-                  className="absolute top-2 h-5 border border-emerald-200/60 bg-emerald-300/30"
-                  style={{ left: `${left}%`, width: `${width}%` }}
-                  title={`${compactIsoUtc(window.aosUtc)} -> ${compactIsoUtc(window.losUtc)}`}
-                />
-              );
-            })}
+    <div className="grid gap-3">
+      {stationSummaries.map((summary) => (
+        <div key={summary.station.id} className="border border-white/10 bg-black/25 p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-white">{summary.station.name}</p>
+              <p className="mt-1 font-mono text-[10px] uppercase text-zinc-500">Next Pass</p>
+            </div>
+            <span className={`border px-2 py-1 font-mono text-[9px] uppercase ${stationStatusClass(summary)}`}>{stationStatusLabel(summary)}</span>
           </div>
+          {summary.nextWindow ? (
+            <div className="mt-4 grid gap-3 sm:grid-cols-4">
+              <GroundOpsMetric label="Next AOS" value={compactIsoUtc(summary.nextWindow.aosUtc)} />
+              <GroundOpsMetric label="Duration" value={secondsToDurationLabel(summary.nextWindow.durationSeconds)} />
+              <GroundOpsMetric label="Peak Elevation" value={`${formatNumber(summary.nextWindow.maxElevationDeg, 1)} deg`} />
+              <GroundOpsMetric label="Status" value={summary.current?.visible ? "VISIBLE" : "UPCOMING"} />
+              {summary.windows.length > 1 && (
+                <details className="sm:col-span-4">
+                  <summary className="cursor-pointer font-mono text-[10px] uppercase tracking-[0.12em] text-cyan-100">Show all {summary.windows.length} passes</summary>
+                  <div className="mt-3">
+                    <AccessWindowTable windows={summary.windows} compact />
+                  </div>
+                </details>
+              )}
+            </div>
+          ) : (
+            <div className="mt-4">
+              <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.12em] text-zinc-500">No pass in selected horizon</p>
+              <NoAccessReason summary={summary} horizonLabel={horizonLabel} />
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ContactTimeline({
+  windows,
+  stationSummaries,
+  horizonLabel,
+}: {
+  windows: GroundOperationsAnalysis["accessWindows"];
+  stationSummaries: GroundOperationsAnalysis["stationSummaries"];
+  horizonLabel: string;
+}) {
+  if (windows.length === 0) {
+    return (
+      <div className="grid gap-3">
+        {stationSummaries.length === 0 ? (
+          <p className="border border-white/10 bg-black/25 p-3 text-sm text-zinc-400">Enable at least one station to generate a contact timeline.</p>
+        ) : stationSummaries.map((summary) => (
+          <NoAccessReason key={summary.station.id} summary={summary} horizonLabel={horizonLabel} />
+        ))}
+      </div>
+    );
+  }
+
+  const events = windows.flatMap((window) => [
+    { id: `${window.id}-aos`, timeUtc: window.aosUtc, stationName: window.stationName, event: "AOS" },
+    { id: `${window.id}-los`, timeUtc: window.losUtc, stationName: window.stationName, event: "LOS" },
+  ]).toSorted((a, b) => new Date(a.timeUtc).getTime() - new Date(b.timeUtc).getTime());
+
+  return (
+    <div className="border border-white/10 bg-black/25">
+      {events.map((event) => (
+        <div key={event.id} className="grid grid-cols-[74px_58px_1fr] gap-3 border-b border-white/5 px-3 py-2 text-sm last:border-b-0">
+          <span className="font-mono text-cyan-100">{compactIsoUtc(event.timeUtc)}</span>
+          <span className={`font-mono text-[10px] uppercase tracking-[0.12em] ${event.event === "AOS" ? "text-emerald-200" : "text-amber-100"}`}>{event.event}</span>
+          <span className="truncate text-zinc-300" title={event.stationName}>{event.stationName}</span>
         </div>
       ))}
     </div>
