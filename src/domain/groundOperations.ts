@@ -20,6 +20,12 @@ export type GroundStation = {
   enabled: boolean;
 };
 
+export type GroundStationDisplayOptions = {
+  stations: boolean;
+  footprints: boolean;
+  contactLines: boolean;
+};
+
 export type CatalogGroundStation = Omit<GroundStation, "id" | "workspaceId" | "source" | "enabled"> & {
   catalogId: string;
 };

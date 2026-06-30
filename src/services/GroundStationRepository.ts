@@ -124,7 +124,9 @@ export class GroundStationRepository {
     if (!orbitId) {
       return [];
     }
-    return readAssignments().assignments[assignmentKey(workspaceId, orbitId)] ?? [];
+    const state = readAssignments();
+    const key = assignmentKey(workspaceId, orbitId);
+    return state.assignments[key] ?? [];
   }
 
   assignStation(workspaceId: string, orbitId: string | null, stationId: string) {
@@ -152,13 +154,14 @@ export class GroundStationRepository {
     const state = readAssignments();
     const key = assignmentKey(workspaceId, orbitId);
     const nextIds = [...new Set([...(state.assignments[key] ?? []), ...stationIds])];
-    writeAssignments({
-      schemaVersion: 1,
+    const nextState = {
+      schemaVersion: 1 as const,
       assignments: {
         ...state.assignments,
         [key]: nextIds,
       },
-    });
+    };
+    writeAssignments(nextState);
     return nextIds;
   }
 
@@ -169,13 +172,14 @@ export class GroundStationRepository {
     const state = readAssignments();
     const key = assignmentKey(workspaceId, orbitId);
     const nextIds = (state.assignments[key] ?? []).filter((id) => id !== stationId);
-    writeAssignments({
-      schemaVersion: 1,
+    const nextState = {
+      schemaVersion: 1 as const,
       assignments: {
         ...state.assignments,
         [key]: nextIds,
       },
-    });
+    };
+    writeAssignments(nextState);
     return nextIds;
   }
 

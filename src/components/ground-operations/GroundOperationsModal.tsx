@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import type { GroundOperationsAnalysis, GroundStation, GroundStationNetwork } from "@/domain/groundOperations";
+import type { GroundOperationsAnalysis, GroundStation, GroundStationDisplayOptions, GroundStationNetwork } from "@/domain/groundOperations";
 import type { SatelliteSnapshot } from "@/domain/orbit";
 import { groundStationCatalog, groundStationNetworks } from "@/data/groundStationCatalog";
 import { formatNumber } from "@/geometry/format";
@@ -23,12 +23,6 @@ export type GroundOpsHorizonId = "ONE_ORBIT" | "THREE_ORBITS" | "SIX_HOURS" | "T
 export type GroundOpsHorizon = {
   id: GroundOpsHorizonId;
   customHours: string;
-};
-
-export type GroundStationDisplayOptions = {
-  stations: boolean;
-  footprints: boolean;
-  contactLines: boolean;
 };
 
 export const groundOpsHorizonOptions = [

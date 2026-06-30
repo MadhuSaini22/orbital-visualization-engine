@@ -13,8 +13,11 @@ import {
   GroundOperationsModalContent,
   groundOpsHorizonOptions,
   type GroundOpsHorizon,
-  type GroundStationDisplayOptions,
 } from "@/components/ground-operations/GroundOperationsModal";
+import {
+  GroundStationScenarioProvider,
+  useGroundStationScenario,
+} from "@/components/ground-operations/GroundStationScenarioContext";
 import type { ConjunctionEvent, ConjunctionSnapshot } from "@/domain/conjunction";
 import { getConjunctionStatus } from "@/domain/conjunction";
 import type { GroundStation, GroundStationNetwork } from "@/domain/groundOperations";
@@ -131,8 +134,6 @@ import type {
   StoredWorkspace,
 } from "@/services/workspaceStorage";
 import { StateCacheService } from "@/services/StateCacheService";
-import { GroundStationRepository } from "@/services/GroundStationRepository";
-import { groundStationCatalog } from "@/data/groundStationCatalog";
 import { VisibilityService } from "@/services/VisibilityService";
 
 const CesiumGlobe = dynamic(
@@ -1987,6 +1988,16 @@ function relativeVelocityKmps(a: SatelliteSnapshot["state"], b: SatelliteSnapsho
 }
 
 export function OrbitalDashboard() {
+  const [workspaceId] = useState(() => getOrCreateAnonymousWorkspaceId());
+
+  return (
+    <GroundStationScenarioProvider workspaceId={workspaceId}>
+      <OrbitalDashboardContent workspaceId={workspaceId} />
+    </GroundStationScenarioProvider>
+  );
+}
+
+function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const [tleUrl, setTleUrl] = useState("");
   const [activeDataSource, setActiveDataSource] = useState<ActiveDataSource>("sample");
   const [manualOrbitId, setManualOrbitId] = useState<string | null>(null);
@@ -2012,22 +2023,13 @@ export function OrbitalDashboard() {
   const [isManeuverModalOpen, setIsManeuverModalOpen] = useState(false);
   const [mission, setMission] = useState<BackendMission | null>(null);
   const [missionTimelineEvents, setMissionTimelineEvents] = useState<BackendMissionTimelineEvent[]>([]);
-  const [workspaceId] = useState(() => getOrCreateAnonymousWorkspaceId());
   const [orbitLibrary, setOrbitLibrary] = useState<StoredOrbit[]>(() => readOrbitLibrary());
   const [missionLibrary, setMissionLibrary] = useState<MissionLibraryState>(() => readMissionLibrary());
   const [templateLibrary, setTemplateLibrary] = useState<MissionTemplateLibraryState>(() => readMissionTemplateLibrary());
   const [orbitTemplateLibrary, setOrbitTemplateLibrary] = useState<OrbitTemplateLibraryState>(() => readOrbitTemplateLibrary());
   const [activeWorkspaceOrbitId, setActiveWorkspaceOrbitId] = useState<string | null>(null);
   const [activeWorkspaceMissionId, setActiveWorkspaceMissionId] = useState<string | null>(null);
-  const groundStationRepository = useMemo(() => new GroundStationRepository(), []);
-  const [groundStations, setGroundStations] = useState<GroundStation[]>(() => new GroundStationRepository().list(getOrCreateAnonymousWorkspaceId()));
-  const [groundStationAssignmentVersion, setGroundStationAssignmentVersion] = useState(0);
   const [groundOpsHorizon, setGroundOpsHorizon] = useState<GroundOpsHorizon>({ id: "SIX_HOURS", customHours: "6" });
-  const [groundStationDisplay, setGroundStationDisplay] = useState<GroundStationDisplayOptions>({
-    stations: true,
-    footprints: true,
-    contactLines: true,
-  });
   const [groundOpsHorizonSnapshot, setGroundOpsHorizonSnapshot] = useState<SatelliteSnapshot | null>(null);
   const workspaceImportInputRef = useRef<HTMLInputElement | null>(null);
   const templateImportInputRef = useRef<HTMLInputElement | null>(null);
@@ -2383,50 +2385,21 @@ export function OrbitalDashboard() {
     ?? (selectedNoradId ? `catalog-${selectedNoradId}` : null)
     ?? (selectedSnapshot?.satellite.id ? `orbit-${selectedSnapshot.satellite.id}` : null)
   );
-  const assignedGroundStationIds = useMemo(
-    () => {
-      void groundStationAssignmentVersion;
-      return groundStationRepository.assignedStationIds(workspaceId, groundOperationsOrbitId);
-    },
-    [groundOperationsOrbitId, groundStationAssignmentVersion, groundStationRepository, workspaceId],
-  );
-  const assignedGroundStations = useMemo(() => {
-    const assignedIds = new Set(assignedGroundStationIds);
-    return groundStations.filter((station) => assignedIds.has(station.id));
-  }, [assignedGroundStationIds, groundStations]);
+  const groundStationScenario = useGroundStationScenario(groundOperationsOrbitId);
+  const groundStations = groundStationScenario.stations;
+  const groundStationDisplay = groundStationScenario.display;
+  const assignedGroundStationIds = groundStationScenario.assignedStationIds;
+  const assignedGroundStations = groundStationScenario.assignedStations;
+  const groundStationRenderStations = groundStationScenario.renderStations;
   const visibleGroundStationIds = useMemo(() => {
-    if (!groundStationDisplay.contactLines || activeCommandModal !== "ground" || !effectiveGroundOperationsTargetSnapshot?.state) {
+    if (!groundStationDisplay.contactLines || !effectiveGroundOperationsTargetSnapshot?.state) {
       return [];
     }
     return assignedGroundStations
       .filter((station) => station.enabled)
       .filter((station) => groundStationVisibilityService.computeSample(station, effectiveGroundOperationsTargetSnapshot.state!)?.visible)
       .map((station) => station.id);
-  }, [activeCommandModal, assignedGroundStations, effectiveGroundOperationsTargetSnapshot, groundStationDisplay.contactLines, groundStationVisibilityService]);
-  const groundStationRenderStations = useMemo(() => (
-    activeCommandModal === "ground" && groundStationDisplay.stations
-      ? assignedGroundStations.filter((station) => station.enabled)
-      : []
-  ), [activeCommandModal, assignedGroundStations, groundStationDisplay.stations]);
-  useEffect(() => {
-    if (activeCommandModal !== "ground") {
-      return;
-    }
-    console.log("[GroundOps][Dashboard->Cesium] groundStations prop", {
-      activeOrbitId: groundOperationsOrbitId,
-      assignedStationCount: assignedGroundStations.length,
-      renderStationCount: groundStationRenderStations.length,
-      stationNames: groundStationRenderStations.map((station) => station.name),
-      stations: groundStationRenderStations.map((station) => ({
-        id: station.id,
-        name: station.name,
-        latitude: station.latitude,
-        longitude: station.longitude,
-        altitude: station.altitude,
-        enabled: station.enabled,
-      })),
-    });
-  }, [activeCommandModal, assignedGroundStations.length, groundOperationsOrbitId, groundStationRenderStations]);
+  }, [assignedGroundStations, effectiveGroundOperationsTargetSnapshot, groundStationDisplay.contactLines, groundStationVisibilityService]);
   const activeStoredMission = useMemo(() => {
     if (activeWorkspaceMissionId) {
       return missionLibrary.missions.find((item) => item.missionId === activeWorkspaceMissionId) ?? null;
@@ -2529,77 +2502,48 @@ export function OrbitalDashboard() {
     writeOrbitTemplateLibrary(next);
   }, []);
 
-  const reloadGroundStations = useCallback(() => {
-    setGroundStations(groundStationRepository.list(workspaceId));
-  }, [groundStationRepository, workspaceId]);
-
-  const refreshGroundStationAssignments = useCallback(() => {
-    setGroundStationAssignmentVersion((version) => version + 1);
-  }, []);
-
   const assignGroundStation = useCallback((stationId: string) => {
-    groundStationRepository.assignStation(workspaceId, groundOperationsOrbitId, stationId);
-    refreshGroundStationAssignments();
-  }, [groundOperationsOrbitId, groundStationRepository, refreshGroundStationAssignments, workspaceId]);
+    groundStationScenario.assignStation(groundOperationsOrbitId, stationId);
+  }, [groundOperationsOrbitId, groundStationScenario]);
 
   const unassignGroundStation = useCallback((stationId: string) => {
-    groundStationRepository.unassignStation(workspaceId, groundOperationsOrbitId, stationId);
-    refreshGroundStationAssignments();
-  }, [groundOperationsOrbitId, groundStationRepository, refreshGroundStationAssignments, workspaceId]);
+    groundStationScenario.unassignStation(groundOperationsOrbitId, stationId);
+  }, [groundOperationsOrbitId, groundStationScenario]);
 
   const createGroundStation = useCallback((station: Omit<GroundStation, "id">) => {
-    const saved = groundStationRepository.save({
-      ...station,
-      id: makeWorkspaceId("ground-station"),
-    });
-    groundStationRepository.assignStation(workspaceId, groundOperationsOrbitId, saved.id);
-    refreshGroundStationAssignments();
-    reloadGroundStations();
+    groundStationScenario.createStation(groundOperationsOrbitId, station);
     toast.success("Ground station created.");
-  }, [groundOperationsOrbitId, groundStationRepository, refreshGroundStationAssignments, reloadGroundStations, workspaceId]);
+  }, [groundOperationsOrbitId, groundStationScenario]);
 
   const updateGroundStation = useCallback((station: GroundStation) => {
-    groundStationRepository.save(station);
-    reloadGroundStations();
-  }, [groundStationRepository, reloadGroundStations]);
+    groundStationScenario.updateStation(station);
+  }, [groundStationScenario]);
 
   const deleteGroundStationAction = useCallback((station: GroundStation) => {
     if (!window.confirm(`Delete ground station "${station.name}"?`)) {
       return;
     }
-    groundStationRepository.delete(station.id);
-    refreshGroundStationAssignments();
-    reloadGroundStations();
+    groundStationScenario.deleteStation(station.id);
     toast.success("Ground station deleted.");
-  }, [groundStationRepository, refreshGroundStationAssignments, reloadGroundStations]);
+  }, [groundStationScenario]);
 
   const cloneGroundStation = useCallback((station: GroundStation) => {
-    const cloned = groundStationRepository.clone(station);
-    groundStationRepository.assignStation(workspaceId, groundOperationsOrbitId, cloned.id);
-    refreshGroundStationAssignments();
-    reloadGroundStations();
+    groundStationScenario.cloneStation(groundOperationsOrbitId, station);
     toast.success("Ground station cloned.");
-  }, [groundOperationsOrbitId, groundStationRepository, refreshGroundStationAssignments, reloadGroundStations, workspaceId]);
+  }, [groundOperationsOrbitId, groundStationScenario]);
 
   const importGroundStation = useCallback((catalogId: string) => {
-    const catalogStation = groundStationCatalog.find((station) => station.catalogId === catalogId);
-    if (!catalogStation) {
+    const imported = groundStationScenario.importStation(groundOperationsOrbitId, catalogId);
+    if (!imported) {
       return;
     }
-    const imported = groundStationRepository.importStation(workspaceId, catalogStation);
-    groundStationRepository.assignStation(workspaceId, groundOperationsOrbitId, imported.id);
-    refreshGroundStationAssignments();
-    reloadGroundStations();
     toast.success("Catalog station imported as editable copy.");
-  }, [groundOperationsOrbitId, groundStationRepository, refreshGroundStationAssignments, reloadGroundStations, workspaceId]);
+  }, [groundOperationsOrbitId, groundStationScenario]);
 
   const importGroundNetwork = useCallback((network: GroundStationNetwork) => {
-    const imported = groundStationRepository.importNetwork(workspaceId, network);
-    groundStationRepository.assignStations(workspaceId, groundOperationsOrbitId, imported.map((station) => station.id));
-    refreshGroundStationAssignments();
-    reloadGroundStations();
+    const imported = groundStationScenario.importNetwork(groundOperationsOrbitId, network);
     toast.success(`Imported ${imported.length} ${network} stations.`);
-  }, [groundOperationsOrbitId, groundStationRepository, refreshGroundStationAssignments, reloadGroundStations, workspaceId]);
+  }, [groundOperationsOrbitId, groundStationScenario]);
 
   const rememberOrbit = useCallback((orbit: StoredOrbit) => {
     setActiveWorkspaceOrbitId(orbit.orbitId);
@@ -3144,7 +3088,8 @@ export function OrbitalDashboard() {
     try {
       const orbit = await createManualOrbit(request);
       const satellite = manualOrbitToSatellite(orbit);
-      rememberOrbit(storedOrbitFromManualOrbit(request, orbit, satellite));
+      const storedOrbit = storedOrbitFromManualOrbit(request, orbit, satellite);
+      rememberOrbit(storedOrbit);
       clearActiveMissionState();
       setSatellites([satellite]);
       setSelectedSatelliteIds([satellite.id]);
@@ -4431,7 +4376,7 @@ export function OrbitalDashboard() {
             selectedConjunctionId={selectedConjunction?.event.id ?? null}
             showConjunctions={effectiveShowConjunctions}
             groundStations={groundStationRenderStations}
-            groundStationSatelliteState={activeCommandModal === "ground" ? effectiveGroundOperationsTargetSnapshot?.state ?? null : null}
+            groundStationSatelliteState={effectiveGroundOperationsTargetSnapshot?.state ?? null}
             visibleGroundStationIds={visibleGroundStationIds}
             showGroundStationFootprints={groundStationDisplay.footprints}
             showGroundStationContactLines={groundStationDisplay.contactLines}
@@ -4965,7 +4910,7 @@ export function OrbitalDashboard() {
             horizon={groundOpsHorizon}
             onHorizonChange={setGroundOpsHorizon}
             groundStationDisplay={groundStationDisplay}
-            onGroundStationDisplayChange={setGroundStationDisplay}
+            onGroundStationDisplayChange={groundStationScenario.setDisplay}
             onCreateStation={createGroundStation}
             onUpdateStation={updateGroundStation}
             onDeleteStation={deleteGroundStationAction}
