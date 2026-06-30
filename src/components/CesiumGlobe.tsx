@@ -914,17 +914,25 @@ export function CesiumGlobe({
       );
     });
 
-    const visibleGroundTrackSnapshots = orbitSnapshots.filter((item) => {
-      if (!item.satellite.visual.showGroundTrack) {
+    const canRenderGroundTrack = (snapshot: SatelliteSnapshot) => {
+      if (!snapshot.satellite.visual.showGroundTrack) {
         return false;
       }
-      return showAllOrbits || selectedSatelliteIds.includes(item.satellite.id);
-    });
+      return showAllOrbits || selectedSatelliteIds.includes(snapshot.satellite.id);
+    };
+    const visibleGroundTrackSnapshots = orbitSnapshots.filter(canRenderGroundTrack);
     if (
       groundOperationsGroundTrackSnapshot?.groundTrack?.length
-      && !visibleGroundTrackSnapshots.some((snapshot) => snapshot.satellite.id === groundOperationsGroundTrackSnapshot.satellite.id)
+      && canRenderGroundTrack(groundOperationsGroundTrackSnapshot)
     ) {
-      visibleGroundTrackSnapshots.push(groundOperationsGroundTrackSnapshot);
+      const existingIndex = visibleGroundTrackSnapshots.findIndex(
+        (snapshot) => snapshot.satellite.id === groundOperationsGroundTrackSnapshot.satellite.id,
+      );
+      if (existingIndex === -1) {
+        visibleGroundTrackSnapshots.push(groundOperationsGroundTrackSnapshot);
+      } else if (!visibleGroundTrackSnapshots[existingIndex].groundTrack?.length) {
+        visibleGroundTrackSnapshots[existingIndex] = groundOperationsGroundTrackSnapshot;
+      }
     }
 
     visibleGroundTrackSnapshots.forEach((snapshot) => {

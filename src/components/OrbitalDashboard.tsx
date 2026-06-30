@@ -4057,7 +4057,9 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
 
       const end = new Date(serverGroundTrackAnchorMs);
       const start = addMinutes(end, -groundTrackRange.pastMinutes);
-      const targetSatellites = satellites.filter((satellite) => selectedSatelliteIds.includes(satellite.id));
+      const targetSatellites = satellites.filter((satellite) => (
+        satellite.visual.showGroundTrack && (showAllOrbits || selectedSatelliteIds.includes(satellite.id))
+      ));
       const nextSnapshots: SatelliteSnapshot[] = [];
 
       for (const satellite of targetSatellites) {
@@ -4114,7 +4116,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       ignore = true;
       controller.abort();
     };
-  }, [activeDataSource, backendRequestsPaused, groundTrackRange.pastMinutes, groundTrackStepSec, manualOrbitId, pauseBackendRequests, satellites, selectedSatelliteIds, serverGroundTrackAnchorMs]);
+  }, [activeDataSource, backendRequestsPaused, groundTrackRange.pastMinutes, groundTrackStepSec, manualOrbitId, pauseBackendRequests, satellites, selectedSatelliteIds, serverGroundTrackAnchorMs, showAllOrbits]);
 
   useEffect(() => {
     let ignore = false;
@@ -4380,7 +4382,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
             visibleGroundStationIds={visibleGroundStationIds}
             showGroundStationFootprints={groundStationDisplay.footprints}
             showGroundStationContactLines={groundStationDisplay.contactLines}
-            groundOperationsGroundTrackSnapshot={groundStationRenderStations.length > 0 ? effectiveGroundOperationsTargetSnapshot : null}
+            groundOperationsGroundTrackSnapshot={effectiveGroundOperationsTargetSnapshot}
             onSelectConjunction={setSelectedConjunctionId}
             onSelectManeuver={setSelectedManeuverId}
             onToggleSatellite={toggleSatelliteSelection}
