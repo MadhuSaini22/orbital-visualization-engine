@@ -47,6 +47,7 @@ type CesiumGlobeProps = {
   visibleGroundStationIds?: string[];
   showGroundStationFootprints?: boolean;
   showGroundStationContactLines?: boolean;
+  groundOperationsGroundTrackSnapshot?: SatelliteSnapshot | null;
   onSelectConjunction: (conjunctionId: string) => void;
   onSelectManeuver: (maneuverId: string) => void;
   onToggleSatellite: (satelliteId: string) => void;
@@ -388,6 +389,16 @@ function getSnapshotColor(Cesium: CesiumModule, snapshot: SatelliteSnapshot, ind
   return Cesium.Color.fromCssColorString(snapshot.satellite.visual.color ?? palette[index % palette.length]);
 }
 
+function isFiniteStationCoordinate(station: GroundStation) {
+  return Number.isFinite(station.longitude)
+    && Number.isFinite(station.latitude)
+    && Number.isFinite(station.altitude)
+    && station.latitude >= -90
+    && station.latitude <= 90
+    && station.longitude >= -180
+    && station.longitude <= 180;
+}
+
 export function CesiumGlobe({
   snapshots,
   orbitSnapshots,
@@ -413,6 +424,7 @@ export function CesiumGlobe({
   visibleGroundStationIds = [],
   showGroundStationFootprints = true,
   showGroundStationContactLines = true,
+  groundOperationsGroundTrackSnapshot = null,
   onSelectConjunction,
   onSelectManeuver,
   onToggleSatellite,
@@ -431,7 +443,10 @@ export function CesiumGlobe({
   const maneuverEntitiesRef = useRef<Map<string, Entity>>(new Map());
   const maneuverGeometryEntitiesRef = useRef<Entity[]>([]);
   const conjunctionEntitiesRef = useRef<Entity[]>([]);
-  const groundStationEntitiesRef = useRef<Entity[]>([]);
+  const groundStationMarkerEntitiesRef = useRef<Map<string, Entity>>(new Map());
+  const groundStationFootprintEntitiesRef = useRef<Map<string, Entity>>(new Map());
+  const groundStationContactLineEntitiesRef = useRef<Entity[]>([]);
+  const groundStationDebugFlyToDoneRef = useRef(false);
   const latestSnapshotsRef = useRef<SatelliteSnapshot[]>(snapshots);
   const latestClockTickMsRef = useRef(0);
   const onClockTickRef = useRef(onClockTick);
@@ -554,6 +569,8 @@ export function CesiumGlobe({
     const entityMap = entitiesRef.current;
     const entityEphemerisKeyMap = entityEphemerisKeysRef.current;
     const maneuverEntityMap = maneuverEntitiesRef.current;
+    const groundStationMarkerEntityMap = groundStationMarkerEntitiesRef.current;
+    const groundStationFootprintEntityMap = groundStationFootprintEntitiesRef.current;
 
     async function boot() {
       if (!containerRef.current || viewerRef.current) {
@@ -693,7 +710,10 @@ export function CesiumGlobe({
       maneuverEntityMap.clear();
       maneuverGeometryEntitiesRef.current = [];
       conjunctionEntitiesRef.current = [];
-      groundStationEntitiesRef.current = [];
+      groundStationMarkerEntityMap.clear();
+      groundStationFootprintEntityMap.clear();
+      groundStationContactLineEntitiesRef.current = [];
+      groundStationDebugFlyToDoneRef.current = false;
       pathPrimitiveRef.current = null;
       hoverInfoRef.current = null;
       entityMap.clear();
@@ -902,6 +922,12 @@ export function CesiumGlobe({
       }
       return showAllOrbits || selectedSatelliteIds.includes(item.satellite.id);
     });
+    if (
+      groundOperationsGroundTrackSnapshot?.groundTrack?.length
+      && !visibleGroundTrackSnapshots.some((snapshot) => snapshot.satellite.id === groundOperationsGroundTrackSnapshot.satellite.id)
+    ) {
+      visibleGroundTrackSnapshots.push(groundOperationsGroundTrackSnapshot);
+    }
 
     visibleGroundTrackSnapshots.forEach((snapshot) => {
       const isSelected = selectedSatelliteIds.includes(snapshot.satellite.id);
@@ -942,7 +968,7 @@ export function CesiumGlobe({
       return next;
     });
     viewer.scene.requestRender();
-  }, [cameraLineScale, currentGmstRad, orbitSnapshots, selectedSatelliteIds, showAllOrbits, snapshots, viewerReady]);
+  }, [cameraLineScale, currentGmstRad, groundOperationsGroundTrackSnapshot, orbitSnapshots, selectedSatelliteIds, showAllOrbits, snapshots, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;
@@ -1170,96 +1196,540 @@ export function CesiumGlobe({
       return;
     }
 
-    groundStationEntitiesRef.current.forEach((entity) => viewer.entities.remove(entity));
-    groundStationEntitiesRef.current = [];
+    console.log("[GroundOps][Cesium] station render effect executing", {
+      receivedStationCount: groundStations.length,
+      stationNames: groundStations.map((station) => station.name),
+      showGroundStationFootprints,
+      viewerEntityCountAtStart: viewer.entities.values.length,
+      viewerReady,
+    });
+    groundStations.forEach((station) => {
+      console.log("[GroundOps][Cesium] received station", {
+        id: station.id,
+        name: station.name,
+        latitude: station.latitude,
+        longitude: station.longitude,
+        altitude: station.altitude,
+        finiteCoordinates: isFiniteStationCoordinate(station),
+      });
+    });
 
-    if (groundStations.length === 0) {
-      viewer.scene.requestRender();
-      return;
+    const activeStationIds = new Set(groundStations.filter(isFiniteStationCoordinate).map((station) => station.id));
+    for (const [stationId, entity] of groundStationMarkerEntitiesRef.current) {
+      if (!activeStationIds.has(stationId)) {
+        viewer.entities.remove(entity);
+        groundStationMarkerEntitiesRef.current.delete(stationId);
+      }
+    }
+    for (const [stationId, entity] of groundStationFootprintEntitiesRef.current) {
+      if (!showGroundStationFootprints || !activeStationIds.has(stationId)) {
+        viewer.entities.remove(entity);
+        groundStationFootprintEntitiesRef.current.delete(stationId);
+      }
     }
 
-    const visibleIds = new Set(visibleGroundStationIds);
-    const satellitePosition = groundStationSatelliteState
-      ? stateToSpaceCartesian(Cesium, groundStationSatelliteState)
-      : null;
     const earthRadiusMeters = 6371000;
     const satelliteAltitudeMeters = Math.max(100000, (groundStationSatelliteState?.altitudeKm ?? 650) * 1000);
     const horizonAngleRad = Math.acos(earthRadiusMeters / (earthRadiusMeters + satelliteAltitudeMeters));
     const footprintRadiusMeters = Math.max(350000, Math.min(3200000, earthRadiusMeters * horizonAngleRad));
 
     groundStations.forEach((station) => {
-      const isVisible = visibleIds.has(station.id);
-      const color = isVisible
-        ? Cesium.Color.fromCssColorString("#63e6be")
-        : Cesium.Color.fromCssColorString("#67e8f9");
+      if (!isFiniteStationCoordinate(station)) {
+        return;
+      }
+
+      const color = Cesium.Color.fromCssColorString("#67e8f9");
+      const isEquatorDebugStation = station.id === "station-equator";
       const surfacePosition = Cesium.Cartesian3.fromDegrees(station.longitude, station.latitude, 0);
       const markerPosition = Cesium.Cartesian3.fromDegrees(
         station.longitude,
         station.latitude,
-        Math.max(0, station.altitude) * 1000,
+        Math.max(0.05, station.altitude) * 1000,
       );
-
-      if (showGroundStationFootprints) {
-        groundStationEntitiesRef.current.push(viewer.entities.add({
-          id: `ground-station-${station.id}-footprint`,
-          name: `${station.name} visibility footprint`,
-          position: surfacePosition,
-          ellipse: {
-            semiMajorAxis: footprintRadiusMeters,
-            semiMinorAxis: footprintRadiusMeters,
-            material: color.withAlpha(isVisible ? 0.1 : 0.055),
-            outline: true,
-            outlineColor: color.withAlpha(isVisible ? 0.5 : 0.28),
-            height: 0,
+      const serializeCartesian2 = (value: import("cesium").Cartesian2 | undefined) => value
+        ? { x: value.x, y: value.y }
+        : null;
+      const serializeCartographic = (value: import("cesium").Cartographic) => ({
+        longitudeDeg: Cesium.Math.toDegrees(value.longitude),
+        latitudeDeg: Cesium.Math.toDegrees(value.latitude),
+        heightMeters: value.height,
+      });
+      const serializeViewRectangle = (value: import("cesium").Rectangle | undefined) => value
+        ? {
+            westDeg: Cesium.Math.toDegrees(value.west),
+            southDeg: Cesium.Math.toDegrees(value.south),
+            eastDeg: Cesium.Math.toDegrees(value.east),
+            northDeg: Cesium.Math.toDegrees(value.north),
+          }
+        : null;
+      const markerFrustumSnapshot = () => {
+        const position = marker?.position?.getValue(viewer.clock.currentTime) ?? markerPosition;
+        const canvasCoordinates = viewer.scene.cartesianToCanvasCoordinates(position);
+        return {
+          markerId: marker?.id ?? `ground-station-${station.id}-marker`,
+          stationId: station.id,
+          stationName: station.name,
+          position: {
+            x: position.x,
+            y: position.y,
+            z: position.z,
           },
-        }));
+          canvasCoordinates: serializeCartesian2(canvasCoordinates),
+          viewport: {
+            width: viewer.scene.canvas.clientWidth,
+            height: viewer.scene.canvas.clientHeight,
+          },
+          cameraPositionCartographic: serializeCartographic(viewer.camera.positionCartographic),
+          cameraHeadingDeg: Cesium.Math.toDegrees(viewer.camera.heading),
+          cameraPitchDeg: Cesium.Math.toDegrees(viewer.camera.pitch),
+          cameraRollDeg: Cesium.Math.toDegrees(viewer.camera.roll),
+          viewRectangle: serializeViewRectangle(viewer.camera.computeViewRectangle()),
+          sceneMode: viewer.scene.mode,
+        };
+      };
+      const markerPipelineSnapshot = (phase: string, entity: Entity, frameBeforeRequest?: number) => {
+        const summarizeCollection = (collection: unknown) => {
+          const collectionAny = collection as {
+            length?: number;
+            _pointPrimitives?: unknown[];
+            _labels?: unknown[];
+            _billboards?: unknown[];
+            get?: (index: number) => unknown;
+          } | undefined;
+          if (!collectionAny) {
+            return null;
+          }
+
+          const length = collectionAny.length
+            ?? collectionAny._pointPrimitives?.length
+            ?? collectionAny._labels?.length
+            ?? collectionAny._billboards?.length
+            ?? null;
+          const samples = typeof collectionAny.get === "function" && typeof length === "number"
+            ? Array.from({ length: Math.min(length, 6) }, (_, index) => {
+              const primitive = collectionAny.get?.(index) as {
+                show?: boolean;
+                clusterShow?: boolean;
+                id?: Entity | { id?: string } | string;
+                position?: { x?: number; y?: number; z?: number };
+                text?: string;
+                pixelSize?: number;
+              } | undefined;
+              const primitiveId = typeof primitive?.id === "string"
+                ? primitive.id
+                : primitive?.id && "id" in primitive.id
+                  ? primitive.id.id
+                  : undefined;
+              return {
+                index,
+                show: primitive?.show ?? null,
+                clusterShow: primitive?.clusterShow ?? null,
+                id: primitiveId ?? null,
+                matchesStationEntity: primitiveId === entity.id,
+                position: primitive?.position
+                  ? { x: primitive.position.x, y: primitive.position.y, z: primitive.position.z }
+                  : null,
+                text: primitive?.text ?? null,
+                pixelSize: primitive?.pixelSize ?? null,
+              };
+            })
+            : [];
+
+          return { length, samples };
+        };
+        const summarizePrimitiveTree = (collection: unknown, depth = 0): unknown => {
+          if (depth > 4 || !collection) {
+            return null;
+          }
+          const collectionAny = collection as {
+            constructor?: { name?: string };
+            length?: number;
+            _primitives?: unknown[];
+            _pointPrimitives?: unknown[];
+            _labels?: unknown[];
+            _billboards?: unknown[];
+          };
+          return {
+            type: collectionAny.constructor?.name ?? typeof collection,
+            length: collectionAny.length ?? collectionAny._primitives?.length ?? null,
+            pointPrimitiveCount: collectionAny._pointPrimitives?.length ?? null,
+            labelCount: collectionAny._labels?.length ?? null,
+            billboardCount: collectionAny._billboards?.length ?? null,
+            children: collectionAny._primitives?.map((primitive) => summarizePrimitiveTree(primitive, depth + 1)) ?? [],
+          };
+        };
+        const viewerAny = viewer as unknown as {
+          dataSourceDisplay?: {
+            defaultDataSource?: {
+              entities?: { values?: Entity[] };
+              _visualizers?: unknown[];
+              clustering?: unknown;
+            };
+          };
+          useDefaultRenderLoop?: boolean;
+        };
+        const sceneAny = viewer.scene as unknown as {
+          requestRenderMode?: boolean;
+          frameState?: { frameNumber?: number };
+          primitives?: { length?: number; _primitives?: unknown[] };
+          groundPrimitives?: { length?: number; _primitives?: unknown[] };
+        };
+        const defaultDataSourceAny = viewerAny.dataSourceDisplay?.defaultDataSource as {
+          entities?: { values?: Entity[] };
+          _visualizers?: unknown[];
+          clustering?: {
+            enabled?: boolean;
+            _clusterDirty?: boolean;
+            _pointCollection?: unknown;
+            _labelCollection?: unknown;
+            _billboardCollection?: unknown;
+            _clusterPointCollection?: unknown;
+            _clusterLabelCollection?: unknown;
+            _clusterBillboardCollection?: unknown;
+            _collectionIndicesByEntity?: Record<string, unknown>;
+          };
+        } | undefined;
+        const visualizers = defaultDataSourceAny?._visualizers ?? [];
+        const visualizerSummary = visualizers.map((visualizer) => {
+          const visualizerAny = visualizer as {
+            constructor?: { name?: string };
+            _entitiesToVisualize?: { values?: unknown[] };
+            _items?: {
+              values?: unknown[];
+              get?: (key: string) => unknown;
+              contains?: (key: string) => boolean;
+            } | Record<string, unknown>;
+            _entityHash?: Record<string, unknown>;
+            _subscriptions?: Record<string, unknown>;
+          };
+          const items = visualizerAny._items;
+          const itemForEntity = typeof items?.get === "function"
+            ? items.get(entity.id)
+            : visualizerAny._entityHash?.[entity.id]
+              ?? (items as Record<string, unknown> | undefined)?.[entity.id];
+          const itemValues = Array.isArray(items?.values) ? items.values : [];
+          return {
+            name: visualizerAny.constructor?.name ?? "UnknownVisualizer",
+            entitiesToVisualizeCount: visualizerAny._entitiesToVisualize?.values?.length ?? null,
+            itemCount: itemValues.length || Object.keys(visualizerAny._entityHash ?? {}).length || null,
+            tracksStationEntity: Boolean(itemForEntity),
+            stationItemShape: itemForEntity
+              ? Object.keys(itemForEntity as Record<string, unknown>)
+              : [],
+            subscriptionKeysMatchingStation: Object.keys(visualizerAny._subscriptions ?? {}).filter((key) => key.includes(station.id) || key.includes(entity.id)),
+          };
+        });
+        const clustering = defaultDataSourceAny?.clustering;
+        const collectionIndicesForEntity = clustering?._collectionIndicesByEntity?.[entity.id] ?? null;
+
+        console.log("[GroundOps][Cesium pipeline]", {
+          phase,
+          stationId: station.id,
+          entityId: entity.id,
+          useDefaultRenderLoop: viewerAny.useDefaultRenderLoop ?? null,
+          requestRenderMode: sceneAny.requestRenderMode ?? null,
+          frameBeforeRequest: frameBeforeRequest ?? null,
+          frameNumber: sceneAny.frameState?.frameNumber ?? null,
+          defaultDataSourceEntityCount: defaultDataSourceAny?.entities?.values?.length ?? null,
+          defaultDataSourceHasStationEntity: Boolean(
+            defaultDataSourceAny?.entities?.values?.some((item) => item.id === entity.id),
+          ),
+          visualizerSummary,
+          clustering: {
+            enabled: clustering?.enabled ?? null,
+            clusterDirty: clustering?._clusterDirty ?? null,
+            collectionIndicesForEntity,
+            pointCollection: summarizeCollection(clustering?._pointCollection),
+            labelCollection: summarizeCollection(clustering?._labelCollection),
+            billboardCollection: summarizeCollection(clustering?._billboardCollection),
+            clusterPointCollection: summarizeCollection(clustering?._clusterPointCollection),
+            clusterLabelCollection: summarizeCollection(clustering?._clusterLabelCollection),
+            clusterBillboardCollection: summarizeCollection(clustering?._clusterBillboardCollection),
+          },
+          primitivesLength: sceneAny.primitives?.length ?? null,
+          primitiveTypeNames: sceneAny.primitives?._primitives?.map((primitive) => (
+            (primitive as { constructor?: { name?: string } }).constructor?.name ?? typeof primitive
+          )) ?? null,
+          primitiveTree: summarizePrimitiveTree(sceneAny.primitives),
+          groundPrimitivesLength: sceneAny.groundPrimitives?.length ?? null,
+          groundPrimitiveTypeNames: sceneAny.groundPrimitives?._primitives?.map((primitive) => (
+            (primitive as { constructor?: { name?: string } }).constructor?.name ?? typeof primitive
+          )) ?? null,
+          groundPrimitiveTree: summarizePrimitiveTree(sceneAny.groundPrimitives),
+        });
+      };
+
+      let marker = groundStationMarkerEntitiesRef.current.get(station.id);
+      if (!marker) {
+        const frameBeforeStationCreation = (
+          (viewer.scene as unknown as { frameState?: { frameNumber?: number } }).frameState?.frameNumber ?? null
+        );
+        console.log("[GroundOps][Cesium] before marker add", {
+          id: `ground-station-${station.id}-marker`,
+          stationId: station.id,
+          position: {
+            x: markerPosition.x,
+            y: markerPosition.y,
+            z: markerPosition.z,
+          },
+          graphics: {
+            point: {
+              pixelSize: 10,
+              color: "#67e8f9",
+              outlineColor: "BLACK",
+              outlineWidth: 2,
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+            label: {
+              text: station.name,
+              showBackground: true,
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            },
+          },
+          viewerEntityCountBeforeAdd: viewer.entities.values.length,
+          frameNumberBeforeAdd: frameBeforeStationCreation,
+        });
+        marker = viewer.entities.add({
+          id: `ground-station-${station.id}-marker`,
+          name: station.name,
+          position: markerPosition,
+          point: {
+            pixelSize: isEquatorDebugStation ? 40 : 10,
+            color: isEquatorDebugStation ? Cesium.Color.YELLOW : color,
+            outlineColor: isEquatorDebugStation ? Cesium.Color.RED : Cesium.Color.BLACK,
+            outlineWidth: isEquatorDebugStation ? 8 : 2,
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+          billboard: isEquatorDebugStation
+            ? {
+                image: "https://cesium.com/downloads/cesiumjs/releases/1.120/Apps/SampleData/models/CesiumBalloon/CesiumBalloon.png",
+                scale: 2,
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
+              }
+            : undefined,
+          label: {
+            text: station.name,
+            font: isEquatorDebugStation ? "bold 32px sans-serif" : "700 11px monospace",
+            fillColor: isEquatorDebugStation ? Cesium.Color.YELLOW : color,
+            outlineColor: isEquatorDebugStation ? Cesium.Color.RED : Cesium.Color.BLACK,
+            outlineWidth: isEquatorDebugStation ? 6 : 2,
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            showBackground: true,
+            backgroundColor: isEquatorDebugStation ? Cesium.Color.BLUE : Cesium.Color.BLACK.withAlpha(0.72),
+            backgroundPadding: new Cesium.Cartesian2(6, 4),
+            pixelOffset: isEquatorDebugStation ? new Cesium.Cartesian2(0, -60) : new Cesium.Cartesian2(0, -20),
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          },
+        });
+        console.log("[GroundOps][Cesium] after marker add", {
+          returnedEntityId: marker.id,
+          viewerEntityCountAfterAdd: viewer.entities.values.length,
+          entityShow: marker.show,
+          hasPosition: Boolean(marker.position),
+          hasPoint: Boolean(marker.point),
+          hasBillboard: Boolean(marker.billboard),
+          hasLabel: Boolean(marker.label),
+          pointShow: marker.point?.show?.getValue(viewer.clock.currentTime) ?? null,
+          pointPixelSize: marker.point?.pixelSize?.getValue(viewer.clock.currentTime) ?? null,
+          pointDistanceDisplayCondition: marker.point?.distanceDisplayCondition?.getValue(viewer.clock.currentTime) ?? null,
+          pointHeightReference: marker.point?.heightReference?.getValue(viewer.clock.currentTime) ?? null,
+          labelShow: marker.label?.show?.getValue(viewer.clock.currentTime) ?? null,
+          labelDistanceDisplayCondition: marker.label?.distanceDisplayCondition?.getValue(viewer.clock.currentTime) ?? null,
+          positionAtClock: marker.position?.getValue(viewer.clock.currentTime) ?? null,
+        });
+        markerPipelineSnapshot("after entity add before requestRender", marker, frameBeforeStationCreation ?? undefined);
+        console.log("[GroundOps][Cesium frustum] marker after add", markerFrustumSnapshot());
+        groundStationMarkerEntitiesRef.current.set(station.id, marker);
+        if (isEquatorDebugStation && !groundStationDebugFlyToDoneRef.current) {
+          groundStationDebugFlyToDoneRef.current = true;
+          const createdMarker = marker;
+          const markerId = marker.id;
+          const frameBeforeExplicitRequest = (
+            (viewer.scene as unknown as { frameState?: { frameNumber?: number } }).frameState?.frameNumber ?? undefined
+          );
+          const removePostRender = viewer.scene.postRender.addEventListener(() => {
+            markerPipelineSnapshot("postRender after explicit requestRender", createdMarker, frameBeforeExplicitRequest);
+            removePostRender?.();
+          });
+          viewer.scene.requestRender();
+          markerPipelineSnapshot("immediately after explicit requestRender", createdMarker, frameBeforeExplicitRequest);
+          void viewer.flyTo(marker).then(() => {
+            console.log("[GroundOps][Cesium] flyTo first marker complete", {
+              markerId,
+              camera: serializeCartographic(viewer.camera.positionCartographic),
+              canvasCoordinates: serializeCartesian2(viewer.scene.cartesianToCanvasCoordinates(markerPosition)),
+            });
+          });
+        }
+      } else {
+        marker.name = station.name;
+        marker.position = new Cesium.ConstantPositionProperty(markerPosition);
+        if (marker.label) {
+          marker.label.text = new Cesium.ConstantProperty(station.name);
+        }
       }
 
-      groundStationEntitiesRef.current.push(viewer.entities.add({
-        id: `ground-station-${station.id}-marker`,
-        name: station.name,
-        position: markerPosition,
-        point: {
-          pixelSize: isVisible ? 13 : 10,
-          color,
-          outlineColor: Cesium.Color.BLACK,
-          outlineWidth: 2,
-          disableDepthTestDistance: Number.POSITIVE_INFINITY,
-        },
-        label: {
-          text: station.name,
-          font: "700 11px monospace",
-          fillColor: color,
-          outlineColor: Cesium.Color.BLACK,
-          outlineWidth: 2,
-          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-          showBackground: true,
-          backgroundColor: Cesium.Color.BLACK.withAlpha(0.72),
-          backgroundPadding: new Cesium.Cartesian2(6, 4),
-          pixelOffset: new Cesium.Cartesian2(0, -20),
-          disableDepthTestDistance: Number.POSITIVE_INFINITY,
-        },
-      }));
-
-      if (showGroundStationContactLines && isVisible && satellitePosition) {
-        groundStationEntitiesRef.current.push(viewer.entities.add({
-          id: `ground-station-${station.id}-access-link`,
-          name: `${station.name} access link`,
-          polyline: {
-            positions: [markerPosition, satellitePosition],
-            width: 2.4,
-            material: new Cesium.PolylineDashMaterialProperty({
-              color: color.withAlpha(0.9),
-              dashLength: 18,
-            }),
-            arcType: Cesium.ArcType.NONE,
-          },
-        }));
+      if (showGroundStationFootprints) {
+        let footprint = groundStationFootprintEntitiesRef.current.get(station.id);
+        if (!footprint) {
+          console.log("[GroundOps][Cesium] before footprint add", {
+            id: `ground-station-${station.id}-footprint`,
+            stationId: station.id,
+            position: {
+              x: surfacePosition.x,
+              y: surfacePosition.y,
+              z: surfacePosition.z,
+            },
+            footprintRadiusMeters,
+            viewerEntityCountBeforeAdd: viewer.entities.values.length,
+          });
+          footprint = viewer.entities.add({
+            id: `ground-station-${station.id}-footprint`,
+            name: `${station.name} visibility footprint`,
+            position: surfacePosition,
+            ellipse: {
+              semiMajorAxis: footprintRadiusMeters,
+              semiMinorAxis: footprintRadiusMeters,
+              material: color.withAlpha(0.055),
+              outline: true,
+              outlineColor: color.withAlpha(0.28),
+              height: 0,
+            },
+          });
+          console.log("[GroundOps][Cesium] after footprint add", {
+            returnedEntityId: footprint.id,
+            viewerEntityCountAfterAdd: viewer.entities.values.length,
+            entityShow: footprint.show,
+            hasPosition: Boolean(footprint.position),
+            hasEllipse: Boolean(footprint.ellipse),
+            ellipseShow: footprint.ellipse?.show?.getValue(viewer.clock.currentTime) ?? null,
+            ellipseHeightReference: footprint.ellipse?.heightReference?.getValue(viewer.clock.currentTime) ?? null,
+            ellipseDistanceDisplayCondition: footprint.ellipse?.distanceDisplayCondition?.getValue(viewer.clock.currentTime) ?? null,
+            positionAtClock: footprint.position?.getValue(viewer.clock.currentTime) ?? null,
+          });
+          groundStationFootprintEntitiesRef.current.set(station.id, footprint);
+        } else {
+          footprint.name = `${station.name} visibility footprint`;
+          footprint.position = new Cesium.ConstantPositionProperty(surfacePosition);
+          if (footprint.ellipse) {
+            footprint.ellipse.semiMajorAxis = new Cesium.ConstantProperty(footprintRadiusMeters);
+            footprint.ellipse.semiMinorAxis = new Cesium.ConstantProperty(footprintRadiusMeters);
+          }
+        }
       }
     });
 
     viewer.scene.requestRender();
-  }, [groundStations, groundStationSatelliteState, showGroundStationContactLines, showGroundStationFootprints, visibleGroundStationIds, viewerReady]);
+  }, [groundStations, groundStationSatelliteState?.altitudeKm, showGroundStationFootprints, viewerReady]);
+
+  useEffect(() => {
+    const Cesium = cesiumRef.current;
+    const viewer = viewerRef.current;
+    if (!viewerReady || !Cesium || !viewer) {
+      return;
+    }
+
+    const visibleIds = new Set(visibleGroundStationIds);
+    groundStations.forEach((station) => {
+      const marker = viewer.entities.getById(`ground-station-${station.id}-marker`);
+      if (!marker) {
+        return;
+      }
+      const isVisible = visibleIds.has(station.id);
+      const color = Cesium.Color.fromCssColorString(isVisible ? "#63e6be" : "#67e8f9");
+      if (marker.point) {
+        marker.point.pixelSize = new Cesium.ConstantProperty(isVisible ? 13 : 10);
+        marker.point.color = new Cesium.ConstantProperty(color);
+      }
+      if (marker.label) {
+        marker.label.fillColor = new Cesium.ConstantProperty(color);
+      }
+      const footprint = viewer.entities.getById(`ground-station-${station.id}-footprint`);
+      if (footprint?.ellipse) {
+        footprint.ellipse.material = new Cesium.ColorMaterialProperty(color.withAlpha(isVisible ? 0.1 : 0.055));
+        footprint.ellipse.outlineColor = new Cesium.ConstantProperty(color.withAlpha(isVisible ? 0.5 : 0.28));
+      }
+    });
+
+    viewer.scene.requestRender();
+  }, [groundStations, visibleGroundStationIds, viewerReady]);
+
+  useEffect(() => {
+    const Cesium = cesiumRef.current;
+    const viewer = viewerRef.current;
+    if (!viewerReady || !Cesium || !viewer) {
+      return;
+    }
+
+    console.log("[GroundOps][Cesium] contact line effect executing", {
+      receivedStationCount: groundStations.length,
+      visibleGroundStationIds,
+      showGroundStationContactLines,
+      hasSatelliteState: Boolean(groundStationSatelliteState),
+      viewerEntityCountAtStart: viewer.entities.values.length,
+    });
+    groundStationContactLineEntitiesRef.current.forEach((entity) => viewer.entities.remove(entity));
+    groundStationContactLineEntitiesRef.current = [];
+
+    if (!showGroundStationContactLines || !groundStationSatelliteState) {
+      viewer.scene.requestRender();
+      return;
+    }
+
+    const visibleIds = new Set(visibleGroundStationIds);
+    const satellitePosition = stateToSpaceCartesian(Cesium, groundStationSatelliteState);
+    groundStations.forEach((station) => {
+      if (!visibleIds.has(station.id) || !isFiniteStationCoordinate(station)) {
+        return;
+      }
+
+      const color = Cesium.Color.fromCssColorString("#63e6be");
+      const markerPosition = Cesium.Cartesian3.fromDegrees(
+        station.longitude,
+        station.latitude,
+        Math.max(0.05, station.altitude) * 1000,
+      );
+      console.log("[GroundOps][Cesium] before contact line add", {
+        id: `ground-station-${station.id}-access-link`,
+        stationId: station.id,
+        stationPosition: {
+          x: markerPosition.x,
+          y: markerPosition.y,
+          z: markerPosition.z,
+        },
+        satellitePosition: {
+          x: satellitePosition.x,
+          y: satellitePosition.y,
+          z: satellitePosition.z,
+        },
+        viewerEntityCountBeforeAdd: viewer.entities.values.length,
+      });
+      const contactLine = viewer.entities.add({
+        id: `ground-station-${station.id}-access-link`,
+        name: `${station.name} access link`,
+        polyline: {
+          positions: [markerPosition, satellitePosition],
+          width: 2.4,
+          material: new Cesium.PolylineDashMaterialProperty({
+            color: color.withAlpha(0.9),
+            dashLength: 18,
+          }),
+          arcType: Cesium.ArcType.NONE,
+        },
+      });
+      groundStationContactLineEntitiesRef.current.push(contactLine);
+      console.log("[GroundOps][Cesium] after contact line add", {
+        returnedEntityId: contactLine.id,
+        viewerEntityCountAfterAdd: viewer.entities.values.length,
+        entityShow: contactLine.show,
+        hasPolyline: Boolean(contactLine.polyline),
+        polylineShow: contactLine.polyline?.show?.getValue(viewer.clock.currentTime) ?? null,
+        polylineDistanceDisplayCondition: contactLine.polyline?.distanceDisplayCondition?.getValue(viewer.clock.currentTime) ?? null,
+      });
+    });
+
+    viewer.scene.requestRender();
+  }, [groundStations, groundStationSatelliteState, showGroundStationContactLines, visibleGroundStationIds, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;

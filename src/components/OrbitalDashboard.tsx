@@ -2021,6 +2021,7 @@ export function OrbitalDashboard() {
   const [activeWorkspaceMissionId, setActiveWorkspaceMissionId] = useState<string | null>(null);
   const groundStationRepository = useMemo(() => new GroundStationRepository(), []);
   const [groundStations, setGroundStations] = useState<GroundStation[]>(() => new GroundStationRepository().list(getOrCreateAnonymousWorkspaceId()));
+  const [groundStationAssignmentVersion, setGroundStationAssignmentVersion] = useState(0);
   const [groundOpsHorizon, setGroundOpsHorizon] = useState<GroundOpsHorizon>({ id: "SIX_HOURS", customHours: "6" });
   const [groundStationDisplay, setGroundStationDisplay] = useState<GroundStationDisplayOptions>({
     stations: true,
@@ -2276,15 +2277,6 @@ export function OrbitalDashboard() {
   }, [displayOrbitSnapshots, selectedSnapshot]);
   const effectiveGroundOperationsTargetSnapshot = groundOpsHorizonSnapshot ?? groundOperationsTargetSnapshot;
   const groundStationVisibilityService = useMemo(() => new VisibilityService(), []);
-  const visibleGroundStationIds = useMemo(() => {
-    if (!groundStationDisplay.contactLines || activeCommandModal !== "ground" || !effectiveGroundOperationsTargetSnapshot?.state) {
-      return [];
-    }
-    return groundStations
-      .filter((station) => station.enabled)
-      .filter((station) => groundStationVisibilityService.computeSample(station, effectiveGroundOperationsTargetSnapshot.state!)?.visible)
-      .map((station) => station.id);
-  }, [activeCommandModal, effectiveGroundOperationsTargetSnapshot, groundStationDisplay.contactLines, groundStationVisibilityService, groundStations]);
   const missionSubjectSnapshot = activeDataSource === "endpoint" && importedMissionSpacecraftId
     ? snapshots.find((item) => item.satellite.id === importedMissionSpacecraftId) ?? selectedSnapshot
     : selectedSnapshot;
@@ -2384,6 +2376,57 @@ export function OrbitalDashboard() {
     }
     return null;
   }, [activeWorkspaceOrbitId, manualOrbitId, orbitLibrary, selectedNoradId]);
+  const groundOperationsOrbitId = (
+    activeStoredOrbit?.orbitId
+    ?? activeWorkspaceOrbitId
+    ?? (manualOrbitId ? `manual-${manualOrbitId}` : null)
+    ?? (selectedNoradId ? `catalog-${selectedNoradId}` : null)
+    ?? (selectedSnapshot?.satellite.id ? `orbit-${selectedSnapshot.satellite.id}` : null)
+  );
+  const assignedGroundStationIds = useMemo(
+    () => {
+      void groundStationAssignmentVersion;
+      return groundStationRepository.assignedStationIds(workspaceId, groundOperationsOrbitId);
+    },
+    [groundOperationsOrbitId, groundStationAssignmentVersion, groundStationRepository, workspaceId],
+  );
+  const assignedGroundStations = useMemo(() => {
+    const assignedIds = new Set(assignedGroundStationIds);
+    return groundStations.filter((station) => assignedIds.has(station.id));
+  }, [assignedGroundStationIds, groundStations]);
+  const visibleGroundStationIds = useMemo(() => {
+    if (!groundStationDisplay.contactLines || activeCommandModal !== "ground" || !effectiveGroundOperationsTargetSnapshot?.state) {
+      return [];
+    }
+    return assignedGroundStations
+      .filter((station) => station.enabled)
+      .filter((station) => groundStationVisibilityService.computeSample(station, effectiveGroundOperationsTargetSnapshot.state!)?.visible)
+      .map((station) => station.id);
+  }, [activeCommandModal, assignedGroundStations, effectiveGroundOperationsTargetSnapshot, groundStationDisplay.contactLines, groundStationVisibilityService]);
+  const groundStationRenderStations = useMemo(() => (
+    activeCommandModal === "ground" && groundStationDisplay.stations
+      ? assignedGroundStations.filter((station) => station.enabled)
+      : []
+  ), [activeCommandModal, assignedGroundStations, groundStationDisplay.stations]);
+  useEffect(() => {
+    if (activeCommandModal !== "ground") {
+      return;
+    }
+    console.log("[GroundOps][Dashboard->Cesium] groundStations prop", {
+      activeOrbitId: groundOperationsOrbitId,
+      assignedStationCount: assignedGroundStations.length,
+      renderStationCount: groundStationRenderStations.length,
+      stationNames: groundStationRenderStations.map((station) => station.name),
+      stations: groundStationRenderStations.map((station) => ({
+        id: station.id,
+        name: station.name,
+        latitude: station.latitude,
+        longitude: station.longitude,
+        altitude: station.altitude,
+        enabled: station.enabled,
+      })),
+    });
+  }, [activeCommandModal, assignedGroundStations.length, groundOperationsOrbitId, groundStationRenderStations]);
   const activeStoredMission = useMemo(() => {
     if (activeWorkspaceMissionId) {
       return missionLibrary.missions.find((item) => item.missionId === activeWorkspaceMissionId) ?? null;
@@ -2490,14 +2533,30 @@ export function OrbitalDashboard() {
     setGroundStations(groundStationRepository.list(workspaceId));
   }, [groundStationRepository, workspaceId]);
 
+  const refreshGroundStationAssignments = useCallback(() => {
+    setGroundStationAssignmentVersion((version) => version + 1);
+  }, []);
+
+  const assignGroundStation = useCallback((stationId: string) => {
+    groundStationRepository.assignStation(workspaceId, groundOperationsOrbitId, stationId);
+    refreshGroundStationAssignments();
+  }, [groundOperationsOrbitId, groundStationRepository, refreshGroundStationAssignments, workspaceId]);
+
+  const unassignGroundStation = useCallback((stationId: string) => {
+    groundStationRepository.unassignStation(workspaceId, groundOperationsOrbitId, stationId);
+    refreshGroundStationAssignments();
+  }, [groundOperationsOrbitId, groundStationRepository, refreshGroundStationAssignments, workspaceId]);
+
   const createGroundStation = useCallback((station: Omit<GroundStation, "id">) => {
-    groundStationRepository.save({
+    const saved = groundStationRepository.save({
       ...station,
       id: makeWorkspaceId("ground-station"),
     });
+    groundStationRepository.assignStation(workspaceId, groundOperationsOrbitId, saved.id);
+    refreshGroundStationAssignments();
     reloadGroundStations();
     toast.success("Ground station created.");
-  }, [groundStationRepository, reloadGroundStations]);
+  }, [groundOperationsOrbitId, groundStationRepository, refreshGroundStationAssignments, reloadGroundStations, workspaceId]);
 
   const updateGroundStation = useCallback((station: GroundStation) => {
     groundStationRepository.save(station);
@@ -2509,31 +2568,38 @@ export function OrbitalDashboard() {
       return;
     }
     groundStationRepository.delete(station.id);
+    refreshGroundStationAssignments();
     reloadGroundStations();
     toast.success("Ground station deleted.");
-  }, [groundStationRepository, reloadGroundStations]);
+  }, [groundStationRepository, refreshGroundStationAssignments, reloadGroundStations]);
 
   const cloneGroundStation = useCallback((station: GroundStation) => {
-    groundStationRepository.clone(station);
+    const cloned = groundStationRepository.clone(station);
+    groundStationRepository.assignStation(workspaceId, groundOperationsOrbitId, cloned.id);
+    refreshGroundStationAssignments();
     reloadGroundStations();
     toast.success("Ground station cloned.");
-  }, [groundStationRepository, reloadGroundStations]);
+  }, [groundOperationsOrbitId, groundStationRepository, refreshGroundStationAssignments, reloadGroundStations, workspaceId]);
 
   const importGroundStation = useCallback((catalogId: string) => {
     const catalogStation = groundStationCatalog.find((station) => station.catalogId === catalogId);
     if (!catalogStation) {
       return;
     }
-    groundStationRepository.importStation(workspaceId, catalogStation);
+    const imported = groundStationRepository.importStation(workspaceId, catalogStation);
+    groundStationRepository.assignStation(workspaceId, groundOperationsOrbitId, imported.id);
+    refreshGroundStationAssignments();
     reloadGroundStations();
     toast.success("Catalog station imported as editable copy.");
-  }, [groundStationRepository, reloadGroundStations, workspaceId]);
+  }, [groundOperationsOrbitId, groundStationRepository, refreshGroundStationAssignments, reloadGroundStations, workspaceId]);
 
   const importGroundNetwork = useCallback((network: GroundStationNetwork) => {
     const imported = groundStationRepository.importNetwork(workspaceId, network);
+    groundStationRepository.assignStations(workspaceId, groundOperationsOrbitId, imported.map((station) => station.id));
+    refreshGroundStationAssignments();
     reloadGroundStations();
     toast.success(`Imported ${imported.length} ${network} stations.`);
-  }, [groundStationRepository, reloadGroundStations, workspaceId]);
+  }, [groundOperationsOrbitId, groundStationRepository, refreshGroundStationAssignments, reloadGroundStations, workspaceId]);
 
   const rememberOrbit = useCallback((orbit: StoredOrbit) => {
     setActiveWorkspaceOrbitId(orbit.orbitId);
@@ -4364,11 +4430,12 @@ export function OrbitalDashboard() {
             conjunctionSnapshots={conjunctionSnapshots}
             selectedConjunctionId={selectedConjunction?.event.id ?? null}
             showConjunctions={effectiveShowConjunctions}
-            groundStations={activeCommandModal === "ground" && groundStationDisplay.stations ? groundStations.filter((station) => station.enabled) : []}
+            groundStations={groundStationRenderStations}
             groundStationSatelliteState={activeCommandModal === "ground" ? effectiveGroundOperationsTargetSnapshot?.state ?? null : null}
             visibleGroundStationIds={visibleGroundStationIds}
             showGroundStationFootprints={groundStationDisplay.footprints}
             showGroundStationContactLines={groundStationDisplay.contactLines}
+            groundOperationsGroundTrackSnapshot={groundStationRenderStations.length > 0 ? effectiveGroundOperationsTargetSnapshot : null}
             onSelectConjunction={setSelectedConjunctionId}
             onSelectManeuver={setSelectedManeuverId}
             onToggleSatellite={toggleSatelliteSelection}
@@ -4892,6 +4959,8 @@ export function OrbitalDashboard() {
             workspaceId={workspaceId}
             targetSnapshot={effectiveGroundOperationsTargetSnapshot}
             stations={groundStations}
+            assignedStationIds={assignedGroundStationIds}
+            activeOrbitId={groundOperationsOrbitId}
             simulationTimeIso={simTime.toISOString()}
             horizon={groundOpsHorizon}
             onHorizonChange={setGroundOpsHorizon}
@@ -4903,6 +4972,8 @@ export function OrbitalDashboard() {
             onCloneStation={cloneGroundStation}
             onImportStation={importGroundStation}
             onImportNetwork={importGroundNetwork}
+            onAssignStation={assignGroundStation}
+            onUnassignStation={unassignGroundStation}
           />
         </CommandModal>
       )}

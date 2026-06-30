@@ -3,15 +3,26 @@ import { groundStationCatalog } from "@/data/groundStationCatalog";
 import { makeWorkspaceId } from "@/services/workspaceStorage";
 
 const GROUND_STATION_LIBRARY_KEY = "ground-station-library-v1";
+const GROUND_STATION_ASSIGNMENTS_KEY = "ground-station-assignments-v1";
 
 type GroundStationLibraryState = {
   schemaVersion: 1;
   stations: GroundStation[];
 };
 
+type GroundStationAssignmentState = {
+  schemaVersion: 1;
+  assignments: Record<string, string[]>;
+};
+
 const emptyLibrary: GroundStationLibraryState = {
   schemaVersion: 1,
   stations: [],
+};
+
+const emptyAssignments: GroundStationAssignmentState = {
+  schemaVersion: 1,
+  assignments: {},
 };
 
 function canUseLocalStorage() {
@@ -42,6 +53,39 @@ function writeLibrary(state: GroundStationLibraryState) {
     return;
   }
   window.localStorage.setItem(GROUND_STATION_LIBRARY_KEY, JSON.stringify(state));
+}
+
+function assignmentKey(workspaceId: string, orbitId: string) {
+  return `${workspaceId}:${orbitId}`;
+}
+
+function readAssignments(): GroundStationAssignmentState {
+  if (!canUseLocalStorage()) {
+    return emptyAssignments;
+  }
+  const raw = window.localStorage.getItem(GROUND_STATION_ASSIGNMENTS_KEY);
+  if (!raw) {
+    return emptyAssignments;
+  }
+  try {
+    const parsed = JSON.parse(raw) as Partial<GroundStationAssignmentState>;
+    const entries = Object.entries(parsed.assignments ?? {})
+      .filter(([key, stationIds]) => typeof key === "string" && Array.isArray(stationIds))
+      .map(([key, stationIds]) => [key, stationIds.filter((id): id is string => typeof id === "string")] as const);
+    return {
+      schemaVersion: 1,
+      assignments: Object.fromEntries(entries),
+    };
+  } catch {
+    return emptyAssignments;
+  }
+}
+
+function writeAssignments(state: GroundStationAssignmentState) {
+  if (!canUseLocalStorage()) {
+    return;
+  }
+  window.localStorage.setItem(GROUND_STATION_ASSIGNMENTS_KEY, JSON.stringify(state));
 }
 
 function isGroundStation(value: unknown): value is GroundStation {
@@ -76,6 +120,65 @@ export class GroundStationRepository {
     return readLibrary().stations.filter((station) => station.workspaceId === workspaceId);
   }
 
+  assignedStationIds(workspaceId: string, orbitId: string | null) {
+    if (!orbitId) {
+      return [];
+    }
+    return readAssignments().assignments[assignmentKey(workspaceId, orbitId)] ?? [];
+  }
+
+  assignStation(workspaceId: string, orbitId: string | null, stationId: string) {
+    if (!orbitId) {
+      return [];
+    }
+    const state = readAssignments();
+    const key = assignmentKey(workspaceId, orbitId);
+    const nextIds = [...new Set([...(state.assignments[key] ?? []), stationId])];
+    const nextState = {
+      schemaVersion: 1 as const,
+      assignments: {
+        ...state.assignments,
+        [key]: nextIds,
+      },
+    };
+    writeAssignments(nextState);
+    return nextIds;
+  }
+
+  assignStations(workspaceId: string, orbitId: string | null, stationIds: string[]) {
+    if (!orbitId || stationIds.length === 0) {
+      return this.assignedStationIds(workspaceId, orbitId);
+    }
+    const state = readAssignments();
+    const key = assignmentKey(workspaceId, orbitId);
+    const nextIds = [...new Set([...(state.assignments[key] ?? []), ...stationIds])];
+    writeAssignments({
+      schemaVersion: 1,
+      assignments: {
+        ...state.assignments,
+        [key]: nextIds,
+      },
+    });
+    return nextIds;
+  }
+
+  unassignStation(workspaceId: string, orbitId: string | null, stationId: string) {
+    if (!orbitId) {
+      return [];
+    }
+    const state = readAssignments();
+    const key = assignmentKey(workspaceId, orbitId);
+    const nextIds = (state.assignments[key] ?? []).filter((id) => id !== stationId);
+    writeAssignments({
+      schemaVersion: 1,
+      assignments: {
+        ...state.assignments,
+        [key]: nextIds,
+      },
+    });
+    return nextIds;
+  }
+
   save(station: GroundStation) {
     const library = readLibrary();
     const stations = [
@@ -88,9 +191,19 @@ export class GroundStationRepository {
 
   delete(stationId: string) {
     const library = readLibrary();
+    const assignments = readAssignments();
     writeLibrary({
       schemaVersion: 1,
       stations: library.stations.filter((station) => station.id !== stationId),
+    });
+    writeAssignments({
+      schemaVersion: 1,
+      assignments: Object.fromEntries(
+        Object.entries(assignments.assignments).map(([key, stationIds]) => [
+          key,
+          stationIds.filter((id) => id !== stationId),
+        ]),
+      ),
     });
   }
 

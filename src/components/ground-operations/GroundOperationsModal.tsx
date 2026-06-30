@@ -53,6 +53,8 @@ export function GroundOperationsModalContent({
   workspaceId,
   targetSnapshot,
   stations,
+  assignedStationIds,
+  activeOrbitId,
   simulationTimeIso,
   horizon,
   onHorizonChange,
@@ -64,10 +66,14 @@ export function GroundOperationsModalContent({
   onCloneStation,
   onImportStation,
   onImportNetwork,
+  onAssignStation,
+  onUnassignStation,
 }: {
   workspaceId: string;
   targetSnapshot: SatelliteSnapshot | null;
   stations: GroundStation[];
+  assignedStationIds: string[];
+  activeOrbitId: string | null;
   simulationTimeIso: string;
   horizon: GroundOpsHorizon;
   onHorizonChange: (horizon: GroundOpsHorizon) => void;
@@ -79,15 +85,22 @@ export function GroundOperationsModalContent({
   onCloneStation: (station: GroundStation) => void;
   onImportStation: (catalogId: string) => void;
   onImportNetwork: (network: GroundStationNetwork) => void;
+  onAssignStation: (stationId: string) => void;
+  onUnassignStation: (stationId: string) => void;
 }) {
   const [selectedStationId, setSelectedStationId] = useState(stations[0]?.id ?? "");
   const [draft, setDraft] = useState<GroundStationDraft>(defaultDraft);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const service = useMemo(() => new GroundOperationsService(), []);
+  const assignedStationIdSet = useMemo(() => new Set(assignedStationIds), [assignedStationIds]);
+  const assignedStations = useMemo(
+    () => stations.filter((station) => assignedStationIdSet.has(station.id)),
+    [assignedStationIdSet, stations],
+  );
   const selectedStation = stations.find((station) => station.id === selectedStationId) ?? stations[0] ?? null;
   const analysis: GroundOperationsAnalysis | null = useMemo(() => (
-    targetSnapshot ? service.analyze(targetSnapshot, stations, simulationTimeIso) : null
-  ), [service, simulationTimeIso, stations, targetSnapshot]);
+    targetSnapshot ? service.analyze(targetSnapshot, assignedStations, simulationTimeIso) : null
+  ), [assignedStations, service, simulationTimeIso, targetSnapshot]);
   const horizonOption = groundOpsHorizonOptions.find((option) => option.id === horizon.id) ?? groundOpsHorizonOptions[2];
   const horizonLabel = horizon.id === "CUSTOM"
     ? `${horizon.customHours || "Custom"} Hours`
@@ -181,8 +194,8 @@ export function GroundOperationsModalContent({
               />
             </div>
             <div className="grid grid-cols-3 gap-2 text-center sm:col-span-2">
-              <GroundOpsMetric label="Stations" value={String(stations.length)} />
-              <GroundOpsMetric label="Enabled" value={String(stations.filter((station) => station.enabled).length)} />
+              <GroundOpsMetric label="Library" value={String(stations.length)} />
+              <GroundOpsMetric label="Assigned" value={String(assignedStations.length)} />
               <GroundOpsMetric label="Samples" value={String(analysis?.sampleCount ?? 0)} />
             </div>
           </div>
@@ -199,6 +212,9 @@ export function GroundOperationsModalContent({
         {targetSnapshot && (
           <>
             <MissionContactSummary summary={contactSummary} />
+            {analysis && contactSummary.totalPasses === 0 && (
+              <NoContactAnalysisSummary stationSummaries={analysis.stationSummaries} horizonLabel={horizonLabel} />
+            )}
             <div className="grid gap-4 xl:grid-cols-[1fr_1fr]">
               <StationRankingPanel rankings={stationRankings} />
               <CoverageSummaryCard summary={contactSummary} />
@@ -206,7 +222,7 @@ export function GroundOperationsModalContent({
           </>
         )}
 
-        <GroundOpsPanel title="Ground Stations">
+        <GroundOpsPanel title="Ground Station Library">
           <div className="grid gap-4 lg:grid-cols-[1fr_1.2fr]">
             <div className="min-w-0">
               <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
@@ -245,7 +261,9 @@ export function GroundOperationsModalContent({
               <div className="mt-4 grid gap-2">
                 {stations.length === 0 ? (
                   <p className="border border-white/10 bg-black/25 p-3 text-sm text-zinc-400">No workspace stations yet. Import a network or create a custom station.</p>
-                ) : stations.map((station) => (
+                ) : stations.map((station) => {
+                  const isAssigned = assignedStationIdSet.has(station.id);
+                  return (
                   <button
                     key={station.id}
                     type="button"
@@ -257,12 +275,12 @@ export function GroundOperationsModalContent({
                         <span className="block text-sm font-semibold text-white">{station.name}</span>
                         <span className="mt-1 block font-mono text-[10px] uppercase text-zinc-500">{station.network} / {station.source}</span>
                       </span>
-                      <span className={`border px-2 py-1 font-mono text-[9px] uppercase ${station.enabled ? "border-emerald-300/40 text-emerald-200" : "border-white/10 text-zinc-500"}`}>
-                        {station.enabled ? "Enabled" : "Off"}
+                      <span className={`border px-2 py-1 font-mono text-[9px] uppercase ${isAssigned ? "border-cyan-300/45 text-cyan-100" : "border-white/10 text-zinc-500"}`}>
+                        {isAssigned ? "Assigned" : "Library"}
                       </span>
                     </div>
                   </button>
-                ))}
+                );})}
               </div>
             </div>
 
@@ -280,10 +298,18 @@ export function GroundOperationsModalContent({
                     </select>
                   </GroundOpsField>
                   <div className="flex flex-wrap gap-2 sm:col-span-2">
+                    {assignedStationIdSet.has(selectedStation.id) ? (
+                      <button type="button" onClick={() => onUnassignStation(selectedStation.id)} className="workspace-action">Remove From Orbit</button>
+                    ) : (
+                      <button type="button" onClick={() => onAssignStation(selectedStation.id)} className="workspace-action">Assign To Orbit</button>
+                    )}
                     <button type="button" onClick={() => patchSelectedStation({ enabled: !selectedStation.enabled })} className="workspace-action">{selectedStation.enabled ? "Disable" : "Enable"}</button>
                     <button type="button" onClick={() => onCloneStation(selectedStation)} className="workspace-action">Clone</button>
                     <button type="button" onClick={() => onDeleteStation(selectedStation)} className="workspace-action danger">Delete</button>
                   </div>
+                  <p className="text-xs text-zinc-500 sm:col-span-2">
+                    {activeOrbitId ? `Assignment target: ${activeOrbitId}` : "Load an orbit to assign stations for analysis."}
+                  </p>
                 </div>
               )}
               {!selectedStation && (
@@ -300,17 +326,17 @@ export function GroundOperationsModalContent({
         </GroundOpsPanel>
 
         <GroundOpsPanel title="Pass Prediction">
-          <PassPredictionPanel stationSummaries={analysis?.stationSummaries ?? []} horizonLabel={horizonLabel} />
+          <PassPredictionPanel stationSummaries={analysis?.stationSummaries ?? []} />
         </GroundOpsPanel>
 
         <GroundOpsPanel title="Mission Contact Timeline">
-          <ContactTimeline windows={upcomingWindows} stationSummaries={analysis?.stationSummaries ?? []} horizonLabel={horizonLabel} />
+          <ContactTimeline windows={upcomingWindows} stationSummaries={analysis?.stationSummaries ?? []} />
         </GroundOpsPanel>
       </div>
 
       <div className="shrink-0 border border-cyan-300/20 bg-[#071016]/95 p-3">
         <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-zinc-400">
-          <span>{stations.filter((station) => station.enabled).length} enabled stations</span>
+          <span>{assignedStations.filter((station) => station.enabled).length} enabled assigned stations / {stations.length} library stations</span>
           <span>Generated {analysis ? compactIsoUtc(analysis.generatedAt) : "--"}</span>
         </div>
       </div>
@@ -585,30 +611,45 @@ function stationStatusClass(summary: GroundOperationsAnalysis["stationSummaries"
   return "border-white/10 text-zinc-500";
 }
 
-function NoAccessReason({ summary, horizonLabel }: { summary: GroundOperationsAnalysis["stationSummaries"][number]; horizonLabel: string }) {
-  const currentElevation = summary.current?.elevationDeg;
-  const maxElevation = summary.maxElevationDeg;
+function NoContactAnalysisSummary({
+  stationSummaries,
+  horizonLabel,
+}: {
+  stationSummaries: GroundOperationsAnalysis["stationSummaries"];
+  horizonLabel: string;
+}) {
+  const bestCandidate = stationSummaries
+    .filter((summary) => summary.maxElevationDeg !== null)
+    .toSorted((a, b) => (b.maxElevationDeg ?? Number.NEGATIVE_INFINITY) - (a.maxElevationDeg ?? Number.NEGATIVE_INFINITY))[0] ?? null;
+
+  if (stationSummaries.length === 0) {
+    return (
+      <GroundOpsPanel title="Analysis Summary">
+        <p className="border border-white/10 bg-black/25 p-3 text-sm text-zinc-400">Assign at least one station to this orbit to run contact analysis.</p>
+      </GroundOpsPanel>
+    );
+  }
+
   return (
-    <div className="border border-amber-300/25 bg-amber-300/[0.045] p-4 text-sm text-zinc-300">
-      <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-amber-100">No Contacts Found</p>
-      <div className="mt-3 grid gap-2 sm:grid-cols-2">
-        <GroundOpsMetric label="Current Elevation" value={`${formatNumber(currentElevation, 1)} deg`} />
-        <GroundOpsMetric label="Maximum Elevation" value={`${formatNumber(maxElevation ?? undefined, 1)} deg`} />
+    <GroundOpsPanel title="Analysis Summary">
+      <div className="border border-amber-300/25 bg-amber-300/[0.045] p-4">
+        <p className="text-sm text-zinc-200">No contacts found in selected {horizonLabel.toLowerCase()} horizon.</p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <GroundOpsMetric label="Best Candidate Station" value={bestCandidate?.station.name ?? "--"} />
+          <GroundOpsMetric label="Maximum Elevation" value={bestCandidate?.maxElevationDeg === null || !bestCandidate ? "--" : `${formatNumber(bestCandidate.maxElevationDeg, 1)} deg`} />
+        </div>
+        <ul className="mt-3 list-disc space-y-1 pl-4 text-xs text-amber-50/85">
+          <li>Increase analysis horizon</li>
+          <li>Reduce minimum elevation threshold</li>
+          <li>Add stations closer to orbit ground track</li>
+        </ul>
       </div>
-      <p className="mt-3 text-xs text-zinc-400">No pass crosses the station minimum elevation in the selected {horizonLabel.toLowerCase()} horizon.</p>
-      <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-amber-50/85">
-        <li>Increase analysis horizon</li>
-        <li>Add stations closer to the orbit ground track</li>
-        <li>Reduce minimum elevation threshold</li>
-      </ul>
-    </div>
+    </GroundOpsPanel>
   );
 }
 
 function AccessWindowTable({
   windows,
-  stationSummaries = [],
-  horizonLabel = "",
   compact = false,
 }: {
   windows: GroundOperationsAnalysis["accessWindows"];
@@ -618,13 +659,7 @@ function AccessWindowTable({
 }) {
   if (windows.length === 0) {
     return (
-      <div className="grid gap-3">
-        {stationSummaries.length === 0 ? (
-          <p className="border border-white/10 bg-black/25 p-3 text-sm text-zinc-400">Enable at least one station to generate access windows.</p>
-        ) : stationSummaries.map((summary) => (
-          <NoAccessReason key={summary.station.id} summary={summary} horizonLabel={horizonLabel} />
-        ))}
-      </div>
+      <p className="border border-white/10 bg-black/25 p-3 text-sm text-zinc-400">No access windows in the selected horizon.</p>
     );
   }
   return (
@@ -657,10 +692,8 @@ function AccessWindowTable({
 
 function PassPredictionPanel({
   stationSummaries,
-  horizonLabel,
 }: {
   stationSummaries: GroundOperationsAnalysis["stationSummaries"];
-  horizonLabel: string;
 }) {
   if (stationSummaries.length === 0) {
     return <p className="border border-white/10 bg-black/25 p-3 text-sm text-zinc-400">Enable at least one station to predict passes.</p>;
@@ -695,7 +728,11 @@ function PassPredictionPanel({
           ) : (
             <div className="mt-4">
               <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.12em] text-zinc-500">No pass in selected horizon</p>
-              <NoAccessReason summary={summary} horizonLabel={horizonLabel} />
+              <div className="grid gap-3 sm:grid-cols-3">
+                <GroundOpsMetric label="Current Elevation" value={`${formatNumber(summary.current?.elevationDeg, 1)} deg`} />
+                <GroundOpsMetric label="Current Range" value={`${formatNumber(summary.current?.rangeKm, 0)} km`} />
+                <GroundOpsMetric label="Max Elevation" value={`${formatNumber(summary.maxElevationDeg ?? undefined, 1)} deg`} />
+              </div>
             </div>
           )}
         </div>
@@ -707,22 +744,12 @@ function PassPredictionPanel({
 function ContactTimeline({
   windows,
   stationSummaries,
-  horizonLabel,
 }: {
   windows: GroundOperationsAnalysis["accessWindows"];
   stationSummaries: GroundOperationsAnalysis["stationSummaries"];
-  horizonLabel: string;
 }) {
   if (windows.length === 0) {
-    return (
-      <div className="grid gap-3">
-        {stationSummaries.length === 0 ? (
-          <p className="border border-white/10 bg-black/25 p-3 text-sm text-zinc-400">Enable at least one station to generate a contact timeline.</p>
-        ) : stationSummaries.map((summary) => (
-          <NoAccessReason key={summary.station.id} summary={summary} horizonLabel={horizonLabel} />
-        ))}
-      </div>
-    );
+    return <p className="border border-white/10 bg-black/25 p-3 text-sm text-zinc-400">{stationSummaries.length === 0 ? "Assign at least one station to generate a contact timeline." : "No AOS/LOS events in the selected horizon."}</p>;
   }
 
   const events = windows.flatMap((window) => [
