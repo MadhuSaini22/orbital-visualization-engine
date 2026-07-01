@@ -134,7 +134,7 @@ import type {
   StoredWorkspace,
 } from "@/services/workspaceStorage";
 import { StateCacheService } from "@/services/StateCacheService";
-import { VisibilityService } from "@/services/VisibilityService";
+import { GroundStationVisualizationService } from "@/services/GroundStationVisualizationService";
 
 const CesiumGlobe = dynamic(
   () => import("@/components/CesiumGlobe").then((mod) => mod.CesiumGlobe),
@@ -2278,7 +2278,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     };
   }, [displayOrbitSnapshots, selectedSnapshot]);
   const effectiveGroundOperationsTargetSnapshot = groundOpsHorizonSnapshot ?? groundOperationsTargetSnapshot;
-  const groundStationVisibilityService = useMemo(() => new VisibilityService(), []);
+  const groundStationVisualizationService = useMemo(() => new GroundStationVisualizationService(), []);
   const missionSubjectSnapshot = activeDataSource === "endpoint" && importedMissionSpacecraftId
     ? snapshots.find((item) => item.satellite.id === importedMissionSpacecraftId) ?? selectedSnapshot
     : selectedSnapshot;
@@ -2390,16 +2390,13 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const groundStationDisplay = groundStationScenario.display;
   const assignedGroundStationIds = groundStationScenario.assignedStationIds;
   const assignedGroundStations = groundStationScenario.assignedStations;
-  const groundStationRenderStations = groundStationScenario.renderStations;
-  const visibleGroundStationIds = useMemo(() => {
-    if (!groundStationDisplay.contactLines || !effectiveGroundOperationsTargetSnapshot?.state) {
-      return [];
-    }
-    return assignedGroundStations
-      .filter((station) => station.enabled)
-      .filter((station) => groundStationVisibilityService.computeSample(station, effectiveGroundOperationsTargetSnapshot.state!)?.visible)
-      .map((station) => station.id);
-  }, [assignedGroundStations, effectiveGroundOperationsTargetSnapshot, groundStationDisplay.contactLines, groundStationVisibilityService]);
+  const groundStationVisualization = useMemo(() => (
+    groundStationVisualizationService.buildModel(
+      assignedGroundStations,
+      groundStationDisplay,
+      groundOperationsTargetSnapshot,
+    )
+  ), [assignedGroundStations, groundOperationsTargetSnapshot, groundStationDisplay, groundStationVisualizationService]);
   const activeStoredMission = useMemo(() => {
     if (activeWorkspaceMissionId) {
       return missionLibrary.missions.find((item) => item.missionId === activeWorkspaceMissionId) ?? null;
@@ -4377,12 +4374,8 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
             conjunctionSnapshots={conjunctionSnapshots}
             selectedConjunctionId={selectedConjunction?.event.id ?? null}
             showConjunctions={effectiveShowConjunctions}
-            groundStations={groundStationRenderStations}
-            groundStationSatelliteState={effectiveGroundOperationsTargetSnapshot?.state ?? null}
-            visibleGroundStationIds={visibleGroundStationIds}
-            showGroundStationFootprints={groundStationDisplay.footprints}
-            showGroundStationContactLines={groundStationDisplay.contactLines}
-            groundOperationsGroundTrackSnapshot={effectiveGroundOperationsTargetSnapshot}
+            groundStationVisualization={groundStationVisualization}
+            groundOperationsGroundTrackSnapshot={groundOperationsTargetSnapshot}
             onSelectConjunction={setSelectedConjunctionId}
             onSelectManeuver={setSelectedManeuverId}
             onToggleSatellite={toggleSatelliteSelection}

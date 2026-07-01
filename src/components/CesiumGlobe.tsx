@@ -4,9 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import type { OrbitState, RangeMeasurement, SatelliteSnapshot } from "@/domain/orbit";
 import type { ConjunctionSnapshot } from "@/domain/conjunction";
 import { getConjunctionTone } from "@/domain/conjunction";
-import type { GroundStation } from "@/domain/groundOperations";
 import type { ManeuverSnapshot } from "@/domain/maneuver";
 import { getManeuverTone } from "@/domain/maneuver";
+import type { GroundStationVisualizationModel } from "@/domain/visualization";
 import { splitGroundTrackByLongitudeWrap } from "@/geometry/groundTrack";
 
 type CesiumModule = typeof import("cesium");
@@ -42,11 +42,7 @@ type CesiumGlobeProps = {
   conjunctionSnapshots: ConjunctionSnapshot[];
   selectedConjunctionId: string | null;
   showConjunctions: boolean;
-  groundStations?: GroundStation[];
-  groundStationSatelliteState?: OrbitState | null;
-  visibleGroundStationIds?: string[];
-  showGroundStationFootprints?: boolean;
-  showGroundStationContactLines?: boolean;
+  groundStationVisualization?: GroundStationVisualizationModel;
   groundOperationsGroundTrackSnapshot?: SatelliteSnapshot | null;
   onSelectConjunction: (conjunctionId: string) => void;
   onSelectManeuver: (maneuverId: string) => void;
@@ -72,6 +68,13 @@ const DEFAULT_CAMERA_VIEW = {
   longitudeDeg: 78,
   latitudeDeg: 20,
   heightMeters: 38000000,
+};
+
+const EMPTY_GROUND_STATION_VISUALIZATION: GroundStationVisualizationModel = {
+  markers: [],
+  satelliteFootprint: null,
+  stationAccessRegions: [],
+  contactLines: [],
 };
 
 type HoverInfo = {
@@ -389,7 +392,7 @@ function getSnapshotColor(Cesium: CesiumModule, snapshot: SatelliteSnapshot, ind
   return Cesium.Color.fromCssColorString(snapshot.satellite.visual.color ?? palette[index % palette.length]);
 }
 
-function isFiniteStationCoordinate(station: GroundStation) {
+function isFiniteStationCoordinate(station: GroundStationVisualizationModel["markers"][number]["station"]) {
   return Number.isFinite(station.longitude)
     && Number.isFinite(station.latitude)
     && Number.isFinite(station.altitude)
@@ -419,11 +422,7 @@ export function CesiumGlobe({
   conjunctionSnapshots,
   selectedConjunctionId,
   showConjunctions,
-  groundStations = [],
-  groundStationSatelliteState = null,
-  visibleGroundStationIds = [],
-  showGroundStationFootprints = true,
-  showGroundStationContactLines = true,
+  groundStationVisualization = EMPTY_GROUND_STATION_VISUALIZATION,
   groundOperationsGroundTrackSnapshot = null,
   onSelectConjunction,
   onSelectManeuver,
@@ -444,7 +443,8 @@ export function CesiumGlobe({
   const maneuverGeometryEntitiesRef = useRef<Entity[]>([]);
   const conjunctionEntitiesRef = useRef<Entity[]>([]);
   const groundStationMarkerEntitiesRef = useRef<Map<string, Entity>>(new Map());
-  const groundStationFootprintEntitiesRef = useRef<Map<string, Entity>>(new Map());
+  const stationAccessRegionEntitiesRef = useRef<Map<string, Entity>>(new Map());
+  const satelliteFootprintEntityRef = useRef<Entity | null>(null);
   const groundStationContactLineEntitiesRef = useRef<Entity[]>([]);
   const latestSnapshotsRef = useRef<SatelliteSnapshot[]>(snapshots);
   const latestClockTickMsRef = useRef(0);
@@ -569,7 +569,7 @@ export function CesiumGlobe({
     const entityEphemerisKeyMap = entityEphemerisKeysRef.current;
     const maneuverEntityMap = maneuverEntitiesRef.current;
     const groundStationMarkerEntityMap = groundStationMarkerEntitiesRef.current;
-    const groundStationFootprintEntityMap = groundStationFootprintEntitiesRef.current;
+    const stationAccessRegionEntityMap = stationAccessRegionEntitiesRef.current;
 
     async function boot() {
       if (!containerRef.current || viewerRef.current) {
@@ -710,7 +710,8 @@ export function CesiumGlobe({
       maneuverGeometryEntitiesRef.current = [];
       conjunctionEntitiesRef.current = [];
       groundStationMarkerEntityMap.clear();
-      groundStationFootprintEntityMap.clear();
+      stationAccessRegionEntityMap.clear();
+      satelliteFootprintEntityRef.current = null;
       groundStationContactLineEntitiesRef.current = [];
       pathPrimitiveRef.current = null;
       hoverInfoRef.current = null;
@@ -1202,32 +1203,25 @@ export function CesiumGlobe({
       return;
     }
 
-    const activeStationIds = new Set(groundStations.filter(isFiniteStationCoordinate).map((station) => station.id));
+    const markerVisuals = groundStationVisualization.markers.filter((visual) => isFiniteStationCoordinate(visual.station));
+    const activeStationIds = new Set(markerVisuals.map((visual) => visual.station.id));
     for (const [stationId, entity] of groundStationMarkerEntitiesRef.current) {
       if (!activeStationIds.has(stationId)) {
         viewer.entities.remove(entity);
         groundStationMarkerEntitiesRef.current.delete(stationId);
       }
     }
-    for (const [stationId, entity] of groundStationFootprintEntitiesRef.current) {
-      if (!showGroundStationFootprints || !activeStationIds.has(stationId)) {
+
+    const activeAccessRegionIds = new Set(groundStationVisualization.stationAccessRegions.map((region) => region.stationId));
+    for (const [stationId, entity] of stationAccessRegionEntitiesRef.current) {
+      if (!activeAccessRegionIds.has(stationId)) {
         viewer.entities.remove(entity);
-        groundStationFootprintEntitiesRef.current.delete(stationId);
+        stationAccessRegionEntitiesRef.current.delete(stationId);
       }
     }
 
-    const earthRadiusMeters = 6371000;
-    const satelliteAltitudeMeters = Math.max(100000, (groundStationSatelliteState?.altitudeKm ?? 650) * 1000);
-    const horizonAngleRad = Math.acos(earthRadiusMeters / (earthRadiusMeters + satelliteAltitudeMeters));
-    const footprintRadiusMeters = Math.max(350000, Math.min(3200000, earthRadiusMeters * horizonAngleRad));
-
-    groundStations.forEach((station) => {
-      if (!isFiniteStationCoordinate(station)) {
-        return;
-      }
-
-      const color = Cesium.Color.fromCssColorString("#67e8f9");
-      const surfacePosition = Cesium.Cartesian3.fromDegrees(station.longitude, station.latitude, 0);
+    markerVisuals.forEach(({ station, isVisible }) => {
+      const color = Cesium.Color.fromCssColorString(isVisible ? "#63e6be" : "#67e8f9");
       const markerPosition = Cesium.Cartesian3.fromDegrees(
         station.longitude,
         station.latitude,
@@ -1241,7 +1235,7 @@ export function CesiumGlobe({
           name: station.name,
           position: markerPosition,
           point: {
-            pixelSize: 10,
+            pixelSize: isVisible ? 13 : 10,
             color,
             outlineColor: Cesium.Color.BLACK,
             outlineWidth: 2,
@@ -1265,41 +1259,50 @@ export function CesiumGlobe({
       } else {
         marker.name = station.name;
         marker.position = new Cesium.ConstantPositionProperty(markerPosition);
+        if (marker.point) {
+          marker.point.pixelSize = new Cesium.ConstantProperty(isVisible ? 13 : 10);
+          marker.point.color = new Cesium.ConstantProperty(color);
+        }
         if (marker.label) {
           marker.label.text = new Cesium.ConstantProperty(station.name);
+          marker.label.fillColor = new Cesium.ConstantProperty(color);
         }
       }
+    });
 
-      if (showGroundStationFootprints) {
-        let footprint = groundStationFootprintEntitiesRef.current.get(station.id);
-        if (!footprint) {
-          footprint = viewer.entities.add({
-            id: `ground-station-${station.id}-footprint`,
-            name: `${station.name} visibility footprint`,
-            position: surfacePosition,
-            ellipse: {
-              semiMajorAxis: footprintRadiusMeters,
-              semiMinorAxis: footprintRadiusMeters,
-              material: color.withAlpha(0.055),
-              outline: true,
-              outlineColor: color.withAlpha(0.28),
-              height: 0,
-            },
-          });
-          groundStationFootprintEntitiesRef.current.set(station.id, footprint);
-        } else {
-          footprint.name = `${station.name} visibility footprint`;
-          footprint.position = new Cesium.ConstantPositionProperty(surfacePosition);
-          if (footprint.ellipse) {
-            footprint.ellipse.semiMajorAxis = new Cesium.ConstantProperty(footprintRadiusMeters);
-            footprint.ellipse.semiMinorAxis = new Cesium.ConstantProperty(footprintRadiusMeters);
-          }
+    groundStationVisualization.stationAccessRegions.forEach((region) => {
+      const position = Cesium.Cartesian3.fromDegrees(region.longitudeDeg, region.latitudeDeg, 0);
+      const regionColor = Cesium.Color.fromCssColorString(region.isVisible ? "#63e6be" : "#fbbf24");
+      let accessRegion = stationAccessRegionEntitiesRef.current.get(region.stationId);
+      if (!accessRegion) {
+        accessRegion = viewer.entities.add({
+          id: region.id,
+          name: region.name,
+          position,
+          ellipse: {
+            semiMajorAxis: region.radiusMeters,
+            semiMinorAxis: region.radiusMeters,
+            material: regionColor.withAlpha(region.isVisible ? 0.08 : 0.035),
+            outline: true,
+            outlineColor: regionColor.withAlpha(region.isVisible ? 0.44 : 0.28),
+            height: 0,
+          },
+        });
+        stationAccessRegionEntitiesRef.current.set(region.stationId, accessRegion);
+      } else {
+        accessRegion.name = region.name;
+        accessRegion.position = new Cesium.ConstantPositionProperty(position);
+        if (accessRegion.ellipse) {
+          accessRegion.ellipse.semiMajorAxis = new Cesium.ConstantProperty(region.radiusMeters);
+          accessRegion.ellipse.semiMinorAxis = new Cesium.ConstantProperty(region.radiusMeters);
+          accessRegion.ellipse.material = new Cesium.ColorMaterialProperty(regionColor.withAlpha(region.isVisible ? 0.08 : 0.035));
+          accessRegion.ellipse.outlineColor = new Cesium.ConstantProperty(regionColor.withAlpha(region.isVisible ? 0.44 : 0.28));
         }
       }
     });
 
     viewer.scene.requestRender();
-  }, [groundStations, groundStationSatelliteState?.altitudeKm, showGroundStationFootprints, viewerReady]);
+  }, [groundStationVisualization, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;
@@ -1308,30 +1311,48 @@ export function CesiumGlobe({
       return;
     }
 
-    const visibleIds = new Set(visibleGroundStationIds);
-    groundStations.forEach((station) => {
-      const marker = viewer.entities.getById(`ground-station-${station.id}-marker`);
-      if (!marker) {
-        return;
+    const footprint = groundStationVisualization.satelliteFootprint;
+    if (!footprint) {
+      if (satelliteFootprintEntityRef.current) {
+        viewer.entities.remove(satelliteFootprintEntityRef.current);
+        satelliteFootprintEntityRef.current = null;
+        viewer.scene.requestRender();
       }
-      const isVisible = visibleIds.has(station.id);
-      const color = Cesium.Color.fromCssColorString(isVisible ? "#63e6be" : "#67e8f9");
-      if (marker.point) {
-        marker.point.pixelSize = new Cesium.ConstantProperty(isVisible ? 13 : 10);
-        marker.point.color = new Cesium.ConstantProperty(color);
+      return;
+    }
+
+    const footprintPosition = Cesium.Cartesian3.fromDegrees(
+      footprint.longitudeDeg,
+      footprint.latitudeDeg,
+      0,
+    );
+    const color = Cesium.Color.fromCssColorString("#a3e635");
+
+    if (!satelliteFootprintEntityRef.current) {
+      satelliteFootprintEntityRef.current = viewer.entities.add({
+        id: footprint.id,
+        name: footprint.name,
+        position: footprintPosition,
+        ellipse: {
+          semiMajorAxis: footprint.radiusMeters,
+          semiMinorAxis: footprint.radiusMeters,
+          material: color.withAlpha(0.045),
+          outline: true,
+          outlineColor: color.withAlpha(0.36),
+          height: 0,
+        },
+      });
+    } else {
+      satelliteFootprintEntityRef.current.name = footprint.name;
+      satelliteFootprintEntityRef.current.position = new Cesium.ConstantPositionProperty(footprintPosition);
+      if (satelliteFootprintEntityRef.current.ellipse) {
+        satelliteFootprintEntityRef.current.ellipse.semiMajorAxis = new Cesium.ConstantProperty(footprint.radiusMeters);
+        satelliteFootprintEntityRef.current.ellipse.semiMinorAxis = new Cesium.ConstantProperty(footprint.radiusMeters);
       }
-      if (marker.label) {
-        marker.label.fillColor = new Cesium.ConstantProperty(color);
-      }
-      const footprint = viewer.entities.getById(`ground-station-${station.id}-footprint`);
-      if (footprint?.ellipse) {
-        footprint.ellipse.material = new Cesium.ColorMaterialProperty(color.withAlpha(isVisible ? 0.1 : 0.055));
-        footprint.ellipse.outlineColor = new Cesium.ConstantProperty(color.withAlpha(isVisible ? 0.5 : 0.28));
-      }
-    });
+    }
 
     viewer.scene.requestRender();
-  }, [groundStations, visibleGroundStationIds, viewerReady]);
+  }, [groundStationVisualization.satelliteFootprint, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;
@@ -1343,27 +1364,22 @@ export function CesiumGlobe({
     groundStationContactLineEntitiesRef.current.forEach((entity) => viewer.entities.remove(entity));
     groundStationContactLineEntitiesRef.current = [];
 
-    if (!showGroundStationContactLines || !groundStationSatelliteState) {
-      viewer.scene.requestRender();
-      return;
-    }
-
-    const visibleIds = new Set(visibleGroundStationIds);
-    const satellitePosition = stateToSpaceCartesian(Cesium, groundStationSatelliteState);
-    groundStations.forEach((station) => {
-      if (!visibleIds.has(station.id) || !isFiniteStationCoordinate(station)) {
+    groundStationVisualization.contactLines.forEach((line) => {
+      const station = line.station;
+      if (!isFiniteStationCoordinate(station)) {
         return;
       }
 
       const color = Cesium.Color.fromCssColorString("#63e6be");
+      const satellitePosition = stateToSpaceCartesian(Cesium, line.satelliteState);
       const markerPosition = Cesium.Cartesian3.fromDegrees(
         station.longitude,
         station.latitude,
         Math.max(0.05, station.altitude) * 1000,
       );
       const contactLine = viewer.entities.add({
-        id: `ground-station-${station.id}-access-link`,
-        name: `${station.name} access link`,
+        id: line.id,
+        name: line.name,
         polyline: {
           positions: [markerPosition, satellitePosition],
           width: 2.4,
@@ -1378,7 +1394,7 @@ export function CesiumGlobe({
     });
 
     viewer.scene.requestRender();
-  }, [groundStations, groundStationSatelliteState, showGroundStationContactLines, visibleGroundStationIds, viewerReady]);
+  }, [groundStationVisualization.contactLines, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;

@@ -22,7 +22,8 @@ export type GroundStation = {
 
 export type GroundStationDisplayOptions = {
   stations: boolean;
-  footprints: boolean;
+  satelliteFootprints: boolean;
+  stationAccessRegions: boolean;
   contactLines: boolean;
 };
 

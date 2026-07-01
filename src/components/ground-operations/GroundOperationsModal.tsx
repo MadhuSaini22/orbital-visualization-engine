@@ -177,9 +177,14 @@ export function GroundOperationsModalContent({
                 onToggle={() => onGroundStationDisplayChange({ ...groundStationDisplay, stations: !groundStationDisplay.stations })}
               />
               <GroundOpsCommandToggle
-                label="Footprints"
-                active={groundStationDisplay.footprints}
-                onToggle={() => onGroundStationDisplayChange({ ...groundStationDisplay, footprints: !groundStationDisplay.footprints })}
+                label="Sat Footprint"
+                active={groundStationDisplay.satelliteFootprints}
+                onToggle={() => onGroundStationDisplayChange({ ...groundStationDisplay, satelliteFootprints: !groundStationDisplay.satelliteFootprints })}
+              />
+              <GroundOpsCommandToggle
+                label="Access Region"
+                active={groundStationDisplay.stationAccessRegions}
+                onToggle={() => onGroundStationDisplayChange({ ...groundStationDisplay, stationAccessRegions: !groundStationDisplay.stationAccessRegions })}
               />
               <GroundOpsCommandToggle
                 label="Contact Lines"

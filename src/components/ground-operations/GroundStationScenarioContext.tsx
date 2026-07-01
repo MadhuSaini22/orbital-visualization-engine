@@ -31,7 +31,8 @@ const GroundStationScenarioContext = createContext<GroundStationScenarioContextV
 
 const defaultDisplay: GroundStationDisplayOptions = {
   stations: true,
-  footprints: true,
+  satelliteFootprints: true,
+  stationAccessRegions: false,
   contactLines: true,
 };
 
@@ -188,13 +189,6 @@ export function useGroundStationScenario(orbitId: string | null) {
     return context.stations.filter((station) => assignedIds.has(station.id));
   }, [assignedStationIds, context.stations]);
 
-  const renderStations = useMemo(() => {
-    if (!context.display.stations) {
-      return [];
-    }
-    return assignedStations.filter((station) => station.enabled);
-  }, [assignedStations, context.display.stations]);
-
   return {
     workspaceId: context.workspaceId,
     stations: context.stations,
@@ -202,7 +196,6 @@ export function useGroundStationScenario(orbitId: string | null) {
     setDisplay: context.setDisplay,
     assignedStationIds,
     assignedStations,
-    renderStations,
     assignStation: context.assignStation,
     assignStations: context.assignStations,
     unassignStation: context.unassignStation,
