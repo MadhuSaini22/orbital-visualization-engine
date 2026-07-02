@@ -29,7 +29,6 @@ import type { OrbitSummary } from "@/components/mission-planning/OrbitSummaryPan
 import type { MissionGenerationSnapshot } from "@/components/mission-planning/types";
 import { parseSatelliteSource } from "@/domain/satelliteConfig";
 import { MAX_TLE_OBJECTS } from "@/domain/tle";
-import { distanceBetweenOrbitStatesKm } from "@/geometry/distance";
 import { formatNumber, formatUtc } from "@/geometry/format";
 import {
   isValidUtcDateAndTimeInput,
@@ -123,6 +122,7 @@ import {
   type BackendEventStateRequest,
   type PropagationResult,
 } from "@/services/PropagationEngine";
+import { VisualizationEngine } from "@/services/VisualizationEngine";
 import {
   eventMetOffsetSeconds,
   eventScheduleMode,
@@ -1622,9 +1622,6 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const showLabels = scenario.display.labels;
   const showAllOrbits = scenario.display.allOrbits;
   const showRangeCheck = scenario.display.range;
-  const showManeuvers = scenario.display.maneuvers;
-  const showMissionComparison = scenario.display.missionComparison;
-  const showConjunctions = scenario.display.conjunctions;
   const selectedManeuverId = scenario.maneuvers.selectedManeuverId;
   const mission = scenario.missions.activeMission;
   const missionTimelineEvents = scenario.missions.timelineEvents;
@@ -1723,6 +1720,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
 
   const propagationEngine = useMemo(() => new PropagationEngine(), []);
   const analysisEngine = useMemo(() => new AnalysisEngine(), []);
+  const visualizationEngine = useMemo(() => new VisualizationEngine(), []);
   const analysisResult = useMemo<AnalysisResult>(() => {
     void analysisVersion;
     return analysisEngine.getResult();
@@ -1786,37 +1784,38 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     trajectoryAnchorTime,
     trajectoryWindowOptions,
   ]);
-  const orbitSnapshots = propagationResult.orbitSnapshots;
-  const displayOrbitSnapshots = useMemo(() => {
-    const overlays = showMissionComparison && missionTrajectoryOverlay
-      ? [missionTrajectoryOverlay.legacy, missionTrajectoryOverlay.mission].filter((snapshot): snapshot is SatelliteSnapshot => snapshot !== null)
-      : [];
-    return overlays.length > 0 ? [...orbitSnapshots, ...overlays] : orbitSnapshots;
-  }, [missionTrajectoryOverlay, orbitSnapshots, showMissionComparison]);
   const snapshots = propagationResult.currentSnapshots;
   const groundTrackSnapshots = propagationResult.groundTrackSnapshots;
   const serverEventStateByKey = propagationResult.eventStatesByKey;
-  const maneuverSnapshots = analysisResult.maneuverSnapshots;
-  const selectedManeuver = maneuverSnapshots.find((snapshot) => snapshot.event.id === selectedManeuverId) ?? maneuverSnapshots[0] ?? null;
+  const visualizationModel = useMemo(() => visualizationEngine.buildRenderModel({
+    propagation: propagationResult,
+    analysis: analysisResult,
+    display: scenario.display,
+    selectedSatelliteIds,
+    selectedManeuverId,
+    selectedConjunctionId,
+    missionTrajectoryOverlay,
+    groundOpsHorizonSnapshot,
+  }), [
+    analysisResult,
+    groundOpsHorizonSnapshot,
+    missionTrajectoryOverlay,
+    propagationResult,
+    scenario.display,
+    selectedConjunctionId,
+    selectedManeuverId,
+    selectedSatelliteIds,
+    visualizationEngine,
+  ]);
+  const renderModel = visualizationModel.cesium;
+  const maneuverSnapshots = renderModel.maneuverSnapshots;
+  const selectedManeuver = visualizationModel.selectedManeuver;
   const selectedTimelineEvent = missionTimelineEvents.find((event) => event.id === selectedTimelineEventId) ?? missionTimelineEvents[0] ?? null;
-  const conjunctionSnapshots = analysisResult.conjunctionSnapshots;
-  const selectedConjunction = conjunctionSnapshots.find((snapshot) => snapshot.event.id === selectedConjunctionId) ?? conjunctionSnapshots[0] ?? null;
-  const latestSelectedId = selectedSatelliteIds.at(-1) ?? null;
-  const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
-  const groundOperationsTargetSnapshot = useMemo<SatelliteSnapshot | null>(() => {
-    if (!selectedSnapshot) {
-      return null;
-    }
-    const orbitSnapshot = displayOrbitSnapshots.find((item) => item.satellite.id === selectedSnapshot.satellite.id);
-    return {
-      ...selectedSnapshot,
-      trajectory: orbitSnapshot?.trajectory ?? selectedSnapshot.trajectory,
-      futureTrajectory: orbitSnapshot?.futureTrajectory ?? selectedSnapshot.futureTrajectory,
-      pastTrail: orbitSnapshot?.pastTrail ?? selectedSnapshot.pastTrail,
-      groundTrack: orbitSnapshot?.groundTrack ?? selectedSnapshot.groundTrack,
-    };
-  }, [displayOrbitSnapshots, selectedSnapshot]);
-  const effectiveGroundOperationsTargetSnapshot = groundOpsHorizonSnapshot ?? groundOperationsTargetSnapshot;
+  const conjunctionSnapshots = renderModel.conjunctionSnapshots;
+  const selectedConjunction = visualizationModel.selectedConjunction;
+  const selectedSnapshot = visualizationModel.selectedSnapshot;
+  const groundOperationsTargetSnapshot = renderModel.groundOperationsGroundTrackSnapshot;
+  const effectiveGroundOperationsTargetSnapshot = visualizationModel.groundOperationsTargetSnapshot;
   const missionSubjectSnapshot = activeDataSource === "endpoint" && importedMissionSpacecraftId
     ? snapshots.find((item) => item.satellite.id === importedMissionSpacecraftId) ?? selectedSnapshot
     : selectedSnapshot;
@@ -1863,35 +1862,13 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       : activeDataSource === "endpoint"
         ? "Import at least one valid TLE spacecraft, then choose the mission subject inside Create Mission."
         : "Load a backend catalog orbit to create a mission timeline.";
-  const canUseRangeCheck = satellites.length >= 2;
-  const canShowManeuvers = maneuverSnapshots.length > 0;
-  const canShowConjunctions = satellites.length >= 2 && conjunctionSnapshots.length > 0;
-  const effectiveShowRangeCheck = showRangeCheck && canUseRangeCheck;
-  const effectiveShowManeuvers = showManeuvers && canShowManeuvers;
-  const effectiveShowConjunctions = showConjunctions && canShowConjunctions;
-  const currentDisplayGmstRadRaw = selectedSnapshot?.state?.gmstRad ?? snapshots.find((item) => item.state?.gmstRad)?.state?.gmstRad;
-  // Orbit arcs are rendered in a space-like frame and rotated into Cesium's
-  // Earth-fixed scene. Quantizing avoids rebuilding long polylines every
-  // animation frame while keeping the marker visually seated on its orbit.
-  const currentDisplayGmstRad = typeof currentDisplayGmstRadRaw === "number"
-    ? Math.round(currentDisplayGmstRadRaw / 0.004) * 0.004
-    : undefined;
+  const canUseRangeCheck = visualizationModel.layerState.range.available;
+  const canShowConjunctions = visualizationModel.layerState.conjunctions.available;
+  const effectiveShowRangeCheck = visualizationModel.layerState.range.visible;
+  const effectiveShowConjunctions = visualizationModel.layerState.conjunctions.visible;
   const validCount = snapshots.filter((item) => item.state).length;
   const { primaryId: rangePrimaryId, secondaryId: rangeSecondaryId } = getRangePair(selectedSatelliteIds);
-  const primaryRangeSnapshot = snapshots.find((item) => item.satellite.id === rangePrimaryId);
-  const secondaryRangeSnapshot = snapshots.find((item) => item.satellite.id === rangeSecondaryId);
-  const rangeDistanceKm = distanceBetweenOrbitStatesKm(
-    primaryRangeSnapshot?.state ?? null,
-    secondaryRangeSnapshot?.state ?? null,
-  );
-  const rangeMeasurement =
-    effectiveShowRangeCheck && primaryRangeSnapshot && secondaryRangeSnapshot && rangeDistanceKm !== null
-      ? {
-          primary: primaryRangeSnapshot,
-          secondary: secondaryRangeSnapshot,
-          distanceKm: rangeDistanceKm,
-        }
-      : null;
+  const rangeMeasurement = renderModel.rangeMeasurement;
   const groundOpsAnalysisAnchorTime = useMemo(
     () => new Date(Math.floor(simTime.getTime() / 60000) * 60000),
     [simTime],
@@ -1963,7 +1940,6 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     serverEventStateByKey,
     simTime,
   ]);
-  const groundStationVisualization = analysisResult.groundStationVisualization;
   const activeStoredMission = useMemo(() => {
     if (activeWorkspaceMissionId) {
       return missionLibrary.missions.find((item) => item.missionId === activeWorkspaceMissionId) ?? null;
@@ -3802,27 +3778,13 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       <div className="absolute inset-0">
         {hasOrbitLoaded ? (
           <CesiumGlobe
-            snapshots={snapshots}
-            orbitSnapshots={displayOrbitSnapshots}
-            rangeMeasurement={rangeMeasurement}
-            selectedSatelliteIds={selectedSatelliteIds}
-            showAllOrbits={showAllOrbits}
-            showLabels={showLabels}
+            renderModel={renderModel}
             frameMode={frameMode}
             simTimeIso={simTime.toISOString()}
             isPlaying={isPlaying}
             simulationSpeed={speed}
-            currentGmstRad={currentDisplayGmstRad}
             focusRequest={focusRequest}
             maneuverFocusRequest={maneuverFocusRequest}
-            maneuverSnapshots={maneuverSnapshots}
-            selectedManeuverId={selectedManeuver?.event.id ?? null}
-            showManeuvers={effectiveShowManeuvers}
-            conjunctionSnapshots={conjunctionSnapshots}
-            selectedConjunctionId={selectedConjunction?.event.id ?? null}
-            showConjunctions={effectiveShowConjunctions}
-            groundStationVisualization={groundStationVisualization}
-            groundOperationsGroundTrackSnapshot={groundOperationsTargetSnapshot}
             onSelectConjunction={setSelectedConjunctionId}
             onSelectManeuver={setSelectedManeuverId}
             onToggleSatellite={toggleSatelliteSelection}

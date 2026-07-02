@@ -1,12 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { OrbitState, RangeMeasurement, SatelliteSnapshot } from "@/domain/orbit";
-import type { ConjunctionSnapshot } from "@/domain/conjunction";
-import { getConjunctionTone } from "@/domain/conjunction";
+import type { OrbitState, SatelliteSnapshot } from "@/domain/orbit";
 import type { ManeuverSnapshot } from "@/domain/maneuver";
+import { getConjunctionTone } from "@/domain/conjunction";
 import { getManeuverTone } from "@/domain/maneuver";
-import type { GroundStationVisualizationModel } from "@/domain/visualization";
+import type { CesiumRenderModel, GroundStationVisualizationModel } from "@/domain/visualization";
 import { splitGroundTrackByLongitudeWrap } from "@/geometry/groundTrack";
 
 type CesiumModule = typeof import("cesium");
@@ -18,17 +17,11 @@ type PolylineCollection = import("cesium").PolylineCollection;
 type FrameMode = "earth-fixed" | "inertial";
 
 type CesiumGlobeProps = {
-  snapshots: SatelliteSnapshot[];
-  orbitSnapshots: SatelliteSnapshot[];
-  rangeMeasurement: RangeMeasurement | null;
-  selectedSatelliteIds: string[];
-  showAllOrbits: boolean;
-  showLabels: boolean;
+  renderModel: CesiumRenderModel;
   frameMode: FrameMode;
   simTimeIso: string;
   isPlaying: boolean;
   simulationSpeed: number;
-  currentGmstRad?: number;
   focusRequest: { satelliteId: string; sequence: number } | null;
   maneuverFocusRequest: {
     longitudeDeg: number;
@@ -36,14 +29,6 @@ type CesiumGlobeProps = {
     altitudeKm: number;
     sequence: number;
   } | null;
-  maneuverSnapshots: ManeuverSnapshot[];
-  selectedManeuverId: string | null;
-  showManeuvers: boolean;
-  conjunctionSnapshots: ConjunctionSnapshot[];
-  selectedConjunctionId: string | null;
-  showConjunctions: boolean;
-  groundStationVisualization?: GroundStationVisualizationModel;
-  groundOperationsGroundTrackSnapshot?: SatelliteSnapshot | null;
   onSelectConjunction: (conjunctionId: string) => void;
   onSelectManeuver: (maneuverId: string) => void;
   onToggleSatellite: (satelliteId: string) => void;
@@ -403,33 +388,37 @@ function isFiniteStationCoordinate(station: GroundStationVisualizationModel["mar
 }
 
 export function CesiumGlobe({
-  snapshots,
-  orbitSnapshots,
-  rangeMeasurement,
-  selectedSatelliteIds,
-  showAllOrbits,
-  showLabels,
+  renderModel,
   frameMode,
   simTimeIso,
   isPlaying,
   simulationSpeed,
-  currentGmstRad,
   focusRequest,
   maneuverFocusRequest,
-  maneuverSnapshots,
-  selectedManeuverId,
-  showManeuvers,
-  conjunctionSnapshots,
-  selectedConjunctionId,
-  showConjunctions,
-  groundStationVisualization = EMPTY_GROUND_STATION_VISUALIZATION,
-  groundOperationsGroundTrackSnapshot = null,
   onSelectConjunction,
   onSelectManeuver,
   onToggleSatellite,
   resetSignal,
   onClockTick,
 }: CesiumGlobeProps) {
+  const {
+    snapshots,
+    orbitSnapshots,
+    orbitPathSnapshots,
+    trailSnapshots,
+    groundTrackSnapshots,
+    rangeMeasurement,
+    selectedSatelliteIds,
+    showLabels,
+    currentGmstRad,
+    maneuverSnapshots,
+    selectedManeuverId,
+    showManeuvers,
+    conjunctionSnapshots,
+    selectedConjunctionId,
+    showConjunctions,
+    groundStationVisualization = EMPTY_GROUND_STATION_VISUALIZATION,
+  } = renderModel;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cesiumRef = useRef<CesiumModule | null>(null);
   const viewerRef = useRef<Viewer | null>(null);
@@ -846,17 +835,9 @@ export function CesiumGlobe({
       });
     };
 
-    const currentSnapshots = latestSnapshotsRef.current;
-    const currentSnapshotById = new Map(currentSnapshots.map((snapshot) => [snapshot.satellite.id, snapshot]));
-    const pathSourceSnapshots = orbitSnapshots.length > 0 ? orbitSnapshots : currentSnapshots;
-    const visiblePathSnapshots = pathSourceSnapshots.filter((item) => {
-      if (!item.satellite.visual.showOrbit) {
-        return false;
-      }
-      return showAllOrbits || selectedSatelliteIds.includes(item.satellite.id);
-    });
+    const currentSnapshotById = new Map(snapshots.map((snapshot) => [snapshot.satellite.id, snapshot]));
 
-    visiblePathSnapshots.forEach((snapshot, index) => {
+    orbitPathSnapshots.forEach((snapshot, index) => {
       const isSelected = selectedSatelliteIds.includes(snapshot.satellite.id);
       const color = getSnapshotColor(Cesium, snapshot, index);
       const pathColor = isSelected ? color : color.withAlpha(0.55);
@@ -888,14 +869,7 @@ export function CesiumGlobe({
       );
     });
 
-    const visibleTrailSnapshots = orbitSnapshots.filter((item) => {
-      if (!item.satellite.visual.showTrail) {
-        return false;
-      }
-      return showAllOrbits || selectedSatelliteIds.includes(item.satellite.id);
-    });
-
-    visibleTrailSnapshots.forEach((snapshot, index) => {
+    trailSnapshots.forEach((snapshot, index) => {
       const color = getSnapshotColor(Cesium, snapshot, index);
       const trailColor = color.brighten(0.18, new Cesium.Color());
       const trailPositions = snapshot.pastTrail?.map((state) => stateToSpaceCartesian(Cesium, state)) ?? [];
@@ -915,28 +889,7 @@ export function CesiumGlobe({
       );
     });
 
-    const canRenderGroundTrack = (snapshot: SatelliteSnapshot) => {
-      if (!snapshot.satellite.visual.showGroundTrack) {
-        return false;
-      }
-      return showAllOrbits || selectedSatelliteIds.includes(snapshot.satellite.id);
-    };
-    const visibleGroundTrackSnapshots = orbitSnapshots.filter(canRenderGroundTrack);
-    if (
-      groundOperationsGroundTrackSnapshot?.groundTrack?.length
-      && canRenderGroundTrack(groundOperationsGroundTrackSnapshot)
-    ) {
-      const existingIndex = visibleGroundTrackSnapshots.findIndex(
-        (snapshot) => snapshot.satellite.id === groundOperationsGroundTrackSnapshot.satellite.id,
-      );
-      if (existingIndex === -1) {
-        visibleGroundTrackSnapshots.push(groundOperationsGroundTrackSnapshot);
-      } else if (!visibleGroundTrackSnapshots[existingIndex].groundTrack?.length) {
-        visibleGroundTrackSnapshots[existingIndex] = groundOperationsGroundTrackSnapshot;
-      }
-    }
-
-    visibleGroundTrackSnapshots.forEach((snapshot) => {
+    groundTrackSnapshots.forEach((snapshot) => {
       const isSelected = selectedSatelliteIds.includes(snapshot.satellite.id);
       const groundColor = Cesium.Color.LIME.withAlpha(isSelected ? 0.52 : 0.24);
       const segments = splitGroundTrackByLongitudeWrap(snapshot.groundTrack ?? []);
@@ -959,9 +912,9 @@ export function CesiumGlobe({
 
     setLayerStats((current) => {
       const next = {
-        orbits: visiblePathSnapshots.length,
-        trails: visibleTrailSnapshots.length,
-        groundTracks: visibleGroundTrackSnapshots.length,
+        orbits: orbitPathSnapshots.length,
+        trails: trailSnapshots.length,
+        groundTracks: groundTrackSnapshots.length,
       };
 
       if (
@@ -975,7 +928,7 @@ export function CesiumGlobe({
       return next;
     });
     viewer.scene.requestRender();
-  }, [cameraLineScale, currentGmstRad, groundOperationsGroundTrackSnapshot, orbitSnapshots, selectedSatelliteIds, showAllOrbits, snapshots, viewerReady]);
+  }, [cameraLineScale, currentGmstRad, groundTrackSnapshots, orbitPathSnapshots, selectedSatelliteIds, snapshots, trailSnapshots, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;

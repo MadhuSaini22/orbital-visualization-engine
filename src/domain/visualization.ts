@@ -1,5 +1,7 @@
 import type { GroundStation } from "@/domain/groundOperations";
-import type { OrbitState } from "@/domain/orbit";
+import type { ConjunctionSnapshot } from "@/domain/conjunction";
+import type { ManeuverSnapshot } from "@/domain/maneuver";
+import type { OrbitState, RangeMeasurement, SatelliteSnapshot } from "@/domain/orbit";
 
 export type GroundStationMarkerVisual = {
   station: GroundStation;
@@ -36,4 +38,52 @@ export type GroundStationVisualizationModel = {
   satelliteFootprint: SatelliteFootprintVisual | null;
   stationAccessRegions: StationAccessRegionVisual[];
   contactLines: ContactLineVisual[];
+};
+
+export type VisualizationLayerState = {
+  range: {
+    requested: boolean;
+    available: boolean;
+    visible: boolean;
+  };
+  maneuvers: {
+    requested: boolean;
+    available: boolean;
+    visible: boolean;
+  };
+  conjunctions: {
+    requested: boolean;
+    available: boolean;
+    visible: boolean;
+  };
+};
+
+export type CesiumRenderModel = {
+  snapshots: SatelliteSnapshot[];
+  orbitSnapshots: SatelliteSnapshot[];
+  orbitPathSnapshots: SatelliteSnapshot[];
+  trailSnapshots: SatelliteSnapshot[];
+  groundTrackSnapshots: SatelliteSnapshot[];
+  rangeMeasurement: RangeMeasurement | null;
+  selectedSatelliteIds: string[];
+  showAllOrbits: boolean;
+  showLabels: boolean;
+  currentGmstRad?: number;
+  maneuverSnapshots: ManeuverSnapshot[];
+  selectedManeuverId: string | null;
+  showManeuvers: boolean;
+  conjunctionSnapshots: ConjunctionSnapshot[];
+  selectedConjunctionId: string | null;
+  showConjunctions: boolean;
+  groundStationVisualization: GroundStationVisualizationModel;
+  groundOperationsGroundTrackSnapshot: SatelliteSnapshot | null;
+};
+
+export type VisualizationModel = {
+  cesium: CesiumRenderModel;
+  selectedManeuver: ManeuverSnapshot | null;
+  selectedConjunction: ConjunctionSnapshot | null;
+  selectedSnapshot: SatelliteSnapshot | undefined;
+  groundOperationsTargetSnapshot: SatelliteSnapshot | null;
+  layerState: VisualizationLayerState;
 };
