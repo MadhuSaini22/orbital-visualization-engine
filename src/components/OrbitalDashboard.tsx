@@ -135,6 +135,17 @@ import type {
 } from "@/services/workspaceStorage";
 import { StateCacheService } from "@/services/StateCacheService";
 import { GroundStationVisualizationService } from "@/services/GroundStationVisualizationService";
+import { backendEphemerisStateToOrbitState, interpolateOrbitStateSamples } from "@/services/FrameTransformService";
+import { EARTH_EQUATORIAL_RADIUS_KM, EARTH_MU_KM3_S2, circularOrbitPeriodSeconds } from "@/services/OrbitMechanicsService";
+import {
+  eventMetOffsetSeconds,
+  eventScheduleMode,
+  metOffsetLabelFromSeconds,
+  missionDurationSeconds,
+  readNumberParameter,
+  readStringParameter,
+  resolveEventMetOffsets,
+} from "@/services/TimelineScheduler";
 
 const CesiumGlobe = dynamic(
   () => import("@/components/CesiumGlobe").then((mod) => mod.CesiumGlobe),
@@ -322,8 +333,6 @@ const orbitTemplateCategories = [
 ] satisfies OrbitTemplateCategory[];
 const missionTrajectoryMinStepSeconds = 5;
 const missionTrajectoryMaxStepSeconds = 3600;
-const earthMuKm3S2 = 398600.4418;
-const earthRadiusKm = 6378.137;
 
 const fallbackCapabilities: BackendCapabilityRegistry = {
   propagators: [
@@ -460,116 +469,16 @@ function normalizeCustomSpeedMultiplier(value: string) {
   return Math.min(Math.max(parsed, 1), 100000);
 }
 
-function timestampMs(value: string) {
-  return new Date(value).getTime();
-}
-
-function lerpNumber(a: number | undefined, b: number | undefined, alpha: number) {
-  if (typeof a !== "number" || typeof b !== "number") {
-    return undefined;
-  }
-  return a + (b - a) * alpha;
-}
-
-function lerpVector(
-  a: [number, number, number] | undefined,
-  b: [number, number, number] | undefined,
-  alpha: number,
-) {
-  if (!a || !b) {
-    return undefined;
-  }
-  return [
-    a[0] + (b[0] - a[0]) * alpha,
-    a[1] + (b[1] - a[1]) * alpha,
-    a[2] + (b[2] - a[2]) * alpha,
-  ] as [number, number, number];
-}
-
-function lerpLongitudeDeg(a: number, b: number, alpha: number) {
-  let delta = b - a;
-  if (delta > 180) {
-    delta -= 360;
-  } else if (delta < -180) {
-    delta += 360;
-  }
-
-  const value = a + delta * alpha;
-  return value > 180 ? value - 360 : value < -180 ? value + 360 : value;
-}
-
 function interpolateStateFromSamples(
   satelliteId: string,
   samples: OrbitState[] | undefined,
   timeUtc: string,
 ): OrbitState | null {
-  if (!samples || samples.length === 0) {
-    return null;
-  }
-
-  const targetMs = timestampMs(timeUtc);
-  const ordered = samples.toSorted((a, b) => timestampMs(a.timeUtc) - timestampMs(b.timeUtc));
-  if (targetMs <= timestampMs(ordered[0].timeUtc)) {
-    return { ...ordered[0], satelliteId };
-  }
-  if (targetMs >= timestampMs(ordered.at(-1)!.timeUtc)) {
-    return { ...ordered.at(-1)!, satelliteId };
-  }
-
-  let low = 0;
-  let high = ordered.length - 1;
-  while (high - low > 1) {
-    const mid = Math.floor((low + high) / 2);
-    if (timestampMs(ordered[mid].timeUtc) <= targetMs) {
-      low = mid;
-    } else {
-      high = mid;
-    }
-  }
-
-  const before = ordered[low];
-  const after = ordered[high];
-  const beforeMs = timestampMs(before.timeUtc);
-  const afterMs = timestampMs(after.timeUtc);
-  const alpha = (targetMs - beforeMs) / Math.max(1, afterMs - beforeMs);
-  const velocityEciKmps = lerpVector(before.velocityEciKmps, after.velocityEciKmps, alpha);
-  const velocityEcefKmps = lerpVector(before.velocityEcefKmps, after.velocityEcefKmps, alpha);
-  const velocityVector = velocityEcefKmps ?? velocityEciKmps;
-
-  return {
-    satelliteId,
-    timeUtc,
-    frame: before.frame,
-    positionEciKm: lerpVector(before.positionEciKm, after.positionEciKm, alpha),
-    velocityEciKmps,
-    positionEcefKm: lerpVector(before.positionEcefKm, after.positionEcefKm, alpha),
-    velocityEcefKmps,
-    gmstRad: lerpNumber(before.gmstRad, after.gmstRad, alpha),
-    latitudeDeg: before.latitudeDeg + (after.latitudeDeg - before.latitudeDeg) * alpha,
-    longitudeDeg: lerpLongitudeDeg(before.longitudeDeg, after.longitudeDeg, alpha),
-    altitudeKm: before.altitudeKm + (after.altitudeKm - before.altitudeKm) * alpha,
-    velocityKmps: velocityVector
-      ? Math.sqrt(velocityVector[0] ** 2 + velocityVector[1] ** 2 + velocityVector[2] ** 2)
-      : lerpNumber(before.velocityKmps, after.velocityKmps, alpha),
-  };
+  return interpolateOrbitStateSamples(satelliteId, samples, timeUtc);
 }
 
 function backendStateToOrbitState(satelliteId: string, state: BackendEphemerisState): OrbitState {
-  return {
-    satelliteId,
-    timeUtc: state.time,
-    frame: "ECEF",
-    positionEcefKm: state.positionKm,
-    velocityEcefKmps: state.velocityKmps,
-    latitudeDeg: state.latitudeDeg,
-    longitudeDeg: state.longitudeDeg,
-    altitudeKm: state.altitudeKm,
-    velocityKmps: Math.sqrt(
-      state.velocityKmps[0] ** 2 +
-      state.velocityKmps[1] ** 2 +
-      state.velocityKmps[2] ** 2,
-    ),
-  };
+  return backendEphemerisStateToOrbitState(satelliteId, state);
 }
 
 function manualOrbitToSatellite(orbit: BackendManualOrbitResponse): SatelliteObject {
@@ -860,99 +769,6 @@ function metOffsetSeconds(draft: TimelineEditorDraft) {
     return null;
   }
   return hours * 3600 + minutes * 60 + seconds;
-}
-
-function metOffsetLabelFromSeconds(totalSeconds: number) {
-  const sign = totalSeconds < 0 ? "T-" : "T+";
-  const absolute = Math.abs(Math.round(totalSeconds));
-  const hours = Math.floor(absolute / 3600);
-  const minutes = Math.floor((absolute % 3600) / 60);
-  const seconds = absolute % 60;
-  return `${sign}${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
-
-function eventScheduleMode(event: BackendMissionTimelineEvent): TimelineScheduleMode {
-  const mode = readStringParameter(event.parameters ?? {}, "scheduleMode", "MET");
-  return mode === "UTC" || mode === "MET" || mode === "AFTER_EVENT" ? mode : "MET";
-}
-
-function eventMetOffsetSeconds(mission: BackendMission | null, event: BackendMissionTimelineEvent) {
-  if (!mission) {
-    return null;
-  }
-  const startMs = new Date(mission.scenarioStart).getTime();
-  const eventMs = new Date(event.executionTime).getTime();
-  if (!Number.isFinite(startMs) || !Number.isFinite(eventMs)) {
-    return null;
-  }
-  return Math.round((eventMs - startMs) / 1000);
-}
-
-function resolveEventMetOffsets(mission: BackendMission | null, events: BackendMissionTimelineEvent[]) {
-  const resolved = new Map<string, number>();
-  const warnings: string[] = [];
-  const eventById = new Map<string, BackendMissionTimelineEvent>();
-  const idCounts = new Map<string, number>();
-
-  events.forEach((event) => {
-    eventById.set(event.id, event);
-    idCounts.set(event.id, (idCounts.get(event.id) ?? 0) + 1);
-  });
-  idCounts.forEach((count, id) => {
-    if (count > 1) {
-      warnings.push(`Duplicate event id ${id}.`);
-    }
-  });
-
-  const visit = (event: BackendMissionTimelineEvent, path: string[]): number | null => {
-    if (resolved.has(event.id)) {
-      return resolved.get(event.id)!;
-    }
-    if (path.includes(event.id)) {
-      warnings.push(`Circular dependency detected: ${[...path, event.id].join(" -> ")}.`);
-      return null;
-    }
-
-    const parameters = event.parameters ?? {};
-    const mode = eventScheduleMode(event);
-    if (mode === "AFTER_EVENT") {
-      const dependencyId = readStringParameter(parameters, "scheduleDependencyId", "");
-      if (!dependencyId) {
-        warnings.push(`${event.name} is missing a dependency event.`);
-        return null;
-      }
-      const dependency = eventById.get(dependencyId);
-      if (!dependency) {
-        warnings.push(`${event.name} references missing event ${dependencyId}.`);
-        return null;
-      }
-      const dependencyMet = visit(dependency, [...path, event.id]);
-      if (dependencyMet === null) {
-        warnings.push(`${event.name} has an unresolved dependency chain.`);
-        return null;
-      }
-      const offsetSeconds = readNumberParameter(parameters, "scheduleOffsetSeconds", 0);
-      const value = dependencyMet + offsetSeconds;
-      resolved.set(event.id, value);
-      return value;
-    }
-
-    const value = mode === "MET"
-      ? readNumberParameter(parameters, "scheduleOffsetSeconds", eventMetOffsetSeconds(mission, event) ?? 0)
-      : eventMetOffsetSeconds(mission, event);
-    if (value === null) {
-      warnings.push(`${event.name} has an invalid UTC execution time.`);
-      return null;
-    }
-    resolved.set(event.id, value);
-    return value;
-  };
-
-  events.forEach((event) => {
-    visit(event, []);
-  });
-
-  return { offsets: resolved, warnings };
 }
 
 function executionIsoFromTimelineDraft(
@@ -1457,10 +1273,6 @@ function validateMissionSetupDraft(draft: MissionSetupDraft) {
   return errors;
 }
 
-function missionDurationSeconds(mission: BackendMission) {
-  return Math.max(0, Math.round((new Date(mission.scenarioEnd).getTime() - new Date(mission.scenarioStart).getTime()) / 1000));
-}
-
 function timelineAnalysis(mission: BackendMission | null, events: BackendMissionTimelineEvent[]) {
   const eventsBySequence = events.toSorted((a, b) => a.sequenceIndex - b.sequenceIndex);
   const metCounts = new Map<number, BackendMissionTimelineEvent[]>();
@@ -1739,16 +1551,6 @@ function validatePositiveDraftNumber(
   }
 }
 
-function readNumberParameter(parameters: Record<string, unknown>, key: string, fallback: number) {
-  const value = parameters[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-function readStringParameter(parameters: Record<string, unknown>, key: string, fallback: string) {
-  const value = parameters[key];
-  return typeof value === "string" && value.trim() ? value : fallback;
-}
-
 function templateEndpointErrorMessage(error: unknown, fallback: string) {
   const message = userErrorMessage(error, fallback);
   if (message.includes("status 404")) {
@@ -1780,14 +1582,14 @@ function maneuverTemplateDraftEstimateMps(draft: ManeuverTemplateDraft, orbitSum
   if (!Number.isFinite(targetAltitudeKm) || targetAltitudeKm < 0 || orbitSummary.currentAltitudeKm == null) {
     return null;
   }
-  const currentRadiusKm = orbitSummary.currentAltitudeKm + earthRadiusKm;
-  const targetRadiusKm = targetAltitudeKm + earthRadiusKm;
+  const currentRadiusKm = orbitSummary.currentAltitudeKm + EARTH_EQUATORIAL_RADIUS_KM;
+  const targetRadiusKm = targetAltitudeKm + EARTH_EQUATORIAL_RADIUS_KM;
   if (draft.type === "HOHMANN_TRANSFER") {
     const transferSemiMajorAxisKm = (currentRadiusKm + targetRadiusKm) / 2;
-    const circularSpeedInitial = Math.sqrt(earthMuKm3S2 / currentRadiusKm);
-    const circularSpeedTarget = Math.sqrt(earthMuKm3S2 / targetRadiusKm);
-    const transferPeriapsisSpeed = Math.sqrt(earthMuKm3S2 * ((2 / currentRadiusKm) - (1 / transferSemiMajorAxisKm)));
-    const transferApoapsisSpeed = Math.sqrt(earthMuKm3S2 * ((2 / targetRadiusKm) - (1 / transferSemiMajorAxisKm)));
+    const circularSpeedInitial = Math.sqrt(EARTH_MU_KM3_S2 / currentRadiusKm);
+    const circularSpeedTarget = Math.sqrt(EARTH_MU_KM3_S2 / targetRadiusKm);
+    const transferPeriapsisSpeed = Math.sqrt(EARTH_MU_KM3_S2 * ((2 / currentRadiusKm) - (1 / transferSemiMajorAxisKm)));
+    const transferApoapsisSpeed = Math.sqrt(EARTH_MU_KM3_S2 * ((2 / targetRadiusKm) - (1 / transferSemiMajorAxisKm)));
     return (Math.abs(transferPeriapsisSpeed - circularSpeedInitial) + Math.abs(circularSpeedTarget - transferApoapsisSpeed)) * 1000;
   }
   if (draft.type === "APOGEE_RAISE") {
@@ -1795,8 +1597,8 @@ function maneuverTemplateDraftEstimateMps(draft: ManeuverTemplateDraft, orbitSum
       return null;
     }
     const transferSemiMajorAxisKm = (currentRadiusKm + targetRadiusKm) / 2;
-    const currentSpeedKmps = orbitSummary.localVelocityKmps ?? Math.sqrt(earthMuKm3S2 / currentRadiusKm);
-    const transferSpeedKmps = Math.sqrt(earthMuKm3S2 * ((2 / currentRadiusKm) - (1 / transferSemiMajorAxisKm)));
+    const currentSpeedKmps = orbitSummary.localVelocityKmps ?? Math.sqrt(EARTH_MU_KM3_S2 / currentRadiusKm);
+    const transferSpeedKmps = Math.sqrt(EARTH_MU_KM3_S2 * ((2 / currentRadiusKm) - (1 / transferSemiMajorAxisKm)));
     return Math.abs(transferSpeedKmps - currentSpeedKmps) * 1000;
   }
   if (draft.type === "DEORBIT_BURN") {
@@ -1804,8 +1606,8 @@ function maneuverTemplateDraftEstimateMps(draft: ManeuverTemplateDraft, orbitSum
       return null;
     }
     const transferSemiMajorAxisKm = (currentRadiusKm + targetRadiusKm) / 2;
-    const currentSpeedKmps = orbitSummary.localVelocityKmps ?? Math.sqrt(earthMuKm3S2 / currentRadiusKm);
-    const transferSpeedKmps = Math.sqrt(earthMuKm3S2 * ((2 / currentRadiusKm) - (1 / transferSemiMajorAxisKm)));
+    const currentSpeedKmps = orbitSummary.localVelocityKmps ?? Math.sqrt(EARTH_MU_KM3_S2 / currentRadiusKm);
+    const transferSpeedKmps = Math.sqrt(EARTH_MU_KM3_S2 * ((2 / currentRadiusKm) - (1 / transferSemiMajorAxisKm)));
     return Math.abs(transferSpeedKmps - currentSpeedKmps) * 1000;
   }
   if (draft.type === "PERIGEE_RAISE") {
@@ -1819,7 +1621,7 @@ function maneuverTemplateDraftEstimateMps(draft: ManeuverTemplateDraft, orbitSum
   if (!localVelocityKmps || Math.abs(targetRadiusKm - currentRadiusKm) > 1) {
     return null;
   }
-  return Math.abs(Math.sqrt(earthMuKm3S2 / currentRadiusKm) - localVelocityKmps) * 1000;
+  return Math.abs(Math.sqrt(EARTH_MU_KM3_S2 / currentRadiusKm) - localVelocityKmps) * 1000;
 }
 
 function classifyPreviewOrbit(perigeeAltitudeKm: number, apogeeAltitudeKm: number, eccentricity: number) {
@@ -1843,8 +1645,8 @@ function classifyPreviewOrbit(perigeeAltitudeKm: number, apogeeAltitudeKm: numbe
 }
 
 function orbitSummaryFromApsides(current: OrbitSummary, perigeeAltitudeKm: number, apogeeAltitudeKm: number): OrbitSummary {
-  const perigeeRadiusKm = earthRadiusKm + perigeeAltitudeKm;
-  const apogeeRadiusKm = earthRadiusKm + apogeeAltitudeKm;
+  const perigeeRadiusKm = EARTH_EQUATORIAL_RADIUS_KM + perigeeAltitudeKm;
+  const apogeeRadiusKm = EARTH_EQUATORIAL_RADIUS_KM + apogeeAltitudeKm;
   const semiMajorAxisKm = (perigeeRadiusKm + apogeeRadiusKm) / 2;
   const eccentricity = (apogeeRadiusKm - perigeeRadiusKm) / (apogeeRadiusKm + perigeeRadiusKm);
   return {
@@ -1855,7 +1657,7 @@ function orbitSummaryFromApsides(current: OrbitSummary, perigeeAltitudeKm: numbe
     apogeeAltitudeKm,
     semiMajorAxisKm,
     eccentricity,
-    periodSeconds: 2 * Math.PI * Math.sqrt((semiMajorAxisKm ** 3) / earthMuKm3S2),
+    periodSeconds: circularOrbitPeriodSeconds(semiMajorAxisKm),
   };
 }
 
@@ -1869,7 +1671,7 @@ function predictedTemplateOrbitSummary(preview: ManeuverTemplatePreview | null, 
     if (!Number.isFinite(targetAltitudeKm)) {
       return null;
     }
-    const radiusKm = earthRadiusKm + targetAltitudeKm;
+    const radiusKm = EARTH_EQUATORIAL_RADIUS_KM + targetAltitudeKm;
     return {
       ...current,
       classification: targetAltitudeKm < 2000 ? "LEO / Circular" : targetAltitudeKm < 30000 ? "MEO / Circular" : Math.abs(targetAltitudeKm - 35786) < 1500 ? "GEO / Circular" : "HEO / Circular",
@@ -1878,7 +1680,7 @@ function predictedTemplateOrbitSummary(preview: ManeuverTemplatePreview | null, 
       apogeeAltitudeKm: targetAltitudeKm,
       semiMajorAxisKm: radiusKm,
       eccentricity: 0,
-      periodSeconds: 2 * Math.PI * Math.sqrt((radiusKm ** 3) / earthMuKm3S2),
+      periodSeconds: circularOrbitPeriodSeconds(radiusKm),
     };
   }
   if (preview.type === "CIRCULARIZATION") {
@@ -1886,7 +1688,7 @@ function predictedTemplateOrbitSummary(preview: ManeuverTemplatePreview | null, 
     if (!Number.isFinite(burnRadiusKm)) {
       return null;
     }
-    const altitudeKm = burnRadiusKm - earthRadiusKm;
+    const altitudeKm = burnRadiusKm - EARTH_EQUATORIAL_RADIUS_KM;
     return {
       ...current,
       classification: altitudeKm < 2000 ? "LEO / Circular" : altitudeKm < 30000 ? "MEO / Circular" : Math.abs(altitudeKm - 35786) < 1500 ? "GEO / Circular" : "HEO / Circular",
@@ -1895,7 +1697,7 @@ function predictedTemplateOrbitSummary(preview: ManeuverTemplatePreview | null, 
       apogeeAltitudeKm: altitudeKm,
       semiMajorAxisKm: burnRadiusKm,
       eccentricity: 0,
-      periodSeconds: 2 * Math.PI * Math.sqrt((burnRadiusKm ** 3) / earthMuKm3S2),
+      periodSeconds: circularOrbitPeriodSeconds(burnRadiusKm),
     };
   }
   if (preview.type === "PLANE_CHANGE") {

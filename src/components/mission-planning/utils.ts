@@ -6,9 +6,19 @@ import type {
   NumericalIntegratorTypeId,
 } from "@/services/orbitServerApi";
 import type { OrbitState } from "@/domain/orbit";
+import { EARTH_EQUATORIAL_RADIUS_KM, EARTH_MU_KM3_S2 } from "@/services/OrbitMechanicsService";
+import {
+  eventScheduleMode,
+  eventWindowError,
+  metOffsetLabelFromSeconds,
+  missionDurationSeconds,
+  readNumberParameter,
+  readStringParameter,
+  resolveEventMetOffsets,
+} from "@/services/TimelineScheduler";
 import type { OrbitSummary } from "./OrbitSummaryPanel";
 import type { MissionTrajectoryOverlay } from "./types";
-import type { TimelineInteractionModel, TimelineScheduleMode, TimelineSnapMode, TimelineTimeMode, TimelineZoomPreset } from "./types";
+import type { TimelineInteractionModel, TimelineSnapMode, TimelineTimeMode, TimelineZoomPreset } from "./types";
 
 export const defaultMissionTrajectoryWindowMinutes = 90;
 export const missionTrajectoryMinStepSeconds = 5;
@@ -53,33 +63,14 @@ export function secondsToDurationLabel(seconds: number) {
   return `${remainingSeconds}s`;
 }
 
-export function metOffsetLabelFromSeconds(totalSeconds: number) {
-  const sign = totalSeconds < 0 ? "T-" : "T+";
-  const absolute = Math.abs(Math.round(totalSeconds));
-  const hours = Math.floor(absolute / 3600);
-  const minutes = Math.floor((absolute % 3600) / 60);
-  const seconds = absolute % 60;
-  return `${sign}${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
-
-export function readNumberParameter(parameters: Record<string, unknown>, key: string, fallback: number) {
-  const value = parameters[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-export function readStringParameter(parameters: Record<string, unknown>, key: string, fallback: string) {
-  const value = parameters[key];
-  return typeof value === "string" && value.trim() ? value : fallback;
-}
-
-export function eventScheduleMode(event: BackendMissionTimelineEvent): TimelineScheduleMode {
-  const mode = readStringParameter(event.parameters ?? {}, "scheduleMode", "MET");
-  return mode === "UTC" || mode === "MET" || mode === "AFTER_EVENT" ? mode : "MET";
-}
-
-export function missionDurationSeconds(mission: BackendMission) {
-  return Math.max(0, Math.round((new Date(mission.scenarioEnd).getTime() - new Date(mission.scenarioStart).getTime()) / 1000));
-}
+export {
+  eventScheduleMode,
+  metOffsetLabelFromSeconds,
+  missionDurationSeconds,
+  readNumberParameter,
+  readStringParameter,
+  resolveEventMetOffsets,
+};
 
 function signedOffsetLabel(fromIso: string, toIso: string) {
   const from = new Date(fromIso).getTime();
@@ -98,95 +89,6 @@ function signedOffsetLabel(fromIso: string, toIso: string) {
 
 export function displayTimelineTime(mode: TimelineTimeMode, mission: BackendMission | null, iso: string) {
   return mode === "MET" && mission ? signedOffsetLabel(mission.scenarioStart, iso) : compactIsoUtc(iso);
-}
-
-function eventMetOffsetSeconds(mission: BackendMission | null, event: BackendMissionTimelineEvent) {
-  if (!mission) {
-    return null;
-  }
-  const startMs = new Date(mission.scenarioStart).getTime();
-  const eventMs = new Date(event.executionTime).getTime();
-  if (!Number.isFinite(startMs) || !Number.isFinite(eventMs)) {
-    return null;
-  }
-  return Math.round((eventMs - startMs) / 1000);
-}
-
-export function resolveEventMetOffsets(mission: BackendMission | null, events: BackendMissionTimelineEvent[]) {
-  const resolved = new Map<string, number>();
-  const warnings: string[] = [];
-  const eventById = new Map<string, BackendMissionTimelineEvent>();
-  const idCounts = new Map<string, number>();
-
-  events.forEach((event) => {
-    eventById.set(event.id, event);
-    idCounts.set(event.id, (idCounts.get(event.id) ?? 0) + 1);
-  });
-  idCounts.forEach((count, id) => {
-    if (count > 1) {
-      warnings.push(`Duplicate event id ${id}.`);
-    }
-  });
-
-  const visit = (event: BackendMissionTimelineEvent, path: string[]): number | null => {
-    if (resolved.has(event.id)) {
-      return resolved.get(event.id)!;
-    }
-    if (path.includes(event.id)) {
-      warnings.push(`Circular dependency detected: ${[...path, event.id].join(" -> ")}.`);
-      return null;
-    }
-
-    const parameters = event.parameters ?? {};
-    const mode = eventScheduleMode(event);
-    if (mode === "AFTER_EVENT") {
-      const dependencyId = readStringParameter(parameters, "scheduleDependencyId", "");
-      if (!dependencyId) {
-        warnings.push(`${event.name} is missing a dependency event.`);
-        return null;
-      }
-      const dependency = eventById.get(dependencyId);
-      if (!dependency) {
-        warnings.push(`${event.name} references missing event ${dependencyId}.`);
-        return null;
-      }
-      const dependencyMet = visit(dependency, [...path, event.id]);
-      if (dependencyMet === null) {
-        warnings.push(`${event.name} has an unresolved dependency chain.`);
-        return null;
-      }
-      const offsetSeconds = readNumberParameter(parameters, "scheduleOffsetSeconds", 0);
-      const value = dependencyMet + offsetSeconds;
-      resolved.set(event.id, value);
-      return value;
-    }
-
-    const value = mode === "MET"
-      ? readNumberParameter(parameters, "scheduleOffsetSeconds", eventMetOffsetSeconds(mission, event) ?? 0)
-      : eventMetOffsetSeconds(mission, event);
-    if (value === null) {
-      warnings.push(`${event.name} has an invalid UTC execution time.`);
-      return null;
-    }
-    resolved.set(event.id, value);
-    return value;
-  };
-
-  events.forEach((event) => {
-    visit(event, []);
-  });
-
-  return { offsets: resolved, warnings };
-}
-
-function eventWindowError(mission: BackendMission | null, executionIso: string) {
-  if (!mission) {
-    return null;
-  }
-  const execution = new Date(executionIso);
-  const start = new Date(mission.scenarioStart);
-  const end = new Date(mission.scenarioEnd);
-  return execution >= start && execution <= end ? null : "Event is outside the mission window.";
 }
 
 function timelineEventDurationSeconds(event: BackendMissionTimelineEvent, nextEvent: BackendMissionTimelineEvent | null, mission: BackendMission | null) {
@@ -553,9 +455,6 @@ type ReducedTargetState = {
   eccentricity: number;
 };
 
-const earthMuKm3S2 = 398600.4418;
-const earthRadiusKm = 6378.137;
-
 function formatSignedDegrees(value: number | null) {
   return value == null || !Number.isFinite(value) ? "Unavailable" : `${value.toFixed(3)} deg`;
 }
@@ -570,16 +469,16 @@ export function missionTargetingSolutions(
   profile: BackendPropagationProfile | null,
 ): ManeuverTargetingSolution[] {
   const solutions: ManeuverTargetingSolution[] = [];
-  const currentRadiusKm = orbitSummary.currentAltitudeKm == null ? null : orbitSummary.currentAltitudeKm + earthRadiusKm;
+  const currentRadiusKm = orbitSummary.currentAltitudeKm == null ? null : orbitSummary.currentAltitudeKm + EARTH_EQUATORIAL_RADIUS_KM;
   const speedMps = (orbitSummary.localVelocityKmps ?? 0) * 1000;
 
   if (targets.targetAltitudeKm != null && currentRadiusKm != null && orbitSummary.currentAltitudeKm != null) {
-    const targetRadiusKm = targets.targetAltitudeKm + earthRadiusKm;
+    const targetRadiusKm = targets.targetAltitudeKm + EARTH_EQUATORIAL_RADIUS_KM;
     const transferA = (currentRadiusKm + targetRadiusKm) / 2;
-    const circularCurrent = Math.sqrt(earthMuKm3S2 / currentRadiusKm) * 1000;
-    const circularTarget = Math.sqrt(earthMuKm3S2 / targetRadiusKm) * 1000;
-    const transferStart = Math.sqrt(earthMuKm3S2 * ((2 / currentRadiusKm) - (1 / transferA))) * 1000;
-    const transferEnd = Math.sqrt(earthMuKm3S2 * ((2 / targetRadiusKm) - (1 / transferA))) * 1000;
+    const circularCurrent = Math.sqrt(EARTH_MU_KM3_S2 / currentRadiusKm) * 1000;
+    const circularTarget = Math.sqrt(EARTH_MU_KM3_S2 / targetRadiusKm) * 1000;
+    const transferStart = Math.sqrt(EARTH_MU_KM3_S2 * ((2 / currentRadiusKm) - (1 / transferA))) * 1000;
+    const transferEnd = Math.sqrt(EARTH_MU_KM3_S2 * ((2 / targetRadiusKm) - (1 / transferA))) * 1000;
     const deltaV = Math.abs(transferStart - circularCurrent) + Math.abs(circularTarget - transferEnd);
     solutions.push({
       id: "target-altitude",
@@ -944,10 +843,10 @@ function finiteDifferenceCorrector(
 }
 
 function applyReducedManeuverModel(initialState: ReducedTargetState, controlMps: [number, number, number]): ReducedTargetState {
-  const circularRadiusKm = earthRadiusKm + Math.max(120, initialState.altitudeKm);
-  const circularSpeedMps = Math.sqrt(earthMuKm3S2 / circularRadiusKm) * 1000;
+  const circularRadiusKm = EARTH_EQUATORIAL_RADIUS_KM + Math.max(120, initialState.altitudeKm);
+  const circularSpeedMps = Math.sqrt(EARTH_MU_KM3_S2 / circularRadiusKm) * 1000;
   return {
-    altitudeKm: Math.max(-earthRadiusKm, initialState.altitudeKm + (2 * circularRadiusKm * controlMps[0] / circularSpeedMps)),
+    altitudeKm: Math.max(-EARTH_EQUATORIAL_RADIUS_KM, initialState.altitudeKm + (2 * circularRadiusKm * controlMps[0] / circularSpeedMps)),
     inclinationDeg: initialState.inclinationDeg + (controlMps[1] / Math.max(circularSpeedMps, 1)) * 180 / Math.PI,
     eccentricity: clamp(initialState.eccentricity + controlMps[2] / Math.max(circularSpeedMps, 1), 0, 0.95),
   };
@@ -1084,10 +983,10 @@ function hohmannTransferSeconds(orbitSummary: OrbitSummary, targetAltitudeKm: nu
   if (targetAltitudeKm == null || orbitSummary.currentAltitudeKm == null) {
     return 0;
   }
-  const r1 = orbitSummary.currentAltitudeKm + earthRadiusKm;
-  const r2 = targetAltitudeKm + earthRadiusKm;
+  const r1 = orbitSummary.currentAltitudeKm + EARTH_EQUATORIAL_RADIUS_KM;
+  const r2 = targetAltitudeKm + EARTH_EQUATORIAL_RADIUS_KM;
   const transferA = (r1 + r2) / 2;
-  return Math.PI * Math.sqrt((transferA ** 3) / earthMuKm3S2);
+  return Math.PI * Math.sqrt((transferA ** 3) / EARTH_MU_KM3_S2);
 }
 
 export function optimizationCandidates(
@@ -1242,7 +1141,7 @@ function groundElevationDeg(state: OrbitState, station: GroundStationConfig) {
 function geodeticToEcefKm(latitudeDeg: number, longitudeDeg: number, altitudeKm: number): [number, number, number] {
   const lat = latitudeDeg * Math.PI / 180;
   const lon = longitudeDeg * Math.PI / 180;
-  const radius = earthRadiusKm + altitudeKm;
+  const radius = EARTH_EQUATORIAL_RADIUS_KM + altitudeKm;
   return [radius * Math.cos(lat) * Math.cos(lon), radius * Math.cos(lat) * Math.sin(lon), radius * Math.sin(lat)];
 }
 
@@ -1262,7 +1161,7 @@ export function coverageAnalysis(
   }
   const footprintRadiusKm = Math.max(0, coverage.swathWidthKm / 2);
   const footprintAreaKm2 = Math.PI * footprintRadiusKm * footprintRadiusKm;
-  const earthAreaKm2 = 4 * Math.PI * earthRadiusKm * earthRadiusKm;
+  const earthAreaKm2 = 4 * Math.PI * EARTH_EQUATORIAL_RADIUS_KM * EARTH_EQUATORIAL_RADIUS_KM;
   const accessOpportunities = trajectory.filter((state) => state.altitudeKm > 0 && state.latitudeDeg >= -90 && state.latitudeDeg <= 90).length;
   const uniqueCells = new Set(trajectory.map((state) => `${Math.round(state.latitudeDeg / 5) * 5}:${Math.round(state.longitudeDeg / 5) * 5}`));
   const elevationMaskFactor = Math.max(0.2, Math.min(1, (90 - Math.max(0, coverage.minimumElevationDeg)) / 90));
