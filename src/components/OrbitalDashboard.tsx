@@ -8,7 +8,7 @@ import { ToastContainer, toast } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 import type { OrbitState, SatelliteObject, SatelliteSnapshot, SatelliteVisualSettings } from "@/domain/orbit";
 import { GroundTrackMiniMap } from "@/components/GroundTrackMiniMap";
-import type { GroundTrackRangeId, GroundTrackRangeOption } from "@/components/GroundTrackMiniMap";
+import type { GroundTrackRangeOption } from "@/components/GroundTrackMiniMap";
 import {
   GroundOperationsModalContent,
   groundOpsHorizonOptions,
@@ -18,6 +18,7 @@ import {
   GroundStationScenarioProvider,
   useGroundStationScenario,
 } from "@/components/ground-operations/GroundStationScenarioContext";
+import { ScenarioProvider, useScenario } from "@/components/scenario/ScenarioContext";
 import type { ConjunctionEvent, ConjunctionSnapshot } from "@/domain/conjunction";
 import { getConjunctionStatus } from "@/domain/conjunction";
 import type { GroundStation, GroundStationNetwork } from "@/domain/groundOperations";
@@ -78,10 +79,6 @@ import {
   duplicateOrbitTemplate,
   getOrCreateAnonymousWorkspaceId,
   makeWorkspaceId,
-  readMissionLibrary,
-  readMissionTemplateLibrary,
-  readOrbitTemplateLibrary,
-  readOrbitLibrary,
   storedEventFromBackend,
   storedMissionFromBackend,
   upsertMission,
@@ -161,7 +158,6 @@ type ManeuverFocusRequest = {
   altitudeKm: number;
   sequence: number;
 };
-type FrameMode = "earth-fixed" | "inertial";
 type OrbitSourceId = "catalog" | "tle" | "classical" | "cartesian" | "template";
 type TleImportMode = "paste" | "upload" | "url";
 type TimelineModalMode = "create" | "edit";
@@ -212,17 +208,6 @@ type MissionSubjectOption = {
   label: string;
   detail: string;
   satellite: SatelliteObject;
-};
-type MissionTrajectoryOverlay = {
-  mission: SatelliteSnapshot | null;
-  legacy: SatelliteSnapshot | null;
-  generatedAt: string;
-  message: string;
-  runSignature: string;
-  designSignature: string | null;
-  generationSnapshot: MissionGenerationSnapshot | null;
-  sampleCadenceSeconds: number;
-  stale: boolean;
 };
 type OperationLabel =
   | "Importing TLE..."
@@ -1793,50 +1778,101 @@ export function OrbitalDashboard() {
   const [workspaceId] = useState(() => getOrCreateAnonymousWorkspaceId());
 
   return (
-    <GroundStationScenarioProvider workspaceId={workspaceId}>
-      <OrbitalDashboardContent workspaceId={workspaceId} />
-    </GroundStationScenarioProvider>
+    <ScenarioProvider workspaceId={workspaceId} initialSimulationTime={initialSimulationTime} fallbackCapabilities={fallbackCapabilities}>
+      <GroundStationScenarioProvider workspaceId={workspaceId}>
+        <OrbitalDashboardContent workspaceId={workspaceId} />
+      </GroundStationScenarioProvider>
+    </ScenarioProvider>
   );
 }
 
 function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
+  const { scenario, satellites, actions: scenarioActions } = useScenario();
+  const activeDataSource = scenario.activeDataSource;
+  const manualOrbitId = scenario.manualOrbitId;
+  const selectedSatelliteIds = scenario.selectedSatelliteIds;
+  const simTime = scenario.simulation.time;
+  const trajectoryAnchorTime = scenario.simulation.trajectoryAnchorTime;
+  const isPlaying = scenario.simulation.isPlaying;
+  const speed = scenario.simulation.speed;
+  const customSpeedInput = scenario.simulation.customSpeedInput;
+  const frameMode = scenario.simulation.frameMode;
+  const groundTrackRangeId = scenario.simulation.groundTrackRangeId;
+  const showLabels = scenario.display.labels;
+  const showAllOrbits = scenario.display.allOrbits;
+  const showRangeCheck = scenario.display.range;
+  const showManeuvers = scenario.display.maneuvers;
+  const showMissionComparison = scenario.display.missionComparison;
+  const showConjunctions = scenario.display.conjunctions;
+  const maneuverEvents = scenario.maneuvers.events;
+  const selectedManeuverId = scenario.maneuvers.selectedManeuverId;
+  const mission = scenario.missions.activeMission;
+  const missionTimelineEvents = scenario.missions.timelineEvents;
+  const selectedTimelineEventId = scenario.missions.selectedTimelineEventId;
+  const missionTrajectoryOverlay = scenario.missions.trajectoryOverlay;
+  const importedMissionSpacecraftId = scenario.missions.importedMissionSpacecraftId;
+  const missionPropagationProfile = scenario.missions.propagationProfile;
+  const pendingMissionPropagationProfileUpdate = scenario.missions.pendingPropagationProfileUpdate;
+  const conjunctionEvents = scenario.conjunctions.events;
+  const selectedConjunctionId = scenario.conjunctions.selectedConjunctionId;
+  const orbitLibrary = scenario.libraries.orbitLibrary;
+  const missionLibrary = scenario.libraries.missionLibrary;
+  const templateLibrary = scenario.libraries.templateLibrary;
+  const orbitTemplateLibrary = scenario.libraries.orbitTemplateLibrary;
+  const activeWorkspaceOrbitId = scenario.libraries.activeWorkspaceOrbitId;
+  const activeWorkspaceMissionId = scenario.libraries.activeWorkspaceMissionId;
+  const analysisConfig = scenario.analysis.config;
+  const capabilities = scenario.analysis.capabilities;
+  const {
+    setActiveDataSource,
+    setManualOrbitId,
+    setSatellites,
+    setSelectedSatelliteIds,
+    setSimTime,
+    setTrajectoryAnchorTime,
+    setIsPlaying,
+    setSpeed,
+    setCustomSpeedInput,
+    setFrameMode,
+    setShowLabels,
+    setShowAllOrbits,
+    setShowRangeCheck,
+    setGroundTrackRangeId,
+    setShowManeuvers,
+    setShowMissionComparison,
+    setShowConjunctions,
+    setSatelliteVisual,
+    setManeuverEvents,
+    setSelectedManeuverId,
+    setMission,
+    setMissionTimelineEvents,
+    setSelectedTimelineEventId,
+    setMissionTrajectoryOverlay,
+    setImportedMissionSpacecraftId,
+    setMissionPropagationProfile,
+    setPendingMissionPropagationProfileUpdate,
+    setConjunctionEvents,
+    setSelectedConjunctionId,
+    setOrbitLibrary,
+    setMissionLibrary,
+    setTemplateLibrary,
+    setOrbitTemplateLibrary,
+    setActiveWorkspaceOrbitId,
+    setActiveWorkspaceMissionId,
+    setAnalysisConfig,
+    setCapabilities,
+  } = scenarioActions;
   const [tleUrl, setTleUrl] = useState("");
-  const [activeDataSource, setActiveDataSource] = useState<ActiveDataSource>("sample");
-  const [manualOrbitId, setManualOrbitId] = useState<string | null>(null);
   const [activeSourceModal, setActiveSourceModal] = useState<OrbitSourceId | null>(null);
   const [isSourcePickerOpen, setIsSourcePickerOpen] = useState(false);
   const [backendCatalogGroup, setBackendCatalogGroup] = useState<CatalogGroupId>("STATIONS");
-  const [satellites, setSatellites] = useState<SatelliteObject[]>([]);
   const [messages, setMessages] = useState<string[]>([]);
-  const [selectedSatelliteIds, setSelectedSatelliteIds] = useState<string[]>([]);
-  const [simTime, setSimTime] = useState(() => initialSimulationTime);
-  const [trajectoryAnchorTime, setTrajectoryAnchorTime] = useState(() => initialSimulationTime);
-  const [isPlaying, setIsPlaying] = useState(true);
-  const [speed, setSpeed] = useState(60);
-  const [customSpeedInput, setCustomSpeedInput] = useState("120");
-  const [frameMode, setFrameMode] = useState<FrameMode>("earth-fixed");
-  const [showLabels, setShowLabels] = useState(true);
-  const [showAllOrbits, setShowAllOrbits] = useState(false);
-  const [showRangeCheck, setShowRangeCheck] = useState(false);
-  const [groundTrackRangeId, setGroundTrackRangeId] = useState<GroundTrackRangeId>("live");
-  const [showManeuvers, setShowManeuvers] = useState(false);
-  const [maneuverEvents, setManeuverEvents] = useState<ManeuverEvent[]>([]);
-  const [selectedManeuverId, setSelectedManeuverId] = useState<string | null>(null);
   const [isManeuverModalOpen, setIsManeuverModalOpen] = useState(false);
-  const [mission, setMission] = useState<BackendMission | null>(null);
-  const [missionTimelineEvents, setMissionTimelineEvents] = useState<BackendMissionTimelineEvent[]>([]);
-  const [orbitLibrary, setOrbitLibrary] = useState<StoredOrbit[]>(() => readOrbitLibrary());
-  const [missionLibrary, setMissionLibrary] = useState<MissionLibraryState>(() => readMissionLibrary());
-  const [templateLibrary, setTemplateLibrary] = useState<MissionTemplateLibraryState>(() => readMissionTemplateLibrary());
-  const [orbitTemplateLibrary, setOrbitTemplateLibrary] = useState<OrbitTemplateLibraryState>(() => readOrbitTemplateLibrary());
-  const [activeWorkspaceOrbitId, setActiveWorkspaceOrbitId] = useState<string | null>(null);
-  const [activeWorkspaceMissionId, setActiveWorkspaceMissionId] = useState<string | null>(null);
   const [groundOpsHorizon, setGroundOpsHorizon] = useState<GroundOpsHorizon>({ id: "SIX_HOURS", customHours: "6" });
   const [groundOpsHorizonSnapshot, setGroundOpsHorizonSnapshot] = useState<SatelliteSnapshot | null>(null);
   const workspaceImportInputRef = useRef<HTMLInputElement | null>(null);
   const templateImportInputRef = useRef<HTMLInputElement | null>(null);
   const orbitTemplateImportInputRef = useRef<HTMLInputElement | null>(null);
-  const [selectedTimelineEventId, setSelectedTimelineEventId] = useState<string | null>(null);
   const [timelineModalMode, setTimelineModalMode] = useState<TimelineModalMode | null>(null);
   const [timelineDraft, setTimelineDraft] = useState<TimelineEditorDraft>(defaultTimelineDraft);
   const [isManeuverTemplateOpen, setIsManeuverTemplateOpen] = useState(false);
@@ -1851,20 +1887,10 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const [timelineStatus, setTimelineStatus] = useState<string | null>(null);
   const [timelineDragEventId, setTimelineDragEventId] = useState<string | null>(null);
   const [activeCommandModal, setActiveCommandModal] = useState<CommandModalId | null>(null);
-  const [missionTrajectoryOverlay, setMissionTrajectoryOverlay] = useState<MissionTrajectoryOverlay | null>(null);
   const [missionTrajectoryCadenceInput, setMissionTrajectoryCadenceInput] = useState(String(missionTrajectoryMinStepSeconds));
-  const [showMissionComparison, setShowMissionComparison] = useState(false);
   const [isMissionTrajectoryLoading, setIsMissionTrajectoryLoading] = useState(false);
   const [activeOperationLabel, setActiveOperationLabel] = useState<OperationLabel | null>(null);
-  const [importedMissionSpacecraftId, setImportedMissionSpacecraftId] = useState<string | null>(null);
-  const [showConjunctions, setShowConjunctions] = useState(false);
-  const [conjunctionEvents, setConjunctionEvents] = useState<ConjunctionEvent[]>([]);
-  const [selectedConjunctionId, setSelectedConjunctionId] = useState<string | null>(null);
   const [dynamicDataMessage, setDynamicDataMessage] = useState<string | null>(null);
-  const [analysisConfig, setAnalysisConfig] = useState<BackendAnalysisConfigResponse | null>(null);
-  const [missionPropagationProfile, setMissionPropagationProfile] = useState<BackendPropagationProfile | null>(null);
-  const [pendingMissionPropagationProfileUpdate, setPendingMissionPropagationProfileUpdate] = useState<UpdatePropagationProfileRequest | null>(null);
-  const [capabilities, setCapabilities] = useState<BackendCapabilityRegistry>(fallbackCapabilities);
   const [propagationProfileStatus, setPropagationProfileStatus] = useState<string | null>(null);
   const [analysisMessage, setAnalysisMessage] = useState<string | null>(null);
   const [serverStateBySatelliteId, setServerStateBySatelliteId] = useState<Map<string, OrbitState>>(() => new Map());
@@ -2786,20 +2812,8 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     key: keyof SatelliteVisualSettings,
     value: boolean,
   ) => {
-    setSatellites((current) =>
-      current.map((satellite) =>
-        satellite.id === satelliteId
-          ? {
-              ...satellite,
-              visual: {
-                ...satellite.visual,
-                [key]: value,
-              },
-            }
-          : satellite,
-      ),
-    );
-  }, []);
+    setSatelliteVisual(satelliteId, key, value);
+  }, [setSatelliteVisual]);
 
   const keepSatelliteInSelection = useCallback((satelliteId: string) => {
     setSelectedSatelliteIds((current) => {
