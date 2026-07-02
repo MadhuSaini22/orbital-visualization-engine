@@ -445,6 +445,7 @@ export function CesiumGlobe({
     trails: 0,
     groundTracks: 0,
   });
+  const layerStatsRef = useRef(layerStats);
   const [cameraLineScale, setCameraLineScale] = useState(1);
   const [hoverInfo, setHoverInfo] = useState<HoverInfo>(null);
   const [viewerReady, setViewerReady] = useState(false);
@@ -910,23 +911,19 @@ export function CesiumGlobe({
       });
     });
 
-    setLayerStats((current) => {
-      const next = {
-        orbits: orbitPathSnapshots.length,
-        trails: trailSnapshots.length,
-        groundTracks: groundTrackSnapshots.length,
-      };
-
-      if (
-        current.orbits === next.orbits &&
-        current.trails === next.trails &&
-        current.groundTracks === next.groundTracks
-      ) {
-        return current;
-      }
-
-      return next;
-    });
+    const nextLayerStats = {
+      orbits: orbitPathSnapshots.length,
+      trails: trailSnapshots.length,
+      groundTracks: groundTrackSnapshots.length,
+    };
+    if (
+      layerStatsRef.current.orbits !== nextLayerStats.orbits ||
+      layerStatsRef.current.trails !== nextLayerStats.trails ||
+      layerStatsRef.current.groundTracks !== nextLayerStats.groundTracks
+    ) {
+      layerStatsRef.current = nextLayerStats;
+      setLayerStats(nextLayerStats);
+    }
     viewer.scene.requestRender();
   }, [cameraLineScale, currentGmstRad, groundTrackSnapshots, orbitPathSnapshots, selectedSatelliteIds, snapshots, trailSnapshots, viewerReady]);
 

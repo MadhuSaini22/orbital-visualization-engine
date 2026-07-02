@@ -236,6 +236,38 @@ function isNumberRecord(value: unknown): value is Record<string, number> {
   return typeof value === "object" && value !== null && Object.values(value).every((item) => typeof item === "number");
 }
 
+function derivedAnalysisSignature(result: AnalysisResult) {
+  return JSON.stringify({
+    maneuvers: result.maneuverSnapshots.map((snapshot) => ({
+      id: snapshot.event.id,
+      stateTime: snapshot.state?.timeUtc ?? null,
+      preCount: snapshot.preTrajectory.length,
+      postCount: snapshot.postTrajectory.length,
+    })),
+    conjunctions: result.conjunctionSnapshots.map((snapshot) => ({
+      id: snapshot.event.id,
+      status: snapshot.status,
+      primaryTime: snapshot.primaryState?.timeUtc ?? null,
+      secondaryTime: snapshot.secondaryState?.timeUtc ?? null,
+      missDistanceKm: snapshot.missDistanceKm,
+    })),
+    groundStations: {
+      markers: result.groundStationVisualization.markers.map((marker) => [marker.station.id, marker.isVisible]),
+      footprint: result.groundStationVisualization.satelliteFootprint,
+      regions: result.groundStationVisualization.stationAccessRegions.map((region) => [
+        region.id,
+        region.radiusMeters,
+        region.isVisible,
+      ]),
+      contactLines: result.groundStationVisualization.contactLines.map((line) => [
+        line.id,
+        line.satelliteState.timeUtc,
+      ]),
+    },
+    missionSummary: result.missionSummary,
+  });
+}
+
 function missionSummaryAnalysis(mission: BackendMission | null, events: BackendMissionTimelineEvent[]): MissionSummaryAnalysis {
   const eventsBySequence = events.toSorted((a, b) => a.sequenceIndex - b.sequenceIndex);
   const metCounts = new Map<number, BackendMissionTimelineEvent[]>();
@@ -341,6 +373,17 @@ export class AnalysisEngine {
       return this.result;
     }
 
+    if (request.type === "derive") {
+      const nextResult = this.deriveAnalysis(request);
+      if (derivedAnalysisSignature(nextResult) === derivedAnalysisSignature(this.result)) {
+        return this.result;
+      }
+      this.result = nextResult;
+      this.status = this.result.status;
+      this.notify();
+      return this.result;
+    }
+
     this.status = "running";
     this.result = {
       ...this.result,
@@ -350,9 +393,6 @@ export class AnalysisEngine {
 
     try {
       switch (request.type) {
-        case "derive":
-          this.result = this.deriveAnalysis(request);
-          break;
         case "load-analysis-config":
           this.result = await this.loadAnalysisConfig(request);
           break;
