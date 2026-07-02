@@ -19,8 +19,6 @@ import {
   useGroundStationScenario,
 } from "@/components/ground-operations/GroundStationScenarioContext";
 import { ScenarioProvider, useScenario } from "@/components/scenario/ScenarioContext";
-import type { ConjunctionEvent, ConjunctionSnapshot } from "@/domain/conjunction";
-import { getConjunctionStatus } from "@/domain/conjunction";
 import type { GroundStation, GroundStationNetwork } from "@/domain/groundOperations";
 import type { ManeuverEvent, ManeuverSnapshot } from "@/domain/maneuver";
 import { getManeuverTone } from "@/domain/maneuver";
@@ -40,7 +38,6 @@ import {
   utcIsoToTimeInput,
 } from "@/geometry/utcDateTime";
 import {
-  applyAnalysisPreset,
   applyManeuverTemplate,
   createManualOrbit,
   createMission,
@@ -48,16 +45,12 @@ import {
   deleteMissionTimelineEvent,
   fetchCatalogGroupTle,
   fetchCapabilities,
-  fetchAnalysisConfig,
-  fetchConjunctions,
   fetchMissionTimelineEvents,
   fetchMissionPropagationProfile,
   fetchMissionTrajectory,
   fetchMissions,
-  fetchManeuvers,
   previewManeuverTemplate,
   reorderMissionTimelineEvents,
-  setAnalysisMode,
   setMissionTimelineEventEnabled,
   updateMissionPropagationProfile,
   updateMissionTimelineEvent,
@@ -95,11 +88,8 @@ import type {
   BackendMission,
   BackendMissionTimelineEvent,
   BackendManualOrbitResponse,
-  BackendAnalysisConfigResponse,
   BackendCapabilityRegistry,
-  BackendConjunctionRecord,
   BackendEphemerisState,
-  BackendManeuverEvent,
   BackendPropagationProfile,
   CreateTimelineEventRequest,
   CreateManualOrbitRequest,
@@ -125,12 +115,11 @@ import type {
   StoredOrbitSourceType,
   StoredWorkspace,
 } from "@/services/workspaceStorage";
-import { GroundStationVisualizationService } from "@/services/GroundStationVisualizationService";
 import { backendEphemerisStateToOrbitState } from "@/services/FrameTransformService";
 import { EARTH_EQUATORIAL_RADIUS_KM, EARTH_MU_KM3_S2, circularOrbitPeriodSeconds } from "@/services/OrbitMechanicsService";
+import { AnalysisEngine, type AnalysisResult } from "@/services/AnalysisEngine";
 import {
   PropagationEngine,
-  propagationEventStateKey,
   type BackendEventStateRequest,
   type PropagationResult,
 } from "@/services/PropagationEngine";
@@ -246,8 +235,6 @@ const speedPresetOptions = [
   { speed: 1000, label: "1000x" },
   { speed: 10000, label: "10000x" },
 ] as const;
-const maneuverWindowMinutes = 45;
-const conjunctionStepSec = 120;
 const defaultMissionTrajectoryWindowMinutes = 90;
 type ActiveDataSource = "sample" | "endpoint" | "backend" | "manual";
 const defaultTimelineDraft: TimelineEditorDraft = {
@@ -623,75 +610,8 @@ function groundOpsStepSeconds(hours: number) {
   return 120;
 }
 
-function eventStateKey(satelliteId: string, timeUtc: string) {
-  return propagationEventStateKey(satelliteId, timeUtc);
-}
-
 function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === "AbortError";
-}
-
-function normalizeBackendManeuvers(raw: BackendManeuverEvent[]): ManeuverEvent[] {
-  return raw.map((event): ManeuverEvent => {
-    const vector = event.vector ?? {};
-    const metadata = event.metadata ?? {};
-    const type = typeof metadata.type === "string" ? metadata.type : "station_keep";
-    const description = typeof metadata.description === "string"
-      ? metadata.description
-      : "Maneuver event loaded from the backend database.";
-
-    return {
-      id: event.id,
-      satelliteId: String(event.noradId),
-      title: event.name,
-      timeUtc: event.eventTime,
-      type: ["orbit_raise", "phasing", "station_keep", "avoidance"].includes(type) ? type as ManeuverEvent["type"] : "station_keep",
-      status: event.status.toLowerCase() === "cancelled" ? "candidate" : event.status.toLowerCase() as ManeuverEvent["status"],
-      deltaVMps: event.deltaVMps,
-      deltaVVectorMps: [
-        vector.r ?? vector.x ?? 0,
-        vector.t ?? vector.y ?? event.deltaVMps,
-        vector.n ?? vector.z ?? 0,
-      ],
-      frame: ["RTN", "ECI", "BODY", "LVLH"].includes(event.frame) ? event.frame as ManeuverEvent["frame"] : "RTN",
-      durationSec: event.durationSec,
-      description,
-      visual: {
-        showBurnVector: true,
-        showPrePostOrbit: true,
-      },
-    };
-  });
-}
-
-function normalizeBackendConjunctions(raw: BackendConjunctionRecord[]): ConjunctionEvent[] {
-  return raw.flatMap((record): ConjunctionEvent[] => {
-    if (!record.sat1NoradId || !record.sat2NoradId || !record.tca) {
-      return [];
-    }
-
-    const tcaMs = new Date(record.tca).getTime();
-    const warningDistanceKm = record.risk === "CRITICAL" ? 25 : record.risk === "WARNING" ? 25 : 50;
-    const criticalDistanceKm = record.risk === "CRITICAL" ? Math.max(record.missDistanceKm ?? 1, 1) : 10;
-
-    return [{
-      id: record.id,
-      primarySatelliteId: String(record.sat1NoradId),
-      secondarySatelliteId: String(record.sat2NoradId),
-      primaryName: record.sat1Name ?? undefined,
-      secondaryName: record.sat2Name ?? undefined,
-      startTimeUtc: new Date(tcaMs - 30 * 60 * 1000).toISOString(),
-      endTimeUtc: new Date(tcaMs + 30 * 60 * 1000).toISOString(),
-      tcaUtc: record.tca,
-      missDistanceKm: record.missDistanceKm ?? undefined,
-      relativeVelocityKmps: record.relativeVelocityKmps,
-      probabilityOfCollision: record.probabilityOfCollision,
-      risk: record.risk,
-      source: record.source,
-      warningDistanceKm,
-      criticalDistanceKm,
-    }];
-  });
 }
 
 function missionOverlaySatellite(base: SatelliteObject, mode: "mission" | "legacy"): SatelliteObject {
@@ -1250,75 +1170,6 @@ function validateMissionSetupDraft(draft: MissionSetupDraft) {
   return errors;
 }
 
-function timelineAnalysis(mission: BackendMission | null, events: BackendMissionTimelineEvent[]) {
-  const eventsBySequence = events.toSorted((a, b) => a.sequenceIndex - b.sequenceIndex);
-  const metCounts = new Map<number, BackendMissionTimelineEvent[]>();
-  const resolvedSchedule = resolveEventMetOffsets(mission, events);
-  const warnings: string[] = [...resolvedSchedule.warnings];
-  let previousExecutionMs = Number.NEGATIVE_INFINITY;
-  let invalidOrder = false;
-  const missionDuration = mission ? missionDurationSeconds(mission) : 0;
-
-  eventsBySequence.forEach((event) => {
-    const executionMs = new Date(event.executionTime).getTime();
-    if (!Number.isFinite(executionMs)) {
-      warnings.push(`${event.name} has an invalid execution time.`);
-      return;
-    }
-    const metOffset = resolvedSchedule.offsets.get(event.id);
-    if (metOffset === undefined) {
-      warnings.push(`${event.name} has an invalid MET offset.`);
-    } else {
-      const current = metCounts.get(metOffset) ?? [];
-      metCounts.set(metOffset, [...current, event]);
-      if (metOffset < 0) {
-        warnings.push(`${event.name} has negative MET ${metOffsetLabelFromSeconds(metOffset)}.`);
-      }
-      if (mission && metOffset > missionDuration) {
-        warnings.push(`${event.name} MET ${metOffsetLabelFromSeconds(metOffset)} is beyond mission end.`);
-      }
-    }
-    const scheduleMode = readStringParameter(event.parameters ?? {}, "scheduleMode", "");
-    if (scheduleMode && !["UTC", "MET", "AFTER_EVENT"].includes(scheduleMode)) {
-      warnings.push(`${event.name} has invalid schedule mode metadata.`);
-    }
-    const scheduleOffset = event.parameters?.scheduleOffsetSeconds;
-    if ((scheduleMode === "MET" || scheduleMode === "AFTER_EVENT") && typeof scheduleOffset !== "number") {
-      warnings.push(`${event.name} is missing MET offset metadata.`);
-    }
-    if (scheduleMode === "AFTER_EVENT" && typeof event.parameters?.scheduleDependencyId !== "string") {
-      warnings.push(`${event.name} is missing dependency metadata.`);
-    }
-    if (executionMs < previousExecutionMs) {
-      invalidOrder = true;
-    }
-    previousExecutionMs = executionMs;
-    const windowWarning = eventWindowError(mission, event.executionTime);
-    if (windowWarning) {
-      warnings.push(`${event.name} is outside the mission window.`);
-    }
-  });
-
-  metCounts.forEach((duplicateEvents, metOffset) => {
-    if (duplicateEvents.length > 1) {
-      warnings.push(`Duplicate MET ${metOffsetLabelFromSeconds(metOffset)} for ${duplicateEvents.map((event) => event.name).join(", ")}.`);
-    }
-  });
-  if (invalidOrder) {
-    warnings.push("Timeline sequence order does not match chronological execution order.");
-  }
-
-  return {
-    missionDuration,
-    eventCount: events.length,
-    burnCount: events.filter((event) => event.type === "FINITE_BURN" || event.type === "IMPULSIVE_BURN").length,
-    finiteBurnCount: events.filter((event) => event.type === "FINITE_BURN").length,
-    impulsiveBurnCount: events.filter((event) => event.type === "IMPULSIVE_BURN").length,
-    coastCount: events.filter((event) => event.type === "COAST").length,
-    warnings,
-  };
-}
-
 function parseMissionTrajectoryCadence(value: string) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
@@ -1744,28 +1595,6 @@ function maneuverTemplateGuidance(type: ManeuverTemplateType) {
   }
 }
 
-function getConjunctionStatusFromRisk(event: ConjunctionEvent, missDistanceKm: number) {
-  if (event.risk === "CRITICAL") {
-    return "critical" as const;
-  }
-  if (event.risk === "WARNING" || event.risk === "WATCH") {
-    return "warning" as const;
-  }
-  return getConjunctionStatus(missDistanceKm, event.warningDistanceKm, event.criticalDistanceKm);
-}
-
-function relativeVelocityKmps(a: SatelliteSnapshot["state"], b: SatelliteSnapshot["state"]) {
-  if (!a?.velocityEciKmps || !b?.velocityEciKmps) {
-    return null;
-  }
-
-  return Math.sqrt(
-    (a.velocityEciKmps[0] - b.velocityEciKmps[0]) ** 2 +
-    (a.velocityEciKmps[1] - b.velocityEciKmps[1]) ** 2 +
-    (a.velocityEciKmps[2] - b.velocityEciKmps[2]) ** 2,
-  );
-}
-
 export function OrbitalDashboard() {
   const [workspaceId] = useState(() => getOrCreateAnonymousWorkspaceId());
 
@@ -1796,7 +1625,6 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const showManeuvers = scenario.display.maneuvers;
   const showMissionComparison = scenario.display.missionComparison;
   const showConjunctions = scenario.display.conjunctions;
-  const maneuverEvents = scenario.maneuvers.events;
   const selectedManeuverId = scenario.maneuvers.selectedManeuverId;
   const mission = scenario.missions.activeMission;
   const missionTimelineEvents = scenario.missions.timelineEvents;
@@ -1805,7 +1633,6 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const importedMissionSpacecraftId = scenario.missions.importedMissionSpacecraftId;
   const missionPropagationProfile = scenario.missions.propagationProfile;
   const pendingMissionPropagationProfileUpdate = scenario.missions.pendingPropagationProfileUpdate;
-  const conjunctionEvents = scenario.conjunctions.events;
   const selectedConjunctionId = scenario.conjunctions.selectedConjunctionId;
   const orbitLibrary = scenario.libraries.orbitLibrary;
   const missionLibrary = scenario.libraries.missionLibrary;
@@ -1813,7 +1640,6 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const orbitTemplateLibrary = scenario.libraries.orbitTemplateLibrary;
   const activeWorkspaceOrbitId = scenario.libraries.activeWorkspaceOrbitId;
   const activeWorkspaceMissionId = scenario.libraries.activeWorkspaceMissionId;
-  const analysisConfig = scenario.analysis.config;
   const capabilities = scenario.analysis.capabilities;
   const {
     setActiveDataSource,
@@ -1834,7 +1660,6 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     setShowMissionComparison,
     setShowConjunctions,
     setSatelliteVisual,
-    setManeuverEvents,
     setSelectedManeuverId,
     setMission,
     setMissionTimelineEvents,
@@ -1843,7 +1668,6 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     setImportedMissionSpacecraftId,
     setMissionPropagationProfile,
     setPendingMissionPropagationProfileUpdate,
-    setConjunctionEvents,
     setSelectedConjunctionId,
     setOrbitLibrary,
     setMissionLibrary,
@@ -1851,7 +1675,6 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     setOrbitTemplateLibrary,
     setActiveWorkspaceOrbitId,
     setActiveWorkspaceMissionId,
-    setAnalysisConfig,
     setCapabilities,
   } = scenarioActions;
   const [tleUrl, setTleUrl] = useState("");
@@ -1884,8 +1707,8 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const [activeOperationLabel, setActiveOperationLabel] = useState<OperationLabel | null>(null);
   const [dynamicDataMessage, setDynamicDataMessage] = useState<string | null>(null);
   const [propagationProfileStatus, setPropagationProfileStatus] = useState<string | null>(null);
-  const [analysisMessage, setAnalysisMessage] = useState<string | null>(null);
   const [propagationVersion, setPropagationVersion] = useState(0);
+  const [analysisVersion, setAnalysisVersion] = useState(0);
   const [backendRequestPauseUntil, setBackendRequestPauseUntil] = useState(0);
   const [backendRequestsPaused, setBackendRequestsPaused] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
@@ -1899,9 +1722,21 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const hasOrbitLoaded = satellites.length > 0;
 
   const propagationEngine = useMemo(() => new PropagationEngine(), []);
+  const analysisEngine = useMemo(() => new AnalysisEngine(), []);
+  const analysisResult = useMemo<AnalysisResult>(() => {
+    void analysisVersion;
+    return analysisEngine.getResult();
+  }, [analysisEngine, analysisVersion]);
+  const analysisConfig = analysisResult.analysisConfig;
+  const analysisMessage = analysisResult.analysisMessage;
+  const maneuverEvents = analysisResult.maneuverEvents;
+  const conjunctionEvents = analysisResult.conjunctionEvents;
   useEffect(() => propagationEngine.subscribe(() => {
     setPropagationVersion((version) => version + 1);
   }), [propagationEngine]);
+  useEffect(() => analysisEngine.subscribe(() => {
+    setAnalysisVersion((version) => version + 1);
+  }), [analysisEngine]);
   useEffect(() => {
     propagationEngine.setSatellites(satellites);
   }, [propagationEngine, satellites]);
@@ -1961,111 +1796,10 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const snapshots = propagationResult.currentSnapshots;
   const groundTrackSnapshots = propagationResult.groundTrackSnapshots;
   const serverEventStateByKey = propagationResult.eventStatesByKey;
-  const maneuverSnapshots: ManeuverSnapshot[] = useMemo(() => {
-    return maneuverEvents.flatMap((event) => {
-      const satellite = satellites.find((item) => item.id === event.satelliteId || item.noradId === event.satelliteId);
-      if (!satellite) {
-        return [];
-      }
-      const eventTime = new Date(event.timeUtc);
-      const serverEventState = serverEventStateByKey.get(eventStateKey(satellite.id, event.timeUtc)) ?? null;
-
-      return [{
-        event,
-        satellite,
-        state: isServerDrivenSource(activeDataSource) ? serverEventState : propagationEngine.getState(satellite.id, event.timeUtc),
-        preTrajectory: isServerDrivenSource(activeDataSource)
-          ? []
-          : propagationEngine.getTrajectory(
-              satellite.id,
-              addMinutes(eventTime, -maneuverWindowMinutes).toISOString(),
-              event.timeUtc,
-              90,
-            ),
-        postTrajectory: isServerDrivenSource(activeDataSource)
-          ? []
-          : propagationEngine.getTrajectory(
-              satellite.id,
-              event.timeUtc,
-              addMinutes(eventTime, maneuverWindowMinutes).toISOString(),
-              90,
-            ),
-        minutesFromSimulationTime: (new Date(event.timeUtc).getTime() - simTime.getTime()) / 60000,
-      }];
-    });
-  }, [activeDataSource, maneuverEvents, propagationEngine, satellites, serverEventStateByKey, simTime]);
+  const maneuverSnapshots = analysisResult.maneuverSnapshots;
   const selectedManeuver = maneuverSnapshots.find((snapshot) => snapshot.event.id === selectedManeuverId) ?? maneuverSnapshots[0] ?? null;
   const selectedTimelineEvent = missionTimelineEvents.find((event) => event.id === selectedTimelineEventId) ?? missionTimelineEvents[0] ?? null;
-  const conjunctionSnapshots: ConjunctionSnapshot[] = useMemo(() => {
-    return conjunctionEvents.flatMap((event): ConjunctionSnapshot[] => {
-      const primary = satellites.find((item) => item.id === event.primarySatelliteId || item.noradId === event.primarySatelliteId);
-      const secondary = satellites.find((item) => item.id === event.secondarySatelliteId || item.noradId === event.secondarySatelliteId);
-
-      if (!primary || !secondary) {
-        return [];
-      }
-
-      if (event.tcaUtc && event.missDistanceKm !== undefined) {
-        const primaryState = isServerDrivenSource(activeDataSource)
-          ? serverEventStateByKey.get(eventStateKey(primary.id, event.tcaUtc)) ?? null
-          : propagationEngine.getState(primary.id, event.tcaUtc);
-        const secondaryState = isServerDrivenSource(activeDataSource)
-          ? serverEventStateByKey.get(eventStateKey(secondary.id, event.tcaUtc)) ?? null
-          : propagationEngine.getState(secondary.id, event.tcaUtc);
-        return [{
-          event,
-          primary: {
-            ...primary,
-            name: event.primaryName ?? primary.name,
-          },
-          secondary: {
-            ...secondary,
-            name: event.secondaryName ?? secondary.name,
-          },
-          tcaUtc: event.tcaUtc,
-          missDistanceKm: event.missDistanceKm,
-          relativeVelocityKmps: event.relativeVelocityKmps ?? relativeVelocityKmps(primaryState, secondaryState),
-          status: getConjunctionStatusFromRisk(event, event.missDistanceKm),
-          primaryState,
-          secondaryState,
-        }];
-      }
-
-      let best: ConjunctionSnapshot | null = null;
-      const startMs = new Date(event.startTimeUtc).getTime();
-      const endMs = new Date(event.endTimeUtc).getTime();
-
-      for (let timeMs = startMs; timeMs <= endMs; timeMs += conjunctionStepSec * 1000) {
-        if (isServerDrivenSource(activeDataSource)) {
-          break;
-        }
-        const timeUtc = new Date(timeMs).toISOString();
-        const primaryState = propagationEngine.getState(primary.id, timeUtc);
-        const secondaryState = propagationEngine.getState(secondary.id, timeUtc);
-        const missDistanceKm = distanceBetweenOrbitStatesKm(primaryState, secondaryState);
-
-        if (missDistanceKm === null) {
-          continue;
-        }
-
-        if (!best || missDistanceKm < best.missDistanceKm) {
-          best = {
-            event,
-            primary,
-            secondary,
-            tcaUtc: timeUtc,
-            missDistanceKm,
-            relativeVelocityKmps: relativeVelocityKmps(primaryState, secondaryState),
-            status: getConjunctionStatus(missDistanceKm, event.warningDistanceKm, event.criticalDistanceKm),
-            primaryState,
-            secondaryState,
-          };
-        }
-      }
-
-      return best ? [best] : [];
-    });
-  }, [activeDataSource, conjunctionEvents, propagationEngine, satellites, serverEventStateByKey]);
+  const conjunctionSnapshots = analysisResult.conjunctionSnapshots;
   const selectedConjunction = conjunctionSnapshots.find((snapshot) => snapshot.event.id === selectedConjunctionId) ?? conjunctionSnapshots[0] ?? null;
   const latestSelectedId = selectedSatelliteIds.at(-1) ?? null;
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
@@ -2083,7 +1817,6 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     };
   }, [displayOrbitSnapshots, selectedSnapshot]);
   const effectiveGroundOperationsTargetSnapshot = groundOpsHorizonSnapshot ?? groundOperationsTargetSnapshot;
-  const groundStationVisualizationService = useMemo(() => new GroundStationVisualizationService(), []);
   const missionSubjectSnapshot = activeDataSource === "endpoint" && importedMissionSpacecraftId
     ? snapshots.find((item) => item.satellite.id === importedMissionSpacecraftId) ?? selectedSnapshot
     : selectedSnapshot;
@@ -2195,13 +1928,42 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const groundStationDisplay = groundStationScenario.display;
   const assignedGroundStationIds = groundStationScenario.assignedStationIds;
   const assignedGroundStations = groundStationScenario.assignedStations;
-  const groundStationVisualization = useMemo(() => (
-    groundStationVisualizationService.buildModel(
-      assignedGroundStations,
+  useEffect(() => {
+    void analysisEngine.runAnalysis({
+      type: "derive",
+      activeDataSource,
+      satellites,
+      simTime,
+      maneuverEvents,
+      selectedManeuverId,
+      conjunctionEvents,
+      selectedConjunctionId,
+      propagationEngine,
+      serverEventStateByKey,
+      groundStations: assignedGroundStations,
       groundStationDisplay,
       groundOperationsTargetSnapshot,
-    )
-  ), [assignedGroundStations, groundOperationsTargetSnapshot, groundStationDisplay, groundStationVisualizationService]);
+      mission,
+      missionTimelineEvents,
+    });
+  }, [
+    activeDataSource,
+    analysisEngine,
+    assignedGroundStations,
+    conjunctionEvents,
+    groundOperationsTargetSnapshot,
+    groundStationDisplay,
+    maneuverEvents,
+    mission,
+    missionTimelineEvents,
+    propagationEngine,
+    satellites,
+    selectedConjunctionId,
+    selectedManeuverId,
+    serverEventStateByKey,
+    simTime,
+  ]);
+  const groundStationVisualization = analysisResult.groundStationVisualization;
   const activeStoredMission = useMemo(() => {
     if (activeWorkspaceMissionId) {
       return missionLibrary.missions.find((item) => item.missionId === activeWorkspaceMissionId) ?? null;
@@ -2211,13 +1973,13 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     }
     return null;
   }, [activeWorkspaceMissionId, mission, missionLibrary.missions]);
-  const missionSummaryAnalysis = useMemo(() => timelineAnalysis(mission, missionTimelineEvents), [mission, missionTimelineEvents]);
+  const missionSummaryAnalysis = analysisResult.missionSummary;
   const currentMissionRunSignature = useMemo(
     () => missionRunSignature(mission, missionTimelineEvents, profileWithPendingUpdate(missionPropagationProfile, pendingMissionPropagationProfileUpdate), missionTrajectoryCadenceSeconds),
     [mission, missionPropagationProfile, missionTimelineEvents, missionTrajectoryCadenceSeconds, pendingMissionPropagationProfileUpdate],
   );
   const missionTrajectoryIsStale = Boolean(missionTrajectoryOverlay && missionTrajectoryOverlay.runSignature !== currentMissionRunSignature);
-  const dependencyCount = useMemo(() => missionTimelineEvents.filter((event) => eventScheduleMode(event) === "AFTER_EVENT").length, [missionTimelineEvents]);
+  const dependencyCount = missionSummaryAnalysis.dependencyCount;
   const trajectoryStatus = missionTrajectoryOverlay
     ? missionTrajectoryIsStale ? "Stale" : "Generated"
     : mission && missionTimelineEvents.length > 0
@@ -2964,40 +2726,36 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     setActiveSourceModal(null);
   }, [backendCatalogGroup, clearActiveMissionState, propagationEngine, rememberOrbit, simTime]);
 
-  const updateSelectedAnalysisConfig = useCallback(async (
-    action: (noradId: string) => Promise<BackendAnalysisConfigResponse>,
-    successMessage: string,
-  ) => {
-    if (!selectedNoradId || !canUseAnalysisConfig) {
-      setAnalysisMessage("Analysis config is available for backend catalog orbits only.");
-      return;
-    }
-
-    try {
-      const response = await action(selectedNoradId);
-      setAnalysisConfig(response);
-      setAnalysisMessage(successMessage);
+  const applySelectedPreset = useCallback(async (preset: AnalysisPresetId) => {
+    const result = await analysisEngine.runAnalysis({
+      type: "update-analysis-config",
+      selectedNoradId,
+      canUseAnalysisConfig,
+      action: "preset",
+      preset,
+    });
+    if (result.analysisConfig) {
       setBackendRequestsPaused(false);
       propagationEngine.replaceServerOrbitSnapshots(null);
       setTrajectoryAnchorTime(simTimeRef.current);
-    } catch (error) {
-      setAnalysisMessage(error instanceof Error ? error.message : "Unable to update analysis configuration.");
     }
-  }, [canUseAnalysisConfig, propagationEngine, selectedNoradId]);
+  }, [analysisEngine, canUseAnalysisConfig, propagationEngine, selectedNoradId]);
 
-  const applySelectedPreset = useCallback((preset: AnalysisPresetId) => {
-    updateSelectedAnalysisConfig(
-      (noradId) => applyAnalysisPreset(noradId, preset),
-      `Applied ${preset.replaceAll("_", " ").toLowerCase()} preset.`,
-    );
-  }, [updateSelectedAnalysisConfig]);
-
-  const toggleSelectedMode = useCallback((mode: string, enabled: boolean) => {
-    updateSelectedAnalysisConfig(
-      (noradId) => setAnalysisMode(noradId, mode, enabled),
-      `${mode.toUpperCase()} ${enabled ? "enabled" : "disabled"}.`,
-    );
-  }, [updateSelectedAnalysisConfig]);
+  const toggleSelectedMode = useCallback(async (mode: string, enabled: boolean) => {
+    const result = await analysisEngine.runAnalysis({
+      type: "update-analysis-config",
+      selectedNoradId,
+      canUseAnalysisConfig,
+      action: "mode",
+      mode,
+      enabled,
+    });
+    if (result.analysisConfig) {
+      setBackendRequestsPaused(false);
+      propagationEngine.replaceServerOrbitSnapshots(null);
+      setTrajectoryAnchorTime(simTimeRef.current);
+    }
+  }, [analysisEngine, canUseAnalysisConfig, propagationEngine, selectedNoradId]);
 
   const openOrbitSource = useCallback((source: OrbitSourceId) => {
     setActiveSourceModal(source);
@@ -3934,32 +3692,15 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
 
   useEffect(() => {
     let ignore = false;
-    const loadedIdSet = new Set(loadedNoradIds);
 
     async function loadManeuvers() {
-      try {
-        if (loadedNoradIds.length === 0) {
-          await Promise.resolve();
-          if (!ignore) {
-            setManeuverEvents([]);
-            setSelectedManeuverId(null);
-          }
-          return;
-        }
-
-        const parsed = normalizeBackendManeuvers(await fetchManeuvers())
-          .filter((event) => loadedIdSet.has(event.satelliteId));
-        if (!ignore) {
-          setManeuverEvents(parsed);
-          setSelectedManeuverId((current) => parsed.some((event) => event.id === current) ? current : parsed[0]?.id ?? null);
-          setDynamicDataMessage(null);
-        }
-      } catch (error) {
-        if (!ignore) {
-          setManeuverEvents([]);
-          setSelectedManeuverId(null);
-          setDynamicDataMessage(error instanceof Error ? error.message : "Unable to load maneuvers from the backend.");
-        }
+      const result = await analysisEngine.runAnalysis({
+        type: "load-maneuvers",
+        loadedNoradIds,
+      });
+      if (!ignore) {
+        setSelectedManeuverId((current) => result.maneuverEvents.some((event) => event.id === current) ? current : result.maneuverEvents[0]?.id ?? null);
+        setDynamicDataMessage(result.dynamicMessage);
       }
     }
 
@@ -3968,32 +3709,19 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     return () => {
       ignore = true;
     };
-  }, [loadedNoradIds]);
+  }, [analysisEngine, loadedNoradIds, setSelectedManeuverId]);
 
   useEffect(() => {
     let ignore = false;
 
     async function loadAnalysisConfig() {
-      if (!selectedNoradId || !canUseAnalysisConfig) {
-        await Promise.resolve();
-        if (!ignore) {
-          setAnalysisConfig(null);
-          setAnalysisMessage(null);
-        }
-        return;
-      }
-
-      try {
-        const response = await fetchAnalysisConfig(selectedNoradId);
-        if (!ignore) {
-          setAnalysisConfig(response);
-          setAnalysisMessage(null);
-        }
-      } catch (error) {
-        if (!ignore) {
-          setAnalysisConfig(null);
-          setAnalysisMessage(error instanceof Error ? error.message : "Unable to load analysis configuration.");
-        }
+      await analysisEngine.runAnalysis({
+        type: "load-analysis-config",
+        selectedNoradId,
+        canUseAnalysisConfig,
+      });
+      if (!ignore) {
+        setDynamicDataMessage(analysisEngine.getResult().dynamicMessage);
       }
     }
 
@@ -4002,35 +3730,19 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     return () => {
       ignore = true;
     };
-  }, [canUseAnalysisConfig, selectedNoradId]);
+  }, [analysisEngine, canUseAnalysisConfig, selectedNoradId]);
 
   useEffect(() => {
     let ignore = false;
 
     async function loadConjunctions() {
-      try {
-        if (loadedNoradIds.length === 0) {
-          await Promise.resolve();
-          if (!ignore) {
-            setConjunctionEvents([]);
-            setSelectedConjunctionId(null);
-          }
-          return;
-        }
-
-        const response = await fetchConjunctions(loadedNoradIds);
-        const parsed = normalizeBackendConjunctions(response.conjunctions);
-        if (!ignore) {
-          setConjunctionEvents(parsed);
-          setSelectedConjunctionId((current) => parsed.some((event) => event.id === current) ? current : parsed[0]?.id ?? null);
-          setDynamicDataMessage(null);
-        }
-      } catch (error) {
-        if (!ignore) {
-          setConjunctionEvents([]);
-          setSelectedConjunctionId(null);
-          setDynamicDataMessage(error instanceof Error ? error.message : "Unable to load conjunctions from the backend.");
-        }
+      const result = await analysisEngine.runAnalysis({
+        type: "load-conjunctions",
+        loadedNoradIds,
+      });
+      if (!ignore) {
+        setSelectedConjunctionId((current) => result.conjunctionEvents.some((event) => event.id === current) ? current : result.conjunctionEvents[0]?.id ?? null);
+        setDynamicDataMessage(result.dynamicMessage);
       }
     }
 
@@ -4039,7 +3751,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     return () => {
       ignore = true;
     };
-  }, [loadedNoradIds]);
+  }, [analysisEngine, loadedNoradIds, setSelectedConjunctionId]);
 
   useEffect(() => {
     const windowStartMs = addMinutes(trajectoryAnchorTime, -trajectoryOptions.pastMinutes).getTime();
