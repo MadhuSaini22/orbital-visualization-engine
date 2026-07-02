@@ -39,7 +39,6 @@ import {
   utcIsoToDateInput,
   utcIsoToTimeInput,
 } from "@/geometry/utcDateTime";
-import { SatelliteJsPropagator } from "@/propagation/SatelliteJsPropagator";
 import {
   applyAnalysisPreset,
   applyManeuverTemplate,
@@ -51,15 +50,11 @@ import {
   fetchCapabilities,
   fetchAnalysisConfig,
   fetchConjunctions,
-  fetchCurrentOrbitState,
   fetchMissionTimelineEvents,
   fetchMissionPropagationProfile,
   fetchMissionTrajectory,
   fetchMissions,
-  fetchManualOrbitState,
-  fetchManualOrbitTrajectory,
   fetchManeuvers,
-  fetchOrbitTrajectory,
   previewManeuverTemplate,
   reorderMissionTimelineEvents,
   setAnalysisMode,
@@ -130,10 +125,15 @@ import type {
   StoredOrbitSourceType,
   StoredWorkspace,
 } from "@/services/workspaceStorage";
-import { StateCacheService } from "@/services/StateCacheService";
 import { GroundStationVisualizationService } from "@/services/GroundStationVisualizationService";
-import { backendEphemerisStateToOrbitState, interpolateOrbitStateSamples } from "@/services/FrameTransformService";
+import { backendEphemerisStateToOrbitState } from "@/services/FrameTransformService";
 import { EARTH_EQUATORIAL_RADIUS_KM, EARTH_MU_KM3_S2, circularOrbitPeriodSeconds } from "@/services/OrbitMechanicsService";
+import {
+  PropagationEngine,
+  propagationEventStateKey,
+  type BackendEventStateRequest,
+  type PropagationResult,
+} from "@/services/PropagationEngine";
 import {
   eventMetOffsetSeconds,
   eventScheduleMode,
@@ -454,14 +454,6 @@ function normalizeCustomSpeedMultiplier(value: string) {
   return Math.min(Math.max(parsed, 1), 100000);
 }
 
-function interpolateStateFromSamples(
-  satelliteId: string,
-  samples: OrbitState[] | undefined,
-  timeUtc: string,
-): OrbitState | null {
-  return interpolateOrbitStateSamples(satelliteId, samples, timeUtc);
-}
-
 function backendStateToOrbitState(satelliteId: string, state: BackendEphemerisState): OrbitState {
   return backendEphemerisStateToOrbitState(satelliteId, state);
 }
@@ -632,7 +624,7 @@ function groundOpsStepSeconds(hours: number) {
 }
 
 function eventStateKey(satelliteId: string, timeUtc: string) {
-  return `${satelliteId}@${timeUtc}`;
+  return propagationEventStateKey(satelliteId, timeUtc);
 }
 
 function isAbortError(error: unknown) {
@@ -1893,10 +1885,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const [dynamicDataMessage, setDynamicDataMessage] = useState<string | null>(null);
   const [propagationProfileStatus, setPropagationProfileStatus] = useState<string | null>(null);
   const [analysisMessage, setAnalysisMessage] = useState<string | null>(null);
-  const [serverStateBySatelliteId, setServerStateBySatelliteId] = useState<Map<string, OrbitState>>(() => new Map());
-  const [serverOrbitSnapshots, setServerOrbitSnapshots] = useState<SatelliteSnapshot[] | null>(null);
-  const [serverGroundTrackSnapshots, setServerGroundTrackSnapshots] = useState<SatelliteSnapshot[] | null>(null);
-  const [serverEventStateByKey, setServerEventStateByKey] = useState<Map<string, OrbitState>>(() => new Map());
+  const [propagationVersion, setPropagationVersion] = useState(0);
   const [backendRequestPauseUntil, setBackendRequestPauseUntil] = useState(0);
   const [backendRequestsPaused, setBackendRequestsPaused] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
@@ -1909,8 +1898,13 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const lastTrajectoryAnchorShiftMsRef = useRef(0);
   const hasOrbitLoaded = satellites.length > 0;
 
-  const propagator = useMemo(() => new SatelliteJsPropagator(satellites), [satellites]);
-  const stateCache = useMemo(() => new StateCacheService(propagator, satellites), [propagator, satellites]);
+  const propagationEngine = useMemo(() => new PropagationEngine(), []);
+  useEffect(() => propagationEngine.subscribe(() => {
+    setPropagationVersion((version) => version + 1);
+  }), [propagationEngine]);
+  useEffect(() => {
+    propagationEngine.setSatellites(satellites);
+  }, [propagationEngine, satellites]);
   const groundTrackRange = groundTrackRangeOptions.find((option) => option.id === groundTrackRangeId) ?? groundTrackRangeOptions[0];
   const trajectorySampleStepSec = getEphemerisSampleStepSec(
     activeDataSource,
@@ -1931,59 +1925,42 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const serverGroundTrackAnchorMs = isServerDrivenSource(activeDataSource)
     ? trajectoryAnchorTime.getTime()
     : groundTrackAnchorMs;
-  const orbitSnapshots: SatelliteSnapshot[] = useMemo(() => {
-    if (isServerDrivenSource(activeDataSource) && serverOrbitSnapshots) {
-      return serverOrbitSnapshots;
-    }
-    return stateCache.getWindowedSnapshots(trajectoryAnchorTime.toISOString(), trajectoryWindowOptions);
-  }, [activeDataSource, serverOrbitSnapshots, stateCache, trajectoryAnchorTime, trajectoryWindowOptions]);
+  const propagationResult = useMemo<PropagationResult>(() => {
+    void propagationVersion;
+    return propagationEngine.propagate({
+      source: activeDataSource,
+      satellites,
+      simTimeUtc: simTime.toISOString(),
+      trajectoryAnchorUtc: trajectoryAnchorTime.toISOString(),
+      trajectoryWindow: trajectoryWindowOptions,
+      groundTrackAnchorUtc: new Date(groundTrackAnchorMs).toISOString(),
+      groundTrackWindow: {
+        pastMinutes: groundTrackRange.pastMinutes,
+        stepSec: groundTrackStepSec,
+      },
+    });
+  }, [
+    activeDataSource,
+    groundTrackAnchorMs,
+    groundTrackRange.pastMinutes,
+    groundTrackStepSec,
+    propagationEngine,
+    propagationVersion,
+    satellites,
+    simTime,
+    trajectoryAnchorTime,
+    trajectoryWindowOptions,
+  ]);
+  const orbitSnapshots = propagationResult.orbitSnapshots;
   const displayOrbitSnapshots = useMemo(() => {
     const overlays = showMissionComparison && missionTrajectoryOverlay
       ? [missionTrajectoryOverlay.legacy, missionTrajectoryOverlay.mission].filter((snapshot): snapshot is SatelliteSnapshot => snapshot !== null)
       : [];
     return overlays.length > 0 ? [...orbitSnapshots, ...overlays] : orbitSnapshots;
   }, [missionTrajectoryOverlay, orbitSnapshots, showMissionComparison]);
-  const snapshots: SatelliteSnapshot[] = useMemo(() => {
-    const simTimeIso = simTime.toISOString();
-    const ephemerisBySatelliteId = new Map(displayOrbitSnapshots.map((snapshot) => [
-      snapshot.satellite.id,
-      snapshot.trajectory ?? [],
-    ]));
-
-    return satellites.map((satellite) => {
-      const ephemerisState = interpolateStateFromSamples(
-        satellite.id,
-        ephemerisBySatelliteId.get(satellite.id),
-        simTimeIso,
-      );
-      if (ephemerisState) {
-        return {
-          satellite,
-          state: ephemerisState,
-          error: undefined,
-        };
-      }
-
-      const fallbackState = isServerDrivenSource(activeDataSource)
-        ? serverStateBySatelliteId.get(satellite.id) ?? null
-        : propagator.getState(satellite.id, simTimeIso);
-
-      return {
-        satellite,
-        state: fallbackState,
-        error: fallbackState ? undefined : "Waiting for ephemeris samples.",
-      };
-    });
-  }, [activeDataSource, displayOrbitSnapshots, propagator, satellites, serverStateBySatelliteId, simTime]);
-  const groundTrackSnapshots: SatelliteSnapshot[] = useMemo(() => {
-    if (isServerDrivenSource(activeDataSource) && serverGroundTrackSnapshots) {
-      return serverGroundTrackSnapshots;
-    }
-    return stateCache.getGroundTrackSnapshots(new Date(groundTrackAnchorMs).toISOString(), {
-      pastMinutes: groundTrackRange.pastMinutes,
-      stepSec: groundTrackStepSec,
-    });
-  }, [activeDataSource, groundTrackAnchorMs, groundTrackRange.pastMinutes, groundTrackStepSec, serverGroundTrackSnapshots, stateCache]);
+  const snapshots = propagationResult.currentSnapshots;
+  const groundTrackSnapshots = propagationResult.groundTrackSnapshots;
+  const serverEventStateByKey = propagationResult.eventStatesByKey;
   const maneuverSnapshots: ManeuverSnapshot[] = useMemo(() => {
     return maneuverEvents.flatMap((event) => {
       const satellite = satellites.find((item) => item.id === event.satelliteId || item.noradId === event.satelliteId);
@@ -1996,10 +1973,10 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       return [{
         event,
         satellite,
-        state: isServerDrivenSource(activeDataSource) ? serverEventState : propagator.getState(satellite.id, event.timeUtc),
+        state: isServerDrivenSource(activeDataSource) ? serverEventState : propagationEngine.getState(satellite.id, event.timeUtc),
         preTrajectory: isServerDrivenSource(activeDataSource)
           ? []
-          : propagator.getTrajectory(
+          : propagationEngine.getTrajectory(
               satellite.id,
               addMinutes(eventTime, -maneuverWindowMinutes).toISOString(),
               event.timeUtc,
@@ -2007,7 +1984,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
             ),
         postTrajectory: isServerDrivenSource(activeDataSource)
           ? []
-          : propagator.getTrajectory(
+          : propagationEngine.getTrajectory(
               satellite.id,
               event.timeUtc,
               addMinutes(eventTime, maneuverWindowMinutes).toISOString(),
@@ -2016,7 +1993,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
         minutesFromSimulationTime: (new Date(event.timeUtc).getTime() - simTime.getTime()) / 60000,
       }];
     });
-  }, [activeDataSource, maneuverEvents, propagator, satellites, serverEventStateByKey, simTime]);
+  }, [activeDataSource, maneuverEvents, propagationEngine, satellites, serverEventStateByKey, simTime]);
   const selectedManeuver = maneuverSnapshots.find((snapshot) => snapshot.event.id === selectedManeuverId) ?? maneuverSnapshots[0] ?? null;
   const selectedTimelineEvent = missionTimelineEvents.find((event) => event.id === selectedTimelineEventId) ?? missionTimelineEvents[0] ?? null;
   const conjunctionSnapshots: ConjunctionSnapshot[] = useMemo(() => {
@@ -2031,10 +2008,10 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       if (event.tcaUtc && event.missDistanceKm !== undefined) {
         const primaryState = isServerDrivenSource(activeDataSource)
           ? serverEventStateByKey.get(eventStateKey(primary.id, event.tcaUtc)) ?? null
-          : propagator.getState(primary.id, event.tcaUtc);
+          : propagationEngine.getState(primary.id, event.tcaUtc);
         const secondaryState = isServerDrivenSource(activeDataSource)
           ? serverEventStateByKey.get(eventStateKey(secondary.id, event.tcaUtc)) ?? null
-          : propagator.getState(secondary.id, event.tcaUtc);
+          : propagationEngine.getState(secondary.id, event.tcaUtc);
         return [{
           event,
           primary: {
@@ -2063,8 +2040,8 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
           break;
         }
         const timeUtc = new Date(timeMs).toISOString();
-        const primaryState = propagator.getState(primary.id, timeUtc);
-        const secondaryState = propagator.getState(secondary.id, timeUtc);
+        const primaryState = propagationEngine.getState(primary.id, timeUtc);
+        const secondaryState = propagationEngine.getState(secondary.id, timeUtc);
         const missDistanceKm = distanceBetweenOrbitStatesKm(primaryState, secondaryState);
 
         if (missDistanceKm === null) {
@@ -2088,7 +2065,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
 
       return best ? [best] : [];
     });
-  }, [activeDataSource, conjunctionEvents, propagator, satellites, serverEventStateByKey]);
+  }, [activeDataSource, conjunctionEvents, propagationEngine, satellites, serverEventStateByKey]);
   const selectedConjunction = conjunctionSnapshots.find((snapshot) => snapshot.event.id === selectedConjunctionId) ?? conjunctionSnapshots[0] ?? null;
   const latestSelectedId = selectedSatelliteIds.at(-1) ?? null;
   const selectedSnapshot = snapshots.find((item) => item.satellite.id === latestSelectedId) ?? snapshots[0];
@@ -2427,8 +2404,8 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     setShowManeuvers(false);
     setShowConjunctions(false);
     setTrajectoryAnchorTime(simTime);
-    setServerOrbitSnapshots(null);
-    setServerGroundTrackSnapshots(null);
+    propagationEngine.replaceServerOrbitSnapshots(null);
+    propagationEngine.replaceServerGroundTrackSnapshots(null);
     clearActiveMissionState();
     setActiveWorkspaceOrbitId(orbit.orbitId);
 
@@ -2437,16 +2414,17 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       setActiveDataSource("manual");
       setManualOrbitId(backendManualOrbitId);
       try {
-        const currentState = await fetchManualOrbitState(backendManualOrbitId, simTime.toISOString());
-        setServerStateBySatelliteId(new Map([[satellite.id, backendStateToOrbitState(satellite.id, currentState)]]));
+        await propagationEngine.loadCurrentBackendState("manual", satellite, simTime.toISOString(), {
+          manualOrbitId: backendManualOrbitId,
+        });
       } catch (error) {
-        setServerStateBySatelliteId(new Map());
+        propagationEngine.clearServerCurrentStates();
         toast.error(userErrorMessage(error, "Unable to load manual orbit state."));
       }
     } else {
       setActiveDataSource(orbit.sourceType === "CATALOG_TLE" ? "backend" : "endpoint");
       setManualOrbitId(null);
-      setServerStateBySatelliteId(new Map());
+      propagationEngine.clearServerCurrentStates();
     }
 
     const linkedMission = missionLibrary.missions.find((item) => item.orbitId === orbit.orbitId) ?? null;
@@ -2455,7 +2433,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     }
     setMessages([`Loaded orbit "${orbit.orbitName}" from Orbit Library.`]);
     toast.success("Orbit loaded from library.");
-  }, [clearActiveMissionState, missionLibrary.missions, simTime]);
+  }, [clearActiveMissionState, missionLibrary.missions, propagationEngine, simTime]);
 
   const openStoredMission = useCallback((storedMission: StoredMission) => {
     const backendMission = missionFromStoredMission(storedMission);
@@ -2913,16 +2891,17 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       setActiveDataSource("manual");
       setManualOrbitId(orbit.id);
       setTrajectoryAnchorTime(simTime);
-      const currentState = await fetchManualOrbitState(orbit.id, simTime.toISOString());
-      setServerStateBySatelliteId(new Map([[satellite.id, backendStateToOrbitState(satellite.id, currentState)]]));
-      setServerOrbitSnapshots(null);
-      setServerGroundTrackSnapshots(null);
+      await propagationEngine.loadCurrentBackendState("manual", satellite, simTime.toISOString(), {
+        manualOrbitId: orbit.id,
+      });
+      propagationEngine.replaceServerOrbitSnapshots(null);
+      propagationEngine.replaceServerGroundTrackSnapshots(null);
       setMessages([`Manual orbit "${orbit.name}" created and loaded.`]);
       setActiveSourceModal(null);
     } finally {
       setActiveOperationLabel(null);
     }
-  }, [clearActiveMissionState, rememberOrbit, simTime]);
+  }, [clearActiveMissionState, propagationEngine, rememberOrbit, simTime]);
 
   const createOrbitFromTemplate = useCallback(async (template: OrbitTemplate) => {
     const warnings = orbitTemplateWarnings(template);
@@ -2951,9 +2930,9 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
         setActiveDataSource("endpoint");
         setManualOrbitId(null);
         setImportedMissionSpacecraftId(null);
-        setServerStateBySatelliteId(new Map());
-        setServerOrbitSnapshots(null);
-        setServerGroundTrackSnapshots(null);
+        propagationEngine.clearServerCurrentStates();
+        propagationEngine.replaceServerOrbitSnapshots(null);
+        propagationEngine.replaceServerGroundTrackSnapshots(null);
         setActiveSourceModal(null);
       }
       setMessages(
@@ -2965,7 +2944,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     } finally {
       setActiveOperationLabel(null);
     }
-  }, [clearActiveMissionState, loadTleText, rememberOrbit]);
+  }, [clearActiveMissionState, loadTleText, propagationEngine, rememberOrbit]);
 
   const handleLoadCatalogSatellite = useCallback((satellite: SatelliteObject) => {
     rememberOrbit(storedOrbitFromCatalogSatellite(satellite, backendCatalogGroup));
@@ -2978,12 +2957,12 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     setActiveDataSource("backend");
     setManualOrbitId(null);
     setTrajectoryAnchorTime(simTime);
-    setServerStateBySatelliteId(new Map());
-    setServerOrbitSnapshots(null);
-    setServerGroundTrackSnapshots(null);
+    propagationEngine.clearServerCurrentStates();
+    propagationEngine.replaceServerOrbitSnapshots(null);
+    propagationEngine.replaceServerGroundTrackSnapshots(null);
     setMessages([`Loaded ${satellite.name} from backend catalog ${backendCatalogGroup}.`]);
     setActiveSourceModal(null);
-  }, [backendCatalogGroup, clearActiveMissionState, rememberOrbit, simTime]);
+  }, [backendCatalogGroup, clearActiveMissionState, propagationEngine, rememberOrbit, simTime]);
 
   const updateSelectedAnalysisConfig = useCallback(async (
     action: (noradId: string) => Promise<BackendAnalysisConfigResponse>,
@@ -2999,12 +2978,12 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       setAnalysisConfig(response);
       setAnalysisMessage(successMessage);
       setBackendRequestsPaused(false);
-      setServerOrbitSnapshots(null);
+      propagationEngine.replaceServerOrbitSnapshots(null);
       setTrajectoryAnchorTime(simTimeRef.current);
     } catch (error) {
       setAnalysisMessage(error instanceof Error ? error.message : "Unable to update analysis configuration.");
     }
-  }, [canUseAnalysisConfig, selectedNoradId]);
+  }, [canUseAnalysisConfig, propagationEngine, selectedNoradId]);
 
   const applySelectedPreset = useCallback((preset: AnalysisPresetId) => {
     updateSelectedAnalysisConfig(
@@ -3679,14 +3658,20 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
             });
             return;
           }
-          const response = await fetchManualOrbitTrajectory(
+          const result = await propagationEngine.loadServerTrajectorySnapshots({
+            source: activeDataSource,
             manualOrbitId,
-            start.toISOString(),
-            end.toISOString(),
-            stepSeconds,
-            { signal: controller.signal },
-          );
-          states = response.states.map((state) => backendStateToOrbitState(satellite.id, state));
+            satellites: [satellite],
+            startUtc: start.toISOString(),
+            endUtc: end.toISOString(),
+            centerUtc: start.toISOString(),
+            stepSec: stepSeconds,
+            signal: controller.signal,
+          });
+          if (result.failed) {
+            pauseBackendRequests(result.snapshots[0]?.error ?? "Backend trajectory requests are unavailable.");
+          }
+          states = result.snapshots[0]?.trajectory ?? [];
         } else if (activeDataSource === "backend") {
           const noradId = satellite.noradId ?? satellite.id;
           if (!noradId || backendRequestsPaused) {
@@ -3696,16 +3681,21 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
             });
             return;
           }
-          const response = await fetchOrbitTrajectory(
-            noradId,
-            start.toISOString(),
-            end.toISOString(),
-            stepSeconds,
-            { signal: controller.signal },
-          );
-          states = response.states.map((state) => backendStateToOrbitState(satellite.id, state));
+          const result = await propagationEngine.loadServerTrajectorySnapshots({
+            source: activeDataSource,
+            satellites: [satellite],
+            startUtc: start.toISOString(),
+            endUtc: end.toISOString(),
+            centerUtc: start.toISOString(),
+            stepSec: stepSeconds,
+            signal: controller.signal,
+          });
+          if (result.failed) {
+            pauseBackendRequests(result.snapshots[0]?.error ?? "Backend trajectory requests are unavailable.");
+          }
+          states = result.snapshots[0]?.trajectory ?? [];
         } else {
-          states = propagator.getTrajectory(
+          states = propagationEngine.getTrajectory(
             satellite.id,
             start.toISOString(),
             end.toISOString(),
@@ -3718,7 +3708,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
         }
 
         const currentState = anchorState
-          ?? interpolateStateFromSamples(satellite.id, states, simTime.toISOString())
+          ?? propagationEngine.interpolateState(satellite.id, states, simTime.toISOString())
           ?? states[0]
           ?? groundOperationsTargetSnapshot.state;
 
@@ -3750,7 +3740,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       ignore = true;
       controller.abort();
     };
-  }, [activeCommandModal, activeDataSource, backendRequestsPaused, groundOperationsTargetSnapshot, groundOpsAnalysisAnchorTime, groundOpsHorizon, manualOrbitId, pauseBackendRequests, propagator, selectedSnapshot, simTime]);
+  }, [activeCommandModal, activeDataSource, backendRequestsPaused, groundOperationsTargetSnapshot, groundOpsAnalysisAnchorTime, groundOpsHorizon, manualOrbitId, pauseBackendRequests, propagationEngine, selectedSnapshot, simTime]);
 
   useEffect(() => {
     let ignore = false;
@@ -3758,7 +3748,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
 
     async function loadServerTrajectoryWindows() {
       if (!isServerDrivenSource(activeDataSource)) {
-        setServerOrbitSnapshots(null);
+        propagationEngine.replaceServerOrbitSnapshots(null);
         return;
       }
       if (activeDataSource === "manual" && !manualOrbitId) {
@@ -3780,63 +3770,32 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
         }
         return satellite.visual.showOrbit || satellite.visual.showTrail || satellite.visual.showGroundTrack;
       });
-      const nextSnapshots: SatelliteSnapshot[] = [];
       if (targetSatellites.length === 0) {
-        setServerOrbitSnapshots([]);
+        propagationEngine.replaceServerOrbitSnapshots([]);
         return;
       }
 
       trajectoryRequestInFlightRef.current = true;
       try {
-        for (const satellite of targetSatellites) {
-          if (ignore || controller.signal.aborted) {
-            return;
-          }
-          const noradId = satellite.noradId ?? satellite.id;
-          try {
-            const response = activeDataSource === "manual" && manualOrbitId
-              ? await fetchManualOrbitTrajectory(
-                  manualOrbitId,
-                  start.toISOString(),
-                  end.toISOString(),
-                  trajectoryWindowOptions.stepSec,
-                  { signal: controller.signal },
-                )
-              : await fetchOrbitTrajectory(
-                  noradId,
-                  start.toISOString(),
-                  end.toISOString(),
-                  trajectoryWindowOptions.stepSec,
-                  { signal: controller.signal },
-                );
-            const states = response.states.map((state) => backendStateToOrbitState(satellite.id, state));
-            nextSnapshots.push({
-              satellite,
-              state: null,
-              trajectory: states,
-              futureTrajectory: states.filter((state) => new Date(state.timeUtc) >= centerTime),
-              pastTrail: states.filter((state) => new Date(state.timeUtc) <= centerTime),
-              groundTrack: states,
-            });
-          } catch (error) {
-            if (isAbortError(error)) {
-              return;
-            }
-            nextSnapshots.push({
-              satellite,
-              state: null,
-              error: error instanceof Error ? error.message : "Unable to load backend trajectory.",
-            });
-            pauseBackendRequests(error);
-            break;
-          }
-        }
+        const result = await propagationEngine.loadServerTrajectorySnapshots({
+          source: activeDataSource,
+          manualOrbitId,
+          satellites: targetSatellites,
+          startUtc: start.toISOString(),
+          endUtc: end.toISOString(),
+          centerUtc: centerTime.toISOString(),
+          stepSec: trajectoryWindowOptions.stepSec,
+          signal: controller.signal,
+        });
 
         if (!ignore) {
-          if (targetSatellites.length > 0 && nextSnapshots.every((snapshot) => snapshot.error)) {
-            pauseBackendRequests("Backend trajectory requests are unavailable.");
+          if (result.failed) {
+            pauseBackendRequests(result.snapshots[0]?.error ?? "Backend trajectory requests are unavailable.");
           }
-          setServerOrbitSnapshots(nextSnapshots);
+        }
+      } catch (error) {
+        if (!isAbortError(error)) {
+          pauseBackendRequests(error);
         }
       } finally {
         trajectoryRequestInFlightRef.current = false;
@@ -3850,7 +3809,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       trajectoryRequestInFlightRef.current = false;
       controller.abort();
     };
-  }, [activeDataSource, backendRequestsPaused, manualOrbitId, pauseBackendRequests, satellites, selectedSatelliteIds, showAllOrbits, trajectoryAnchorTime, trajectoryWindowOptions.stepSec]);
+  }, [activeDataSource, backendRequestsPaused, manualOrbitId, pauseBackendRequests, propagationEngine, satellites, selectedSatelliteIds, showAllOrbits, trajectoryAnchorTime, trajectoryWindowOptions.stepSec]);
 
   useEffect(() => {
     let ignore = false;
@@ -3858,7 +3817,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
 
     async function loadServerGroundTracks() {
       if (!isServerDrivenSource(activeDataSource)) {
-        setServerGroundTrackSnapshots(null);
+        propagationEngine.replaceServerGroundTrackSnapshots(null);
         return;
       }
       if (activeDataSource === "manual" && !manualOrbitId) {
@@ -3873,53 +3832,30 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       const targetSatellites = satellites.filter((satellite) => (
         satellite.visual.showGroundTrack && (showAllOrbits || selectedSatelliteIds.includes(satellite.id))
       ));
-      const nextSnapshots: SatelliteSnapshot[] = [];
 
-      for (const satellite of targetSatellites) {
-        if (ignore || controller.signal.aborted) {
-          return;
-        }
-        const noradId = satellite.noradId ?? satellite.id;
-        try {
-          const response = activeDataSource === "manual" && manualOrbitId
-            ? await fetchManualOrbitTrajectory(
-                manualOrbitId,
-                start.toISOString(),
-                end.toISOString(),
-                groundTrackStepSec,
-                { signal: controller.signal },
-              )
-            : await fetchOrbitTrajectory(
-                noradId,
-                start.toISOString(),
-                end.toISOString(),
-                groundTrackStepSec,
-                { signal: controller.signal },
-              );
-          nextSnapshots.push({
-            satellite,
-            state: null,
-            groundTrack: response.states.map((state) => backendStateToOrbitState(satellite.id, state)),
-          });
-        } catch (error) {
-          if (isAbortError(error)) {
-            return;
-          }
-          nextSnapshots.push({
-            satellite,
-            state: null,
-            error: error instanceof Error ? error.message : "Unable to load backend ground track.",
-          });
+      let result;
+      try {
+        result = await propagationEngine.loadServerGroundTrackSnapshots({
+          source: activeDataSource,
+          manualOrbitId,
+          satellites: targetSatellites,
+          startUtc: start.toISOString(),
+          endUtc: end.toISOString(),
+          centerUtc: end.toISOString(),
+          stepSec: groundTrackStepSec,
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (!isAbortError(error)) {
           pauseBackendRequests(error);
-          break;
         }
+        return;
       }
 
       if (!ignore) {
-        if (targetSatellites.length > 0 && nextSnapshots.every((snapshot) => snapshot.error)) {
-          pauseBackendRequests("Backend ground-track requests are unavailable.");
+        if (result.failed) {
+          pauseBackendRequests(result.snapshots[0]?.error ?? "Backend ground-track requests are unavailable.");
         }
-        setServerGroundTrackSnapshots(nextSnapshots);
       }
     }
 
@@ -3929,7 +3865,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       ignore = true;
       controller.abort();
     };
-  }, [activeDataSource, backendRequestsPaused, groundTrackRange.pastMinutes, groundTrackStepSec, manualOrbitId, pauseBackendRequests, satellites, selectedSatelliteIds, serverGroundTrackAnchorMs, showAllOrbits]);
+  }, [activeDataSource, backendRequestsPaused, groundTrackRange.pastMinutes, groundTrackStepSec, manualOrbitId, pauseBackendRequests, propagationEngine, satellites, selectedSatelliteIds, serverGroundTrackAnchorMs, showAllOrbits]);
 
   useEffect(() => {
     let ignore = false;
@@ -3937,7 +3873,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
 
     async function loadServerEventStates() {
       if (!isServerDrivenSource(activeDataSource)) {
-        setServerEventStateByKey(new Map());
+        propagationEngine.clearServerEventStates();
         return;
       }
       if (activeDataSource === "manual" && !manualOrbitId) {
@@ -3947,7 +3883,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
         return;
       }
 
-      const requests: Array<{ satellite: SatelliteObject; timeUtc: string }> = [];
+      const requests: BackendEventStateRequest[] = [];
       for (const event of maneuverEvents) {
         const satellite = satellites.find((item) => item.id === event.satelliteId || item.noradId === event.satelliteId);
         if (satellite) {
@@ -3968,40 +3904,23 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
         }
       }
 
-      const uniqueRequests = [...new Map(requests.map((request) => [
-        eventStateKey(request.satellite.id, request.timeUtc),
-        request,
-      ])).values()];
-
-      const pairs: Array<[string, OrbitState] | null> = [];
-      for (const request of uniqueRequests) {
-        if (ignore || controller.signal.aborted) {
-          return;
-        }
-        const noradId = request.satellite.noradId ?? request.satellite.id;
-        try {
-          const state = activeDataSource === "manual" && manualOrbitId
-            ? await fetchManualOrbitState(manualOrbitId, request.timeUtc, { signal: controller.signal })
-            : await fetchCurrentOrbitState(noradId, request.timeUtc, { signal: controller.signal });
-          pairs.push([
-            eventStateKey(request.satellite.id, request.timeUtc),
-            backendStateToOrbitState(request.satellite.id, state),
-          ]);
-        } catch (error) {
-          if (isAbortError(error)) {
-            return;
-          }
-          pairs.push(null);
+      let result;
+      try {
+        result = await propagationEngine.loadServerEventStates(activeDataSource, requests, {
+          manualOrbitId,
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (!isAbortError(error)) {
           pauseBackendRequests(error);
-          break;
         }
+        return;
       }
 
       if (!ignore) {
-        if (uniqueRequests.length > 0 && pairs.every((pair) => pair === null)) {
+        if (result.failed) {
           pauseBackendRequests("Backend event-state requests are unavailable.");
         }
-        setServerEventStateByKey(new Map(pairs.filter((pair): pair is [string, OrbitState] => pair !== null)));
       }
     }
 
@@ -4011,7 +3930,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       ignore = true;
       controller.abort();
     };
-  }, [activeDataSource, backendRequestsPaused, conjunctionEvents, maneuverEvents, manualOrbitId, pauseBackendRequests, satellites]);
+  }, [activeDataSource, backendRequestsPaused, conjunctionEvents, maneuverEvents, manualOrbitId, pauseBackendRequests, propagationEngine, satellites]);
 
   useEffect(() => {
     let ignore = false;
