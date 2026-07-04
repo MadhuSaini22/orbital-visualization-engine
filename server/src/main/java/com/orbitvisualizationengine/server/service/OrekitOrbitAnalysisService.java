@@ -3,6 +3,14 @@ package com.orbitvisualizationengine.server.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.orbitvisualizationengine.server.catalog.provider.CatalogDataFormat;
+import com.orbitvisualizationengine.server.catalog.provider.CatalogEndpoint;
+import com.orbitvisualizationengine.server.catalog.provider.CatalogFetchRequest;
+import com.orbitvisualizationengine.server.catalog.provider.CatalogProviderRegistry;
+import com.orbitvisualizationengine.server.catalog.provider.CatalogSource;
+import com.orbitvisualizationengine.server.catalog.provider.dto.ProviderTleRecord;
+import com.orbitvisualizationengine.server.catalog.provider.dto.TleCatalogResponse;
+import com.orbitvisualizationengine.server.catalog.provider.impl.CelestrakCatalogSource;
 import com.orbitvisualizationengine.server.config.AppProperties;
 import com.orbitvisualizationengine.server.domain.EphemerisState;
 import com.orbitvisualizationengine.server.domain.OrbitElementRecord;
@@ -10,7 +18,6 @@ import com.orbitvisualizationengine.server.domain.PropagatorType;
 import com.orbitvisualizationengine.server.domain.SatelliteAnalysisConfig;
 import com.orbitvisualizationengine.server.domain.SatelliteRecord;
 import com.orbitvisualizationengine.server.dto.diagnostics.ForceDiagnosticsSample;
-import com.orbitvisualizationengine.server.ingestion.CelesTrakClient;
 import com.orbitvisualizationengine.server.propagation.EphemerisCache;
 import com.orbitvisualizationengine.server.propagation.KeplerianPropagator;
 import com.orbitvisualizationengine.server.propagation.NumericalPropagator;
@@ -24,6 +31,7 @@ import java.io.File;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.orekit.data.DataContext;
 import org.orekit.data.DirectoryCrawler;
 import org.orekit.propagation.analytical.tle.TLE;
@@ -36,7 +44,7 @@ import org.springframework.stereotype.Service;
 public class OrekitOrbitAnalysisService implements OrbitAnalysisService {
   private final SatelliteRepository satellites;
   private final ManeuverRepository maneuvers;
-  private final CelesTrakClient celesTrak;
+  private final CatalogProviderRegistry providerRegistry;
   private final ObjectMapper mapper;
   private final AnalysisConfigService analysisConfigService;
   private final SGP4Propagator sgp4Propagator;
@@ -47,7 +55,7 @@ public class OrekitOrbitAnalysisService implements OrbitAnalysisService {
   public OrekitOrbitAnalysisService(
       SatelliteRepository satellites,
       ManeuverRepository maneuvers,
-      CelesTrakClient celesTrak,
+      CatalogProviderRegistry providerRegistry,
       ObjectMapper mapper,
       AnalysisConfigService analysisConfigService,
       SGP4Propagator sgp4Propagator,
@@ -57,7 +65,7 @@ public class OrekitOrbitAnalysisService implements OrbitAnalysisService {
       AppProperties properties) {
     this.satellites = satellites;
     this.maneuvers = maneuvers;
-    this.celesTrak = celesTrak;
+    this.providerRegistry = providerRegistry;
     this.mapper = mapper;
     this.analysisConfigService = analysisConfigService;
     this.sgp4Propagator = sgp4Propagator;
@@ -156,11 +164,11 @@ public class OrekitOrbitAnalysisService implements OrbitAnalysisService {
   private TLE loadTle(int noradId) {
     OrbitElementRecord element = satellites.findLatestOrbitElement(noradId).orElse(null);
     if (element == null || !"TLE".equals(element.format())) {
-      CelesTrakClient.TleText tleText = celesTrak.fetchTleByNoradId(noradId);
+      ProviderTleRecord tleText = fetchTleByNoradId(noradId);
       Instant now = Instant.now();
-      satellites.upsertSatellite(new SatelliteRecord(noradId, tleText.name(), "payload", null, "celestrak", now));
+      satellites.upsertSatellite(new SatelliteRecord(noradId, tleText.objectName(), "payload", null, "celestrak", now));
       satellites.upsertOrbitElement(new OrbitElementRecord("celestrak-tle-" + noradId + "-" + now.toEpochMilli(), noradId, "TLE",
-          null, tleText.rawPayload(), now));
+          null, tleText.rawPayload().toString(), now));
       return new TLE(tleText.line1(), tleText.line2());
     }
 
@@ -176,6 +184,25 @@ public class OrekitOrbitAnalysisService implements OrbitAnalysisService {
     } catch (JsonProcessingException exception) {
       throw new IllegalStateException("Stored TLE payload is not valid JSON for NORAD " + noradId, exception);
     }
+  }
+
+  private ProviderTleRecord fetchTleByNoradId(int noradId) {
+    if (noradId <= 0) {
+      throw new IllegalArgumentException("NORAD catalog ID must be positive");
+    }
+    CatalogFetchRequest request = new CatalogFetchRequest(
+        CatalogEndpoint.NORAD_TLE,
+        CatalogDataFormat.TLE,
+        Map.of(),
+        Map.of("noradId", noradId));
+    TleCatalogResponse response = (TleCatalogResponse) celestrak().fetch(request).body();
+    return response.records().stream()
+        .findFirst()
+        .orElseThrow(() -> new IllegalStateException("CelesTrak did not return a complete TLE for NORAD " + noradId));
+  }
+
+  private CatalogSource celestrak() {
+    return providerRegistry.require(CelestrakCatalogSource.PROVIDER_CODE);
   }
 
   public record PropagationComparison(String model, List<EphemerisState> states) {

@@ -1,0 +1,47 @@
+catalog-providers:
+  default-user-agent: ${CATALOG_PROVIDER_USER_AGENT:orbit-visualization-engine/0.1}
+  providers:
+    celestrak:
+      code: celestrak
+      display-name: CelesTrak
+      provider-type: PUBLIC
+      enabled: true
+      base-url: ${CELESTRAK_BASE_URL:https://celestrak.org}
+      capabilities:
+        - TLE
+        - OMM
+        - GROUP_QUERY
+        - NORAD_QUERY
+      formats:
+        - JSON
+        - TLE
+        - OMM
+      endpoints:
+        GROUP_ELEMENTS_JSON:
+          path: /NORAD/elements/gp.php
+          format: JSON
+          authenticated: false
+          query-parameters:
+            FORMAT: JSON
+          query-parameter-aliases:
+            group: GROUP
+        GROUP_TLE:
+          path: /NORAD/elements/gp.php
+          format: TLE
+          authenticated: false
+          query-parameters:
+            FORMAT: TLE
+          query-parameter-aliases:
+            group: GROUP
+        NORAD_TLE:
+          path: /NORAD/elements/gp.php
+          format: TLE
+          authenticated: false
+          query-parameters:
+            FORMAT: TLE
+          query-parameter-aliases:
+            noradId: CATNR
+        LEGACY_GROUP_TLE:
+          path: /NORAD/elements/{group}.txt
+          format: TLE
+          authenticated: false

@@ -2,10 +2,18 @@ package com.orbitvisualizationengine.server.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.orbitvisualizationengine.server.catalog.provider.CatalogDataFormat;
+import com.orbitvisualizationengine.server.catalog.provider.CatalogEndpoint;
+import com.orbitvisualizationengine.server.catalog.provider.CatalogFetchRequest;
+import com.orbitvisualizationengine.server.catalog.provider.CatalogProviderRegistry;
+import com.orbitvisualizationengine.server.catalog.provider.CatalogSource;
+import com.orbitvisualizationengine.server.catalog.provider.dto.CelestrakGpCatalogResponse;
+import com.orbitvisualizationengine.server.catalog.provider.dto.TleCatalogResponse;
+import com.orbitvisualizationengine.server.catalog.provider.exception.ProviderHttpException;
+import com.orbitvisualizationengine.server.catalog.provider.impl.CelestrakCatalogSource;
 import com.orbitvisualizationengine.server.domain.OrbitElementRecord;
 import com.orbitvisualizationengine.server.domain.SatelliteRecord;
 import com.orbitvisualizationengine.server.dto.SatelliteListResponse;
-import com.orbitvisualizationengine.server.ingestion.CelesTrakClient;
 import com.orbitvisualizationengine.server.repository.SatelliteRepository;
 import com.orbitvisualizationengine.server.repository.SatelliteRepository.CatalogTleRecord;
 import java.time.Instant;
@@ -16,7 +24,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestClientResponseException;
 
 @Service
 public class CatalogService {
@@ -27,12 +34,12 @@ public class CatalogService {
       "GEO", "Geosynchronous",
       "SCIENCE", "Science");
 
-  private final CelesTrakClient celesTrak;
+  private final CatalogProviderRegistry providerRegistry;
   private final SatelliteRepository satellites;
   private final ObjectMapper mapper;
 
-  public CatalogService(CelesTrakClient celesTrak, SatelliteRepository satellites, ObjectMapper mapper) {
-    this.celesTrak = celesTrak;
+  public CatalogService(CatalogProviderRegistry providerRegistry, SatelliteRepository satellites, ObjectMapper mapper) {
+    this.providerRegistry = providerRegistry;
     this.satellites = satellites;
     this.mapper = mapper;
   }
@@ -46,7 +53,7 @@ public class CatalogService {
     Instant now = Instant.now();
 
     try {
-      JsonNode records = celesTrak.fetchGroupJson(groupId);
+      JsonNode records = fetchGroupJson(groupId);
       if (records != null && records.isArray()) {
         for (JsonNode record : records) {
           int noradId = record.path("NORAD_CAT_ID").asInt();
@@ -65,7 +72,7 @@ public class CatalogService {
           satellites.upsertCatalogMembership(groupId, noradId, now);
         }
       }
-    } catch (RestClientResponseException exception) {
+    } catch (ProviderHttpException exception) {
       if (satellites.findByGroup(groupId, 1).isEmpty()) {
         throw exception;
       }
@@ -79,7 +86,7 @@ public class CatalogService {
 
     try {
       refreshGroupTle(groupId);
-    } catch (RestClientResponseException exception) {
+    } catch (ProviderHttpException exception) {
       String cachedTle = loadGroupTleFromDatabase(groupId, cappedLimit);
       if (!cachedTle.isBlank()) {
         return cachedTle;
@@ -117,7 +124,7 @@ public class CatalogService {
   }
 
   private void refreshGroupTle(String groupId) {
-    String rawTle = celesTrak.fetchGroupTle(groupId);
+    String rawTle = fetchGroupTle(groupId);
     List<TleEntry> entries = parseTleEntries(rawTle);
     if (entries.isEmpty()) {
       throw new IllegalStateException("CelesTrak did not return TLE data for group " + groupId);
@@ -155,6 +162,51 @@ public class CatalogService {
       }
     }
     return String.join(System.lineSeparator(), output);
+  }
+
+  private JsonNode fetchGroupJson(String groupId) {
+    CatalogFetchRequest request = new CatalogFetchRequest(
+        CatalogEndpoint.GROUP_ELEMENTS_JSON,
+        CatalogDataFormat.JSON,
+        Map.of(),
+        Map.of("group", celestrakGroup(groupId)));
+    return ((CelestrakGpCatalogResponse) celestrak().fetch(request).body()).rawPayload();
+  }
+
+  private String fetchGroupTle(String groupId) {
+    return fetchGroupTleResponse(groupId).rawText();
+  }
+
+  private TleCatalogResponse fetchGroupTleResponse(String groupId) {
+    String celestrakGroup = celestrakGroup(groupId);
+    try {
+      return fetchTleResponse(new CatalogFetchRequest(
+          CatalogEndpoint.GROUP_TLE,
+          CatalogDataFormat.TLE,
+          Map.of(),
+          Map.of("group", celestrakGroup)));
+    } catch (ProviderHttpException exception) {
+      if (exception.statusCode() == null || exception.statusCode() != 403) {
+        throw exception;
+      }
+      return fetchTleResponse(new CatalogFetchRequest(
+          CatalogEndpoint.LEGACY_GROUP_TLE,
+          CatalogDataFormat.TLE,
+          Map.of("group", celestrakGroup),
+          Map.of()));
+    }
+  }
+
+  private TleCatalogResponse fetchTleResponse(CatalogFetchRequest request) {
+    return (TleCatalogResponse) celestrak().fetch(request).body();
+  }
+
+  private CatalogSource celestrak() {
+    return providerRegistry.require(CelestrakCatalogSource.PROVIDER_CODE);
+  }
+
+  private String celestrakGroup(String groupId) {
+    return groupId.toLowerCase(Locale.ROOT);
   }
 
   private String writeTlePayload(TleEntry entry, String groupId) {

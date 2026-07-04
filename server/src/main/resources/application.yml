@@ -5,7 +5,9 @@ spring:
   application:
     name: orbit-analysis-server
   config:
-    import: optional:file:.env[.properties]
+    import:
+      - optional:file:.env[.properties]
+      - classpath:providers.yml
   datasource:
     url: ${SPRING_DATASOURCE_URL:}
     username: ${SPRING_DATASOURCE_USERNAME:}
@@ -16,7 +18,6 @@ spring:
       schema-locations: classpath:db/schema.sql
 
 orbit:
-  celestrak-base-url: ${CELESTRAK_BASE_URL:https://celestrak.org}
   space-track-base-url: ${SPACE_TRACK_BASE_URL:https://www.space-track.org}
   space-track-username: ${SPACE_TRACK_USERNAME:}
   space-track-password: ${SPACE_TRACK_PASSWORD:}

@@ -4,7 +4,6 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 
 @ConfigurationProperties(prefix = "orbit")
 public record AppProperties(
-    String celestrakBaseUrl,
     String spaceTrackBaseUrl,
     String spaceTrackUsername,
     String spaceTrackPassword,
