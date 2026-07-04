@@ -323,3 +323,361 @@ create index if not exists conjunctions_sat1_idx
 
 create index if not exists conjunctions_sat2_idx
   on conjunctions(sat2_norad_id);
+
+create table if not exists catalog_sources (
+  id bigint generated always as identity primary key,
+  code text not null,
+  display_name text not null,
+  provider_type text not null,
+  base_url text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  metadata jsonb not null default '{}'::jsonb,
+  constraint catalog_sources_code_unique unique (code),
+  constraint catalog_sources_code_valid check (code ~ '^[a-z0-9][a-z0-9_-]{1,62}[a-z0-9]$'),
+  constraint catalog_sources_display_name_valid check (btrim(display_name) <> ''),
+  constraint catalog_sources_provider_type_valid check (provider_type in ('PUBLIC', 'USER_IMPORT', 'COMMERCIAL', 'INTERNAL')),
+  constraint catalog_sources_base_url_valid check (
+    base_url is null
+    or base_url ~ '^https?://'
+  )
+);
+
+create index if not exists catalog_sources_provider_type_idx
+  on catalog_sources(provider_type, code);
+
+create table if not exists catalog_versions (
+  id bigint generated always as identity primary key,
+  source_id bigint not null references catalog_sources(id) on delete restrict,
+  source_snapshot_id text,
+  status text not null default 'IMPORTING',
+  created_at timestamptz not null default now(),
+  published_at timestamptz,
+  source_epoch_min timestamptz,
+  source_epoch_max timestamptz,
+  total_objects integer not null default 0,
+  active_objects integer not null default 0,
+  changed_objects integer not null default 0,
+  added_objects integer not null default 0,
+  removed_objects integer not null default 0,
+  catalog_sha256 char(64),
+  metadata jsonb not null default '{}'::jsonb,
+  constraint catalog_versions_status_valid check (status in ('IMPORTING', 'AVAILABLE', 'FAILED', 'SUPERSEDED')),
+  constraint catalog_versions_counts_valid check (
+    total_objects >= 0
+    and active_objects >= 0
+    and changed_objects >= 0
+    and added_objects >= 0
+    and removed_objects >= 0
+  ),
+  constraint catalog_versions_epoch_window_valid check (
+    source_epoch_min is null
+    or source_epoch_max is null
+    or source_epoch_min <= source_epoch_max
+  ),
+  constraint catalog_versions_publish_state_valid check (
+    (status = 'AVAILABLE' and published_at is not null)
+    or (status <> 'AVAILABLE')
+  ),
+  constraint catalog_versions_sha256_valid check (
+    catalog_sha256 is null
+    or catalog_sha256 ~ '^[0-9a-f]{64}$'
+  )
+);
+
+create or replace function prevent_catalog_reference_delete()
+returns trigger
+language plpgsql
+as $$
+begin
+  raise exception '% rows are historical catalog references and cannot be deleted', tg_table_name;
+end;
+$$;
+
+drop trigger if exists catalog_sources_no_delete on catalog_sources;
+drop trigger if exists catalog_versions_no_delete on catalog_versions;
+
+create trigger catalog_sources_no_delete
+  before delete on catalog_sources
+  for each row
+  execute function prevent_catalog_reference_delete();
+
+create trigger catalog_versions_no_delete
+  before delete on catalog_versions
+  for each row
+  execute function prevent_catalog_reference_delete();
+
+create index if not exists catalog_versions_source_snapshot_idx
+  on catalog_versions(source_id, source_snapshot_id)
+  where source_snapshot_id is not null;
+
+create index if not exists catalog_versions_status_created_idx
+  on catalog_versions(status, created_at desc);
+
+create table if not exists catalog_sync_runs (
+  id bigint generated always as identity primary key,
+  catalog_version_id bigint not null references catalog_versions(id) on delete restrict,
+  source_id bigint not null references catalog_sources(id) on delete restrict,
+  status text not null default 'RUNNING',
+  started_at timestamptz not null default now(),
+  finished_at timestamptz,
+  source_url text,
+  source_etag text,
+  source_last_modified timestamptz,
+  fetched_element_sets integer not null default 0,
+  parsed_element_sets integer not null default 0,
+  inserted_history_rows integer not null default 0,
+  updated_active_rows integer not null default 0,
+  unchanged_active_rows integer not null default 0,
+  removed_active_rows integer not null default 0,
+  error_message text,
+  metadata jsonb not null default '{}'::jsonb,
+  constraint catalog_sync_runs_version_unique unique (catalog_version_id),
+  constraint catalog_sync_runs_status_valid check (status in ('RUNNING', 'SUCCEEDED', 'FAILED')),
+  constraint catalog_sync_runs_counts_valid check (
+    fetched_element_sets >= 0
+    and parsed_element_sets >= 0
+    and inserted_history_rows >= 0
+    and updated_active_rows >= 0
+    and unchanged_active_rows >= 0
+    and removed_active_rows >= 0
+  ),
+  constraint catalog_sync_runs_finished_state_valid check (
+    (status = 'RUNNING' and finished_at is null)
+    or (status in ('SUCCEEDED', 'FAILED') and finished_at is not null)
+  ),
+  constraint catalog_sync_runs_time_window_valid check (
+    finished_at is null
+    or started_at <= finished_at
+  )
+);
+
+drop trigger if exists catalog_sync_runs_no_delete on catalog_sync_runs;
+
+create trigger catalog_sync_runs_no_delete
+  before delete on catalog_sync_runs
+  for each row
+  execute function prevent_catalog_reference_delete();
+
+create or replace function validate_catalog_sync_run_source()
+returns trigger
+language plpgsql
+as $$
+declare
+  version_source_id bigint;
+begin
+  select source_id
+  into version_source_id
+  from catalog_versions
+  where id = new.catalog_version_id;
+
+  if version_source_id is null then
+    raise exception 'catalog_sync_runs catalog_version_id % does not exist', new.catalog_version_id;
+  end if;
+
+  if version_source_id <> new.source_id then
+    raise exception 'catalog_sync_runs source_id % must match catalog_versions source_id %', new.source_id, version_source_id;
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists catalog_sync_runs_source_valid on catalog_sync_runs;
+
+create trigger catalog_sync_runs_source_valid
+  before insert or update on catalog_sync_runs
+  for each row
+  execute function validate_catalog_sync_run_source();
+
+create index if not exists catalog_sync_runs_status_started_idx
+  on catalog_sync_runs(status, started_at desc);
+
+create table if not exists satellite_catalog_history (
+  id bigint generated always as identity primary key,
+  catalog_version_id bigint not null references catalog_versions(id) on delete restrict,
+  sync_run_id bigint not null references catalog_sync_runs(id) on delete restrict,
+  norad_cat_id integer not null,
+  record_type text not null,
+  object_name text,
+  object_id text,
+  object_type text,
+  classification text,
+  country_code text,
+  launch_year integer,
+  launch_number integer,
+  launch_piece text,
+  epoch_at timestamptz,
+  tle_line1 text,
+  tle_line2 text,
+  tle_sha256 char(64),
+  element_set_no integer,
+  ephemeris_type integer,
+  inclination_deg numeric(12, 8),
+  raan_deg numeric(12, 8),
+  eccentricity numeric(12, 10),
+  argument_of_perigee_deg numeric(12, 8),
+  mean_anomaly_deg numeric(12, 8),
+  mean_motion_rev_per_day numeric(16, 10),
+  mean_motion_dot numeric(16, 10),
+  mean_motion_ddot numeric(16, 10),
+  bstar numeric(16, 10),
+  revolution_number integer,
+  source_payload jsonb not null default '{}'::jsonb,
+  ingested_at timestamptz not null default now(),
+  constraint satellite_catalog_history_version_norad_unique unique (catalog_version_id, norad_cat_id),
+  constraint satellite_catalog_history_norad_valid check (norad_cat_id > 0),
+  constraint satellite_catalog_history_record_type_valid check (record_type in ('TLE', 'REMOVED')),
+  constraint satellite_catalog_history_tle_payload_required check (
+    record_type = 'REMOVED'
+    or (
+      object_name is not null
+      and epoch_at is not null
+      and tle_line1 is not null
+      and tle_line2 is not null
+      and tle_sha256 is not null
+    )
+  ),
+  constraint satellite_catalog_history_sha256_valid check (
+    tle_sha256 is null
+    or tle_sha256 ~ '^[0-9a-f]{64}$'
+  ),
+  constraint satellite_catalog_history_tle_lines_valid check (
+    record_type = 'REMOVED'
+    or (
+      char_length(tle_line1) = 69
+      and char_length(tle_line2) = 69
+      and tle_line1 like '1 %'
+      and tle_line2 like '2 %'
+    )
+  ),
+  constraint satellite_catalog_history_classification_valid check (
+    classification is null
+    or char_length(classification) = 1
+  ),
+  constraint satellite_catalog_history_launch_valid check (
+    (launch_year is null or launch_year between 1957 and 9999)
+    and (launch_number is null or launch_number > 0)
+  ),
+  constraint satellite_catalog_history_element_numbers_valid check (
+    (element_set_no is null or element_set_no >= 0)
+    and (ephemeris_type is null or ephemeris_type between 0 and 9)
+    and (revolution_number is null or revolution_number >= 0)
+  ),
+  constraint satellite_catalog_history_orbital_ranges_valid check (
+    (inclination_deg is null or inclination_deg between 0 and 180)
+    and (raan_deg is null or raan_deg >= 0 and raan_deg < 360)
+    and (eccentricity is null or eccentricity >= 0 and eccentricity < 1)
+    and (argument_of_perigee_deg is null or argument_of_perigee_deg >= 0 and argument_of_perigee_deg < 360)
+    and (mean_anomaly_deg is null or mean_anomaly_deg >= 0 and mean_anomaly_deg < 360)
+    and (mean_motion_rev_per_day is null or mean_motion_rev_per_day > 0)
+  )
+);
+
+create index if not exists satellite_catalog_history_norad_version_idx
+  on satellite_catalog_history(norad_cat_id, catalog_version_id desc);
+
+create index if not exists satellite_catalog_history_version_tle_idx
+  on satellite_catalog_history(catalog_version_id, norad_cat_id)
+  where record_type = 'TLE';
+
+create index if not exists satellite_catalog_history_object_name_idx
+  on satellite_catalog_history(lower(object_name))
+  where record_type = 'TLE';
+
+create index if not exists satellite_catalog_history_epoch_idx
+  on satellite_catalog_history(epoch_at desc, norad_cat_id)
+  where record_type = 'TLE';
+
+create index if not exists satellite_catalog_history_tle_hash_idx
+  on satellite_catalog_history(tle_sha256)
+  where tle_sha256 is not null;
+
+create index if not exists satellite_catalog_history_ingested_brin_idx
+  on satellite_catalog_history using brin(ingested_at);
+
+create or replace function prevent_satellite_catalog_history_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+  if tg_op = 'TRUNCATE' then
+    raise exception 'satellite_catalog_history is append-only; attempted TRUNCATE';
+  end if;
+
+  raise exception 'satellite_catalog_history is append-only; attempted % on history id %', tg_op, old.id;
+end;
+$$;
+
+drop trigger if exists satellite_catalog_history_append_only on satellite_catalog_history;
+drop trigger if exists satellite_catalog_history_no_truncate on satellite_catalog_history;
+
+create trigger satellite_catalog_history_append_only
+  before update or delete on satellite_catalog_history
+  for each row
+  execute function prevent_satellite_catalog_history_mutation();
+
+create trigger satellite_catalog_history_no_truncate
+  before truncate on satellite_catalog_history
+  for each statement
+  execute function prevent_satellite_catalog_history_mutation();
+
+create table if not exists satellite_catalog (
+  norad_cat_id integer primary key,
+  current_history_id bigint not null unique references satellite_catalog_history(id) on delete restrict,
+  current_version_id bigint not null references catalog_versions(id) on delete restrict,
+  first_seen_version_id bigint not null references catalog_versions(id) on delete restrict,
+  last_seen_version_id bigint not null references catalog_versions(id) on delete restrict,
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint satellite_catalog_norad_valid check (norad_cat_id > 0),
+  constraint satellite_catalog_seen_window_valid check (
+    first_seen_version_id <= last_seen_version_id
+    and first_seen_at <= last_seen_at
+    and first_seen_version_id <= current_version_id
+    and current_version_id <= last_seen_version_id
+  )
+);
+
+create index if not exists satellite_catalog_last_seen_version_idx
+  on satellite_catalog(last_seen_version_id desc);
+
+create or replace function validate_satellite_catalog_projection()
+returns trigger
+language plpgsql
+as $$
+declare
+  history_row satellite_catalog_history%rowtype;
+begin
+  select *
+  into history_row
+  from satellite_catalog_history
+  where id = new.current_history_id;
+
+  if history_row.id is null then
+    raise exception 'satellite_catalog current_history_id % does not exist', new.current_history_id;
+  end if;
+
+  if history_row.record_type <> 'TLE' then
+    raise exception 'satellite_catalog current_history_id % must reference a TLE history row', new.current_history_id;
+  end if;
+
+  if history_row.norad_cat_id <> new.norad_cat_id then
+    raise exception 'satellite_catalog NORAD % cannot reference history NORAD %', new.norad_cat_id, history_row.norad_cat_id;
+  end if;
+
+  if history_row.catalog_version_id <> new.current_version_id then
+    raise exception 'satellite_catalog current_version_id % must match history version %', new.current_version_id, history_row.catalog_version_id;
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists satellite_catalog_projection_valid on satellite_catalog;
+
+create trigger satellite_catalog_projection_valid
+  before insert or update on satellite_catalog
+  for each row
+  execute function validate_satellite_catalog_projection();
