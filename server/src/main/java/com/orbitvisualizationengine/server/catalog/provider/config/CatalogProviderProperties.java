@@ -40,6 +40,7 @@ public record CatalogProviderProperties(
       @NotNull URI baseUrl,
       @NotEmpty Set<CatalogCapability> capabilities,
       @NotEmpty Set<CatalogDataFormat> formats,
+      @Valid Ingestion ingestion,
       @NotEmpty Map<CatalogEndpoint, @Valid Endpoint> endpoints) {
 
     public Provider {
@@ -54,6 +55,18 @@ public record CatalogProviderProperties(
         throw new IllegalArgumentException("Catalog provider " + code + " is missing endpoint " + endpoint);
       }
       return definition;
+    }
+  }
+
+  public record Ingestion(
+      @NotNull CatalogEndpoint endpoint,
+      @NotNull CatalogDataFormat expectedFormat,
+      Map<String, String> pathParameters,
+      Map<String, String> queryParameters) {
+
+    public Ingestion {
+      pathParameters = pathParameters == null ? Map.of() : Map.copyOf(pathParameters);
+      queryParameters = queryParameters == null ? Map.of() : Map.copyOf(queryParameters);
     }
   }
 

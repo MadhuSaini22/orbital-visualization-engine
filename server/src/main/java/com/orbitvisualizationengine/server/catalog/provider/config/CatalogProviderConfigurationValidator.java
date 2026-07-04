@@ -26,6 +26,9 @@ public class CatalogProviderConfigurationValidator {
       if (!provider.formats().containsAll(provider.endpoints().values().stream().map(CatalogProviderProperties.Endpoint::format).toList())) {
         throw new ProviderConfigurationException("Catalog provider " + provider.code() + " declares an endpoint format it does not support");
       }
+      if (provider.ingestion() != null) {
+        require(provider, provider.ingestion().endpoint(), provider.ingestion().expectedFormat());
+      }
     }
 
     CatalogProviderProperties.Provider celestrak = properties.providers().get("celestrak");

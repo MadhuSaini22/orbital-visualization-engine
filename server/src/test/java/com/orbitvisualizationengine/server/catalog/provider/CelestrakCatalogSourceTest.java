@@ -86,6 +86,11 @@ class CelestrakCatalogSourceTest {
         URI.create("https://example.test"),
         Set.of(CatalogCapability.TLE, CatalogCapability.OMM, CatalogCapability.GROUP_QUERY, CatalogCapability.NORAD_QUERY),
         Set.of(CatalogDataFormat.JSON, CatalogDataFormat.TLE, CatalogDataFormat.OMM),
+        new CatalogProviderProperties.Ingestion(
+            CatalogEndpoint.GROUP_TLE,
+            CatalogDataFormat.TLE,
+            Map.of(),
+            Map.of("group", "stations")),
         Map.of(
             CatalogEndpoint.GROUP_ELEMENTS_JSON, groupJson,
             CatalogEndpoint.GROUP_TLE, groupTle,

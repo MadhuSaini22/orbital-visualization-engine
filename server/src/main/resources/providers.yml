@@ -16,6 +16,11 @@ catalog-providers:
         - JSON
         - TLE
         - OMM
+      ingestion:
+        endpoint: GROUP_TLE
+        expected-format: TLE
+        query-parameters:
+          group: active
       endpoints:
         GROUP_ELEMENTS_JSON:
           path: /NORAD/elements/gp.php
