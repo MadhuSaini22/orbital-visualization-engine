@@ -129,3 +129,57 @@ Changed and added TLEs create `TLE` rows in `satellite_catalog_history`. Missing
 - provider metadata and capabilities
 
 The ingestion pipeline does not hardcode provider URLs or CelesTrak endpoint paths.
+
+## Milestone 4: Catalog Runtime Layer
+
+Milestone 4 adds the read-only runtime API for the latest published catalog projection. This layer does not ingest provider data, call providers, schedule work, expose REST endpoints, run Orekit, parse TLEs, create propagators, or perform proximity analysis.
+
+The runtime catalog is the boundary future analysis modules should depend on when they need public catalog satellites. It reads from PostgreSQL only and returns immutable `CatalogSatellite` objects.
+
+## Runtime Access Pattern
+
+```mermaid
+sequenceDiagram
+  participant Caller as Future Analysis Service
+  participant Service as CatalogService
+  participant Repository as CatalogRepository
+  participant DB as PostgreSQL
+  participant Mapper as CatalogSatelliteMapper
+
+  Caller->>Service: findByNoradId / findAll / findByName / exists / count / stream
+  Service->>Repository: read latest published projection
+  Repository->>DB: query satellite_catalog + current TLE history + AVAILABLE version
+  DB-->>Repository: catalog rows
+  Repository-->>Service: CatalogSatelliteRecord
+  Service->>Mapper: map database record
+  Mapper-->>Service: CatalogSatellite
+  Service-->>Caller: runtime catalog model
+```
+
+## Runtime Responsibilities
+
+`CatalogService`
+
+Public runtime entry point for catalog reads. It validates caller input, throws a catalog-specific exception for missing NORAD ids, maps repository records into runtime models, and exposes `findByNoradId`, `findAll`, `findByName`, `exists`, `count`, and `stream`.
+
+`CatalogRepository`
+
+Owns SQL for read-only access to the latest published projection. Lightweight checks such as `exists` and `count` read directly from `satellite_catalog`. Rich reads join the projection to the current `satellite_catalog_history` row for TLE/object fields and to version/source tables for catalog provenance.
+
+`CatalogSatelliteRecord`
+
+Internal repository record representing the selected database columns. It is not exposed outside the runtime repository/mapper boundary.
+
+`CatalogSatelliteMapper`
+
+Maps database records into immutable runtime catalog objects. It keeps row shape separate from the public model future analysis services will consume.
+
+`CatalogSatellite`
+
+Immutable runtime model for a published catalog satellite. It carries the latest active TLE and catalog/version provenance but performs no TLE parsing or physics.
+
+## Runtime Rules
+
+Runtime catalog access is provider-agnostic. It never talks to CelesTrak, Space-Track, or any future provider. It only reads published database state created by ingestion.
+
+The runtime layer intentionally does not cache results yet. Future modules such as propagation, event detection, relative motion, and proximity analysis should consume `CatalogService` instead of querying catalog tables directly.
