@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.orbitvisualizationengine.server.catalog.runtime.orekit.RuntimeSatellite;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -89,6 +90,49 @@ class PropagationServiceTest {
         .hasMessageContaining("positive");
   }
 
+  @Test
+  void propagationResultDefensivelyCopiesStates() {
+    RuntimeSatellite satellite = PropagationTestFixtures.runtimeSatellite();
+    List<PropagatedState> mutableStates = new ArrayList<>();
+    mutableStates.add(state(START));
+
+    PropagationResult result = new PropagationResult(
+        satellite,
+        START,
+        STOP,
+        Duration.ofSeconds(60),
+        mutableStates);
+
+    mutableStates.add(state(STOP));
+
+    assertThat(result.states()).hasSize(1);
+    assertThatThrownBy(() -> result.states().add(state(STOP)))
+        .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  @Test
+  void propagationResultRejectsInvalidTimeBounds() {
+    RuntimeSatellite satellite = PropagationTestFixtures.runtimeSatellite();
+
+    assertThatThrownBy(() -> new PropagationResult(
+        satellite,
+        STOP,
+        START,
+        Duration.ofSeconds(60),
+        List.of(state(START))))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Stop time");
+
+    assertThatThrownBy(() -> new PropagationResult(
+        satellite,
+        START,
+        STOP,
+        Duration.ZERO,
+        List.of(state(START))))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("positive");
+  }
+
   private static final class RecordingEngine implements PropagationEngine {
     private RuntimeSatellite satellite;
     private List<Instant> sampleTimes;
@@ -105,5 +149,13 @@ class PropagationServiceTest {
               new CartesianVector(4.0, 5.0, 6.0)))
           .toList();
     }
+  }
+
+  private static PropagatedState state(Instant timestamp) {
+    return new PropagatedState(
+        timestamp,
+        "TEST",
+        new CartesianVector(1.0, 2.0, 3.0),
+        new CartesianVector(4.0, 5.0, 6.0));
   }
 }

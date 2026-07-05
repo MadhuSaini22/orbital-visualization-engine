@@ -24,6 +24,12 @@ public record PropagationResult(
     if (step == null) {
       throw new IllegalArgumentException("Step duration is required");
     }
+    if (stopTime.isBefore(startTime)) {
+      throw new IllegalArgumentException("Stop time must be greater than or equal to start time");
+    }
+    if (step.isZero() || step.isNegative()) {
+      throw new IllegalArgumentException("Step duration must be positive");
+    }
     if (states == null || states.isEmpty()) {
       throw new IllegalArgumentException("At least one propagated state is required");
     }
