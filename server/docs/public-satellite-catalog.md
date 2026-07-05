@@ -236,3 +236,68 @@ Runtime-specific exception for malformed catalog TLEs. It keeps Orekit parsing f
 The Orekit runtime bridge is provider-neutral. It does not know whether a satellite came from CelesTrak, Space-Track, a user import, or a commercial catalog. Its only input is the published `CatalogSatellite` model.
 
 The bridge validates TLEs and can create propagator objects on demand through `OrekitPropagatorFactory`, but performs no propagation loops. Time-stepping, event detection, proximity analysis, visibility, and relative-motion workflows belong to later modules.
+
+## Milestone 6: Propagation Engine
+
+Milestone 6 adds the runtime propagation layer on top of `RuntimeSatellite`. It samples a single runtime satellite over a caller-provided time span and returns immutable Cartesian state history. It does not perform event detection, visibility analysis, conjunction analysis, proximity search, relative motion, caching, background work, REST exposure, scheduler integration, force-model configuration, or database access.
+
+The public propagation API is provider-neutral. It consumes a `RuntimeSatellite` already created by the Milestone 5 bridge and never talks to catalog providers, ingestion services, repositories, or controllers.
+
+## Propagation Sequence
+
+```mermaid
+sequenceDiagram
+  participant Caller as Future Analysis Service
+  participant Service as PropagationService
+  participant Engine as PropagationEngine
+  participant OrekitEngine as OrekitTlePropagationEngine
+  participant Factory as OrekitPropagatorFactory
+  participant Orekit as Orekit TLEPropagator
+
+  Caller->>Service: propagate(RuntimeSatellite, start, stop, step)
+  Service->>Service: validate request and build sample times
+  Service->>Engine: propagate(satellite, sampleTimes)
+  Engine->>OrekitEngine: TLE propagation implementation
+  OrekitEngine->>Factory: createPropagator(runtimeSatellite.tle)
+  Factory->>Orekit: selectExtrapolator(TLE)
+  Orekit-->>Factory: TLEPropagator
+  loop each sample time
+    OrekitEngine->>Orekit: propagate(sampleTime)
+    Orekit-->>OrekitEngine: SpacecraftState
+    OrekitEngine->>OrekitEngine: map to PropagatedState
+  end
+  OrekitEngine-->>Service: immutable state list
+  Service-->>Caller: PropagationResult
+```
+
+## Propagation Responsibilities
+
+`PropagationService`
+
+Public runtime entry point for propagation. It validates the runtime satellite, start time, stop time, and positive step duration; builds deterministic sample times including the final stop time; delegates propagation to the configured engine; and returns an immutable `PropagationResult`.
+
+`PropagationEngine`
+
+Small internal boundary between propagation orchestration and the concrete propagation implementation. It exists so the service does not depend on Orekit classes directly, while avoiding a broader strategy framework before multiple propagator families are actually implemented.
+
+`OrekitTlePropagationEngine`
+
+Current production implementation for TLE propagation. It creates a fresh `TLEPropagator` on demand through `OrekitPropagatorFactory`, propagates each requested sample time, and maps Orekit `SpacecraftState` output into runtime models. It uses TEME for TLE output because that is the native SGP4 frame.
+
+`PropagatedState`
+
+Immutable runtime state sample containing timestamp, output frame name, Cartesian position, and Cartesian velocity. It intentionally does not expose Orekit `SpacecraftState` so future modules can consume propagation output without depending on Orekit internals.
+
+`PropagationResult`
+
+Immutable propagation product containing the source `RuntimeSatellite`, requested time bounds, requested step duration, and generated state history. Later event, visibility, relative-motion, and proximity modules can consume this result without knowing how it was generated.
+
+`PropagationException` and `PropagationRequestException`
+
+Runtime-specific failures for propagation. Invalid caller parameters fail before Orekit is invoked; Orekit/runtime failures are wrapped at the propagation boundary.
+
+## Propagation Rules
+
+The propagation layer creates propagators on demand and does not store them in `RuntimeSatellite` or cache them globally. This keeps propagator lifecycle local to one propagation request and leaves room for later NumericalPropagator, DSST, ephemeris-backed, or custom propagation engines.
+
+Milestone 6 supports only TLE propagation. Future force-model configuration, maneuver handling, event detection, and proximity workflows should be built above this layer rather than mixed into the catalog runtime bridge.
