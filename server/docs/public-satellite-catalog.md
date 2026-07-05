@@ -301,3 +301,81 @@ Runtime-specific failures for propagation. Invalid caller parameters fail before
 The propagation layer creates propagators on demand and does not store them in `RuntimeSatellite` or cache them globally. This keeps propagator lifecycle local to one propagation request and leaves room for later NumericalPropagator, DSST, ephemeris-backed, or custom propagation engines.
 
 Milestone 6 supports only TLE propagation. Future force-model configuration, maneuver handling, event detection, and proximity workflows should be built above this layer rather than mixed into the catalog runtime bridge.
+
+## Milestone 7: Event Detection Framework
+
+Milestone 7 adds the event detection framework above runtime propagation. It coordinates propagation result generation with optional event detector execution, but it does not implement concrete event behavior yet. There is no visibility, eclipse, conjunction, ground-station, relative-motion, maneuver, REST, scheduler, cache, database, or provider integration in this milestone.
+
+The event framework is provider-neutral. It consumes `RuntimeSatellite` and the propagation runtime models; it never talks to catalog providers, ingestion services, repositories, controllers, or schedulers.
+
+## Event Detection Sequence
+
+```mermaid
+sequenceDiagram
+  participant Caller as Future Analysis Service
+  participant Service as EventDetectionService
+  participant Propagation as PropagationService
+  participant EventEngine as EventDetectionEngine
+  participant OrekitEvents as OrekitEventDetectionEngine
+  participant Factory as EventDetectorFactory
+  participant Orekit as Orekit Propagator
+
+  Caller->>Service: detectEvents(satellite, start, stop, step, detectorDefinitions)
+  Service->>Service: validate detector definitions
+  Service->>Propagation: propagate(satellite, start, stop, step)
+  Propagation-->>Service: PropagationResult
+  Service->>EventEngine: detect(satellite, start, stop, definitions)
+  EventEngine->>OrekitEvents: Orekit implementation
+  alt no detector definitions
+    OrekitEvents-->>EventEngine: empty event list
+  else detector definitions requested
+    OrekitEvents->>Factory: createDetectors(definitions, collector)
+    Factory-->>OrekitEvents: Orekit EventDetector instances
+    OrekitEvents->>Orekit: addEventDetector(...)
+    OrekitEvents->>Orekit: propagate(start, stop)
+    Orekit-->>OrekitEvents: detector callbacks
+    OrekitEvents-->>EventEngine: collected PropagationEvent list
+  end
+  EventEngine-->>Service: events
+  Service-->>Caller: EventDetectionResult
+```
+
+## Event Detection Responsibilities
+
+`EventDetectionService`
+
+Public event-detection entry point. It validates detector definition lists, invokes `PropagationService` to produce the normal state history, invokes `EventDetectionEngine` for event collection, and returns an immutable `EventDetectionResult`. It does not know Orekit and does not build detectors itself.
+
+`EventDetectionEngine`
+
+Internal boundary between event orchestration and the concrete event-detection implementation. This keeps detector execution independent from `PropagationService` and `PropagationEngine`, so future detector families can be added without modifying the propagation state-history path.
+
+`OrekitEventDetectionEngine`
+
+Orekit-specific event execution layer. It creates a fresh propagator for event detection, attaches Orekit `EventDetector` instances from `EventDetectorFactory`, runs the detector propagation interval, and returns collected runtime events. With no detector definitions, it returns an empty event list without running a second propagation.
+
+`EventDetectorFactory`
+
+Orekit-specific factory that maps runtime detector definitions to Orekit `EventDetector` instances using registered `OrekitEventDetectorBuilder` components. No concrete builders are implemented in this milestone; unsupported detector definitions fail clearly instead of silently doing nothing.
+
+`PropagationEventDetectorDefinition`
+
+Provider-neutral runtime detector definition contract. Future detector definitions such as visibility, eclipse, node crossing, apsis, distance threshold, conjunction, or custom events can implement this contract without changing `PropagationService` or `PropagationEngine`.
+
+`PropagationEvent`
+
+Immutable runtime event record containing event type, timestamp, crossing direction, detector name, and string attributes. It intentionally does not expose Orekit detector or spacecraft-state objects.
+
+`PropagationEventType`
+
+Runtime event taxonomy for future detector implementations: visibility, eclipse, conjunction, node crossing, apsis, distance threshold, and custom detector events.
+
+`EventDetectionResult`
+
+Immutable event-detection product containing the regular `PropagationResult` plus detected events. The event list is defensively copied and may be empty.
+
+## Event Detection Rules
+
+Event collection is separate from propagation result generation. `PropagationService` still produces state histories only. Event detection is layered above it and may run detector propagation independently when detector definitions exist.
+
+Milestone 7 deliberately includes no concrete detectors. Future detector milestones should add focused detector definition records and matching Orekit detector builders under `catalog.runtime.propagation.orekit.events`, without changing the public propagation service or provider/catalog layers.
