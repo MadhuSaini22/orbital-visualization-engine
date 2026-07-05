@@ -378,4 +378,6 @@ Immutable event-detection product containing the regular `PropagationResult` plu
 
 Event collection is separate from propagation result generation. `PropagationService` still produces state histories only. Event detection is layered above it and may run detector propagation independently when detector definitions exist.
 
+The current implementation permits a future single-pass propagation model. `EventDetectionService` depends on the abstract `EventDetectionEngine`, not directly on `OrekitEventDetectionEngine`, and callers receive only `EventDetectionResult`. A later milestone can replace the internal engine with one that installs detectors during the same propagation pass that samples states, while preserving the public event-detection contract and leaving detector definitions unchanged.
+
 Milestone 7 deliberately includes no concrete detectors. Future detector milestones should add focused detector definition records and matching Orekit detector builders under `catalog.runtime.propagation.orekit.events`, without changing the public propagation service or provider/catalog layers.
