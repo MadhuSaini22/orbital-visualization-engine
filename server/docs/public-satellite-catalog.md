@@ -591,3 +591,77 @@ Eclipse analysis is layered above runtime catalog and propagation services. Futu
 Eclipse analysis requires solar ephemerides in the Orekit data configuration. The runtime fails clearly when required Orekit data is unavailable rather than silently degrading to an approximate or non-physical model.
 
 No Orekit classes escape the eclipse package. Public callers receive only immutable runtime eclipse models.
+
+## Milestone 11: Relative Motion Analysis
+
+Milestone 11 adds provider-neutral relative-motion analysis between two runtime catalog satellites. It propagates both satellites over the same requested interval and computes relative position and velocity in the primary satellite's LVLH/RTN frame. It does not implement conjunction detection, collision probability, covariance, maneuver planning, docking, formation control, REST endpoints, scheduler workflows, caching, database schema, or provider integration.
+
+The relative-motion layer consumes runtime satellite and propagation services. It never talks to catalog providers, ingestion services, repositories, controllers, or schedulers.
+
+## Relative Motion Sequence
+
+```mermaid
+sequenceDiagram
+  participant Caller as Future Proximity or Formation Service
+  participant Service as RelativeMotionService
+  participant Runtime as RuntimeSatelliteService
+  participant Propagation as PropagationService
+  participant Engine as RelativeMotionEngine
+  participant OrekitEngine as OrekitRelativeMotionEngine
+
+  Caller->>Service: computeRelativeMotion(RelativeMotionRequest)
+  Service->>Runtime: findByNoradId(primaryNoradCatalogId)
+  Runtime-->>Service: primary RuntimeSatellite
+  Service->>Runtime: findByNoradId(secondaryNoradCatalogId)
+  Runtime-->>Service: secondary RuntimeSatellite
+  Service->>Propagation: propagate(primary, start, stop, step)
+  Propagation-->>Service: primary PropagationResult
+  Service->>Propagation: propagate(secondary, start, stop, step)
+  Propagation-->>Service: secondary PropagationResult
+  Service->>Engine: computeRelativeMotion(request, primaryResult, secondaryResult)
+  Engine->>OrekitEngine: LVLH/RTN implementation
+  OrekitEngine->>OrekitEngine: validate matching sample times
+  OrekitEngine->>OrekitEngine: build primary RTN basis per sample
+  OrekitEngine->>OrekitEngine: project relative position and rotating-frame velocity
+  OrekitEngine-->>Engine: RelativeMotionResult
+  Engine-->>Service: RelativeMotionResult
+  Service-->>Caller: immutable relative states
+```
+
+## Relative Motion Responsibilities
+
+`RelativeMotionService`
+
+Public runtime entry point for pairwise relative motion. It validates the request boundary, loads both `RuntimeSatellite` objects through `RuntimeSatelliteService`, propagates both satellites with `PropagationService`, and delegates relative-state computation to `RelativeMotionEngine`. It does not know Orekit and does not access providers, repositories, or database state.
+
+`RelativeMotionEngine`
+
+Internal boundary between service orchestration and relative-frame computation. This keeps future conjunction, rendezvous, formation-flying, and proximity modules dependent on stable runtime models rather than a concrete propagation implementation.
+
+`OrekitRelativeMotionEngine`
+
+Current RTN implementation. It verifies that primary and secondary propagation results have identical sample times, builds the primary satellite's instantaneous radial, in-track, and cross-track basis, projects secondary-minus-primary relative position into that basis, and computes rotating-frame relative velocity using the primary angular-rate correction. Orekit/Hipparchus math types stay inside `catalog.runtime.relativemotion.orekit`.
+
+`RelativeMotionRequest`
+
+Immutable request model containing primary NORAD id, secondary NORAD id, start time, stop time, propagation step, and relative frame. It rejects invalid ids, identical primary/secondary ids, invalid time spans, and non-positive step durations.
+
+`RelativeFrame`
+
+Runtime frame taxonomy for relative motion. Milestone 11 supports `LVLH_RTN`, where x is radial, y is in-track, and z is cross-track. Future frame conventions can be added when a real analysis workflow requires them.
+
+`RelativeState`
+
+Immutable state sample containing timestamp, frame, relative position, and relative velocity. It exposes no Orekit spacecraft-state, frame, or transform objects.
+
+`RelativeMotionResult`
+
+Immutable result containing the source request and defensively copied relative states. Later conjunction, formation-flying, rendezvous, and proximity modules can consume these states without querying catalog tables or calling Orekit directly.
+
+## Relative Motion Rules
+
+Relative motion is layered above runtime propagation. The service intentionally propagates both satellites through `PropagationService` so future propagator families, ephemeris products, or numerical engines can feed the same relative-motion contract.
+
+Milestone 11 computes relative motion only. Distance thresholds, encounter detection, covariance, probability of collision, maneuver planning, docking, and formation control belong to later focused modules.
+
+No Orekit classes escape the relative-motion package. Public callers receive only immutable runtime relative-motion models.
