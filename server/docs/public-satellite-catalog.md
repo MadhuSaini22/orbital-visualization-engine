@@ -447,3 +447,75 @@ Immutable attribute container for source-neutral station configuration metadata.
 The runtime model intentionally contains no Orekit objects. Future Earth-model adapters, such as conversion to Orekit `TopocentricFrame`, must live under `catalog.runtime.groundstation.orekit` so visibility and tracking physics stay isolated from source loading and service lookup.
 
 Ground station access is provider-neutral and satellite-catalog-neutral. It does not know whether stations came from application configuration, a future database table, a user workspace, or an external operational source.
+
+## Milestone 9: Ground Station Visibility Analysis
+
+Milestone 9 adds the first complete mission-analysis feature: visibility windows between one runtime satellite and one runtime ground station. It does not implement antenna models, communication link budgets, weather, atmospheric refraction, terrain masking, Doppler, REST endpoints, scheduler workflows, caching, database schema, or provider integration.
+
+The visibility layer is provider-neutral. It consumes runtime satellites, propagation results, and runtime ground stations; it never talks to catalog providers, ingestion services, repositories, controllers, or schedulers.
+
+## Visibility Sequence
+
+```mermaid
+sequenceDiagram
+  participant Caller as Future Pass or Access Service
+  participant Service as VisibilityService
+  participant Runtime as RuntimeSatelliteService
+  participant Ground as GroundStationService
+  participant Propagation as PropagationService
+  participant Engine as VisibilityEngine
+  participant OrekitEngine as OrekitVisibilityEngine
+  participant Orekit as Orekit
+
+  Caller->>Service: computeVisibility(VisibilityRequest)
+  Service->>Runtime: findByNoradId(noradCatalogId)
+  Runtime-->>Service: RuntimeSatellite
+  Service->>Ground: findById(groundStationId)
+  Ground-->>Service: GroundStation
+  Service->>Propagation: propagate(satellite, start, stop, step)
+  Propagation-->>Service: PropagationResult
+  Service->>Engine: computeVisibility(request, satellite, station, propagationResult)
+  Engine->>OrekitEngine: Orekit implementation
+  OrekitEngine->>OrekitEngine: convert GroundStation to TopocentricFrame
+  OrekitEngine->>Orekit: attach elevation detector with minimum mask
+  OrekitEngine->>Orekit: propagate start to stop for AOS/LOS
+  Orekit-->>OrekitEngine: elevation crossing callbacks
+  OrekitEngine->>OrekitEngine: compute maximum elevation per window
+  OrekitEngine-->>Engine: VisibilityResult
+  Engine-->>Service: VisibilityResult
+  Service-->>Caller: immutable visibility windows
+```
+
+## Visibility Responsibilities
+
+`VisibilityService`
+
+Public runtime entry point for ground-station visibility. It validates the request boundary, loads the `RuntimeSatellite` and `GroundStation` through their runtime services, invokes `PropagationService` for the normal state history, and delegates window computation to `VisibilityEngine`. It does not know Orekit and does not access providers, repositories, or database state.
+
+`VisibilityEngine`
+
+Internal boundary between visibility orchestration and the concrete physics implementation. This keeps the public service independent from Orekit classes and leaves room for later engines if numerical, ephemeris-backed, or custom propagation products require different visibility execution.
+
+`OrekitVisibilityEngine`
+
+Orekit-specific visibility implementation. It converts `GroundStation` to an Orekit `TopocentricFrame`, installs an elevation detector using the configured minimum elevation mask, detects acquisition of signal and loss of signal crossings, and computes maximum elevation for each returned window. Orekit objects stay inside `catalog.runtime.visibility.orekit`.
+
+`VisibilityRequest`
+
+Immutable request model containing the NORAD catalog id, ground station id, start time, stop time, propagation step, and minimum elevation mask. It validates finite elevation masks, positive step duration, and a valid time interval before analysis starts.
+
+`VisibilityWindow`
+
+Immutable access-window model containing acquisition of signal, loss of signal, maximum-elevation timestamp, maximum elevation in degrees, and duration. It exposes mission-analysis results without exposing Orekit detector or spacecraft-state objects.
+
+`VisibilityResult`
+
+Immutable visibility product containing the source request and defensively copied visibility windows. The window list may be empty when the satellite never rises above the configured elevation mask during the requested interval.
+
+## Visibility Rules
+
+Visibility analysis is layered above the runtime catalog, ground station, and propagation services. Future pass prediction, access planning, antenna, communication, and tracking modules should consume `VisibilityService` rather than reimplementing station lookup or elevation crossing logic.
+
+The current maximum-elevation value is computed from the generated propagation sample history plus the AOS and LOS endpoints. This keeps Milestone 9 aligned with the existing propagation product while leaving continuous extrema refinement to a later detector-focused milestone.
+
+No Orekit classes escape the visibility package. Public callers receive only immutable runtime visibility models.
