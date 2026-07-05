@@ -381,3 +381,69 @@ Event collection is separate from propagation result generation. `PropagationSer
 The current implementation permits a future single-pass propagation model. `EventDetectionService` depends on the abstract `EventDetectionEngine`, not directly on `OrekitEventDetectionEngine`, and callers receive only `EventDetectionResult`. A later milestone can replace the internal engine with one that installs detectors during the same propagation pass that samples states, while preserving the public event-detection contract and leaving detector definitions unchanged.
 
 Milestone 7 deliberately includes no concrete detectors. Future detector milestones should add focused detector definition records and matching Orekit detector builders under `catalog.runtime.propagation.orekit.events`, without changing the public propagation service or provider/catalog layers.
+
+## Milestone 8: Ground Station Runtime Model
+
+Milestone 8 adds a provider-neutral runtime ground station layer. It gives future visibility, access-window, pass-prediction, tracking, antenna, and communication modules a stable read-only API for ground stations. It does not compute visibility, elevation, line of sight, event detectors, communication links, antenna behavior, weather, atmospheric refraction, REST endpoints, scheduler workflows, caching, database schema, or provider integration.
+
+The ground station runtime layer is independent from the satellite catalog ingestion pipeline. It may be backed by configuration today and by database or user-defined repositories later without changing callers.
+
+## Ground Station Access Pattern
+
+```mermaid
+sequenceDiagram
+  participant Caller as Future Visibility or Tracking Service
+  participant Service as GroundStationService
+  participant Repository as GroundStationRepository
+  participant Mapper as GroundStationMapper
+  participant Source as Configuration, Database, or User Source
+
+  Caller->>Service: findById / findAll / exists / stream
+  Service->>Repository: read runtime ground stations
+  Repository->>Source: load source-specific station records
+  Source-->>Repository: source records
+  Repository->>Mapper: map source record
+  Mapper-->>Repository: GroundStation
+  Repository-->>Service: GroundStation runtime model
+  Service-->>Caller: immutable ground station data
+```
+
+## Ground Station Responsibilities
+
+`GroundStationService`
+
+Public read-only runtime entry point. It validates station ids, throws a domain exception for missing stations, and exposes `findById`, `findAll`, `exists`, and `stream`. Future analysis modules should depend on this service rather than reading station sources directly.
+
+`GroundStationRepository`
+
+Source abstraction for runtime station data. The first implementation is configuration-backed, but the interface is deliberately source-neutral so future database, project-scoped, or user-defined repositories can replace it without changing visibility or tracking callers.
+
+`ConfiguredGroundStationRepository`
+
+Configuration-backed repository for the current milestone. It maps configured station records into runtime models, rejects duplicate station ids, and stores an immutable lookup map. It is not a cache; it is the configured source implementation.
+
+`GroundStationMapper`
+
+Maps source-specific station records into runtime `GroundStation` objects. This keeps configuration binding details out of the public runtime model and leaves room for future database/user-source mappers.
+
+`GroundStation`
+
+Immutable runtime ground station model containing `GroundStationId`, display name, geodetic position, and configuration attributes. It performs no visibility, Earth-frame, or atmospheric calculations.
+
+`GroundStationId`
+
+Immutable station identifier value object. It trims and validates source ids before lookup.
+
+`GroundStationPosition`
+
+Immutable geodetic position in latitude degrees, longitude degrees, and altitude meters. It validates finite coordinate values and legal latitude/longitude ranges, but does not convert to Orekit frames.
+
+`GroundStationConfiguration`
+
+Immutable attribute container for source-neutral station configuration metadata. Future modules can define richer typed configuration when a real behavior requires it.
+
+## Ground Station Rules
+
+The runtime model intentionally contains no Orekit objects. Future Earth-model adapters, such as conversion to Orekit `TopocentricFrame`, must live under `catalog.runtime.groundstation.orekit` so visibility and tracking physics stay isolated from source loading and service lookup.
+
+Ground station access is provider-neutral and satellite-catalog-neutral. It does not know whether stations came from application configuration, a future database table, a user workspace, or an external operational source.
