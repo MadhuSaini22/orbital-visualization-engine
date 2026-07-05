@@ -519,3 +519,75 @@ Visibility analysis is layered above the runtime catalog, ground station, and pr
 The current maximum-elevation value is computed from the generated propagation sample history plus the AOS and LOS endpoints. This keeps Milestone 9 aligned with the existing propagation product while leaving continuous extrema refinement to a later detector-focused milestone.
 
 No Orekit classes escape the visibility package. Public callers receive only immutable runtime visibility models.
+
+## Milestone 10: Eclipse Analysis
+
+Milestone 10 adds provider-neutral eclipse analysis for runtime catalog satellites. It detects sunlight, penumbra, and umbra intervals over a requested propagation span. It does not implement power generation, battery simulation, thermal modeling, payload scheduling, mission planning, REST endpoints, scheduler workflows, caching, database schema, or provider integration.
+
+The eclipse layer consumes the runtime satellite and propagation services. It never talks to catalog providers, ingestion services, repositories, controllers, or schedulers.
+
+## Eclipse Sequence
+
+```mermaid
+sequenceDiagram
+  participant Caller as Future Power or Thermal Service
+  participant Service as EclipseService
+  participant Runtime as RuntimeSatelliteService
+  participant Propagation as PropagationService
+  participant Engine as EclipseEngine
+  participant OrekitEngine as OrekitEclipseEngine
+  participant Orekit as Orekit
+
+  Caller->>Service: computeEclipses(EclipseRequest)
+  Service->>Runtime: findByNoradId(noradCatalogId)
+  Runtime-->>Service: RuntimeSatellite
+  Service->>Propagation: propagate(satellite, start, stop, step)
+  Propagation-->>Service: PropagationResult
+  Service->>Engine: computeEclipses(request, propagationResult)
+  Engine->>OrekitEngine: Orekit implementation
+  OrekitEngine->>OrekitEngine: build Sun/Earth eclipse detectors
+  OrekitEngine->>Orekit: propagate with penumbra and umbra detectors
+  Orekit-->>OrekitEngine: eclipse boundary callbacks
+  OrekitEngine->>OrekitEngine: classify intervals as sunlight, penumbra, or umbra
+  OrekitEngine-->>Engine: EclipseResult
+  Engine-->>Service: EclipseResult
+  Service-->>Caller: immutable eclipse intervals
+```
+
+## Eclipse Responsibilities
+
+`EclipseService`
+
+Public runtime entry point for eclipse analysis. It validates the request boundary, loads the `RuntimeSatellite` through `RuntimeSatelliteService`, invokes `PropagationService` for the requested time span, and delegates interval classification to `EclipseEngine`. It does not know Orekit and does not access providers, repositories, or database state.
+
+`EclipseEngine`
+
+Internal boundary between eclipse orchestration and the concrete eclipse implementation. This keeps the public service independent from Orekit classes and leaves room for future engines if numerical, ephemeris-backed, or custom propagation products require different eclipse execution.
+
+`OrekitEclipseEngine`
+
+Orekit-specific eclipse implementation. It builds Earth occultation geometry using WGS84 Earth and Orekit solar ephemerides, attaches penumbra and umbra `EclipseDetector` instances to a fresh propagator, collects boundary times, and classifies each interval as `SUNLIGHT`, `PENUMBRA`, or `UMBRA`. Orekit objects stay inside `catalog.runtime.eclipse.orekit`.
+
+`EclipseRequest`
+
+Immutable request model containing the NORAD catalog id, start time, stop time, and propagation step. It validates positive NORAD id, non-null times, a valid time interval, and positive step duration before analysis starts.
+
+`EclipseInterval`
+
+Immutable eclipse interval containing type, start time, stop time, and duration. It validates that duration matches the interval span.
+
+`EclipseType`
+
+Runtime eclipse taxonomy with `SUNLIGHT`, `PENUMBRA`, and `UMBRA`. Future power, thermal, payload, and mission-planning modules can consume these values without depending on Orekit detector classes.
+
+`EclipseResult`
+
+Immutable eclipse product containing the source request and defensively copied intervals. Intervals cover the requested span and may contain only sunlight when no eclipse occurs.
+
+## Eclipse Rules
+
+Eclipse analysis is layered above runtime catalog and propagation services. Future power generation, thermal, payload scheduling, and mission-planning modules should consume `EclipseService` instead of reimplementing Sun/Earth occultation logic.
+
+Eclipse analysis requires solar ephemerides in the Orekit data configuration. The runtime fails clearly when required Orekit data is unavailable rather than silently degrading to an approximate or non-physical model.
+
+No Orekit classes escape the eclipse package. Public callers receive only immutable runtime eclipse models.
