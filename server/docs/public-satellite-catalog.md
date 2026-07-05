@@ -742,3 +742,83 @@ Pairwise conjunction analysis is layered above runtime propagation and relative 
 Milestone 12 uses sampled relative-motion history. Continuous TCA refinement, covariance, probability of collision, maneuver planning, large-scale screening, and spatial indexing belong to later focused modules.
 
 No Orekit classes escape the conjunction package. Public callers receive only immutable runtime conjunction models.
+
+## Milestone 13: Catalog-Wide Conjunction Screening
+
+Milestone 13 adds provider-neutral catalog screening between one primary runtime satellite and the current runtime catalog. It streams catalog satellites, skips the primary object, delegates each pairwise analysis to `ConjunctionService`, keeps only `CONJUNCTION` results, and sorts candidates by increasing miss distance. It does not implement KD-trees, R-trees, spatial indexing, parallel execution, covariance, collision probability, maneuver planning, schedulers, REST endpoints, caching, database schema, or provider integration.
+
+The screening layer is intentionally simple. It exists to provide a stable public API and a replaceable algorithm boundary before later large-scale screening optimizations are introduced.
+
+## Catalog Screening Sequence
+
+```mermaid
+sequenceDiagram
+  participant Caller as Future Catalog Screening Job
+  participant Service as CatalogConjunctionService
+  participant Runtime as RuntimeSatelliteService
+  participant Engine as CatalogConjunctionEngine
+  participant Catalog as CatalogService
+  participant Pairwise as ConjunctionService
+
+  Caller->>Service: screen(CatalogConjunctionRequest)
+  Service->>Runtime: findByNoradId(primaryNoradCatalogId)
+  Runtime-->>Service: primary RuntimeSatellite
+  Service->>Catalog: findByNoradId(primaryNoradCatalogId)
+  Catalog-->>Service: primary CatalogSatellite
+  Service->>Engine: screen(request, primarySatellite)
+  Engine->>Catalog: stream()
+  loop each catalog satellite
+    alt candidate is primary
+      Engine->>Engine: skip primary
+    else candidate is non-primary
+      Engine->>Pairwise: analyze(ConjunctionRequest)
+      Pairwise-->>Engine: ConjunctionResult
+      alt status is CONJUNCTION
+        Engine->>Engine: keep candidate
+      else status is CLEAR
+        Engine->>Engine: count clear candidate
+      end
+    end
+  end
+  Engine->>Engine: sort candidates by miss distance
+  Engine-->>Service: CatalogConjunctionResult
+  Service-->>Caller: immutable screening result
+```
+
+## Catalog Screening Responsibilities
+
+`CatalogConjunctionService`
+
+Public runtime entry point for catalog-wide screening. It validates the request boundary, loads the primary runtime satellite through `RuntimeSatelliteService` so malformed/unavailable runtime TLEs fail before screening, loads the primary catalog satellite through `CatalogService`, and delegates screening to `CatalogConjunctionEngine`. It does not know Orekit, repositories, or propagation math.
+
+`CatalogConjunctionEngine`
+
+Internal boundary for catalog screening algorithms. The current implementation is linear and sequential, but future KD-tree, R-tree, coarse-filter, or batched algorithms can replace the engine without changing the public screening API.
+
+`DefaultCatalogConjunctionEngine`
+
+Current intentionally simple implementation. It streams `CatalogService`, skips the primary NORAD id, invokes `ConjunctionService` for each non-primary candidate, keeps only results whose status is `CONJUNCTION`, sorts retained candidates by increasing miss distance, and records screening statistics. It does not perform propagation math or access repositories.
+
+`CatalogConjunctionRequest`
+
+Immutable request model containing primary NORAD id, start time, stop time, propagation step, relative frame, and miss-distance threshold. A null relative frame defaults to `LVLH_RTN`.
+
+`CatalogConjunctionCandidate`
+
+Immutable retained candidate containing the candidate `CatalogSatellite` and its pairwise `ConjunctionResult`.
+
+`CatalogScreeningStatistics`
+
+Immutable screening counters for catalog satellites seen, primary objects skipped, candidates analyzed, conjunction candidates retained, and clear candidates discarded. It validates internal counter consistency.
+
+`CatalogConjunctionResult`
+
+Immutable screening result containing the source request, primary catalog satellite, sorted candidates, and screening statistics.
+
+## Catalog Screening Rules
+
+Catalog screening is an orchestration layer above pairwise conjunction analysis. Pairwise physics remains inside `ConjunctionService`, which keeps propagation, relative motion, closest approach, and threshold classification reusable by both pairwise and catalog-wide workflows.
+
+Milestone 13 uses a sequential catalog stream. Spatial indexing, parallel execution, batch propagation, covariance, probability of collision, maneuver planning, and production-scale scheduler integration belong to later focused modules.
+
+No Orekit classes escape the catalog-screening package. Public callers receive only immutable runtime screening models.
