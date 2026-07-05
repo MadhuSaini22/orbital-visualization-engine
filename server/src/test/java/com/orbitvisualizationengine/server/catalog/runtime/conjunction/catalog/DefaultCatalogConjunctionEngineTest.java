@@ -3,16 +3,17 @@ package com.orbitvisualizationengine.server.catalog.runtime.conjunction.catalog;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.orbitvisualizationengine.server.catalog.runtime.CatalogSatellite;
-import com.orbitvisualizationengine.server.catalog.runtime.CatalogService;
 import com.orbitvisualizationengine.server.catalog.runtime.conjunction.ClosestApproach;
 import com.orbitvisualizationengine.server.catalog.runtime.conjunction.ConjunctionRequest;
 import com.orbitvisualizationengine.server.catalog.runtime.conjunction.ConjunctionResult;
 import com.orbitvisualizationengine.server.catalog.runtime.conjunction.ConjunctionService;
 import com.orbitvisualizationengine.server.catalog.runtime.conjunction.ConjunctionStatus;
 import com.orbitvisualizationengine.server.catalog.runtime.conjunction.ConjunctionModelTest;
+import com.orbitvisualizationengine.server.catalog.runtime.conjunction.catalog.spatial.SpatialCandidate;
+import com.orbitvisualizationengine.server.catalog.runtime.conjunction.catalog.spatial.SpatialCandidateResult;
+import com.orbitvisualizationengine.server.catalog.runtime.conjunction.catalog.spatial.SpatialIndexEngine;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
 class DefaultCatalogConjunctionEngineTest {
@@ -24,7 +25,7 @@ class DefaultCatalogConjunctionEngineTest {
     CatalogSatellite closer = CatalogConjunctionModelTest.satellite(10003);
     RecordingConjunctionService conjunctionService = new RecordingConjunctionService();
     DefaultCatalogConjunctionEngine engine = new DefaultCatalogConjunctionEngine(
-        new FakeCatalogService(List.of(primary, clear, farther, closer)),
+        new FakeSpatialIndexEngine(primary, List.of(clear, farther, closer)),
         conjunctionService);
     CatalogConjunctionRequest request = CatalogConjunctionModelTest.request(1000.0, null);
 
@@ -81,17 +82,22 @@ class DefaultCatalogConjunctionEngineTest {
     }
   }
 
-  private static final class FakeCatalogService extends CatalogService {
-    private final List<CatalogSatellite> satellites;
+  private static final class FakeSpatialIndexEngine implements SpatialIndexEngine {
+    private final CatalogSatellite primary;
+    private final List<CatalogSatellite> candidates;
 
-    private FakeCatalogService(List<CatalogSatellite> satellites) {
-      super(null, null);
-      this.satellites = satellites;
+    private FakeSpatialIndexEngine(CatalogSatellite primary, List<CatalogSatellite> candidates) {
+      this.primary = primary;
+      this.candidates = candidates;
     }
 
     @Override
-    public Stream<CatalogSatellite> stream() {
-      return satellites.stream();
+    public SpatialCandidateResult findCandidates(CatalogSatellite primarySatellite) {
+      assertThat(primarySatellite).isEqualTo(primary);
+      return new SpatialCandidateResult(
+          candidates.stream().map(SpatialCandidate::new).toList(),
+          candidates.size() + 1L,
+          1L);
     }
   }
 }

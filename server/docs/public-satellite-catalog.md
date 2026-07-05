@@ -819,6 +819,81 @@ Immutable screening result containing the source request, primary catalog satell
 
 Catalog screening is an orchestration layer above pairwise conjunction analysis. Pairwise physics remains inside `ConjunctionService`, which keeps propagation, relative motion, closest approach, and threshold classification reusable by both pairwise and catalog-wide workflows.
 
-Milestone 13 uses a sequential catalog stream. Spatial indexing, parallel execution, batch propagation, covariance, probability of collision, maneuver planning, and production-scale scheduler integration belong to later focused modules.
+Milestone 13 originally used a sequential catalog stream. Milestone 14 introduces a replaceable spatial candidate index while preserving the same public screening API. Parallel execution, batch propagation, covariance, probability of collision, maneuver planning, and production-scale scheduler integration belong to later focused modules.
 
 No Orekit classes escape the catalog-screening package. Public callers receive only immutable runtime screening models.
+
+## Milestone 14: Spatial Candidate Indexing
+
+Milestone 14 adds a replaceable in-memory spatial-index layer in front of catalog-wide conjunction screening. The index reduces the candidate set before expensive pairwise analysis, but it does not propagate satellites, compute conjunctions, calculate collision probability, access repositories, schedule work, cache results, expose REST APIs, or modify database schema.
+
+The first implementation uses coarse bins over available catalog orbital elements: inclination, RAAN, and mean motion. This is intentionally conservative and replaceable. Rows with incomplete orbital metadata are kept in a fallback bucket and included in queries so missing metadata does not silently hide candidates.
+
+## Spatial Candidate Sequence
+
+```mermaid
+sequenceDiagram
+  participant Service as CatalogConjunctionService
+  participant Engine as CatalogConjunctionEngine
+  participant Spatial as SpatialIndexEngine
+  participant Catalog as CatalogService
+  participant Builder as SpatialIndexBuilder
+  participant Index as SpatialIndex
+  participant Pairwise as ConjunctionService
+
+  Service->>Engine: screen(request, primarySatellite)
+  Engine->>Spatial: findCandidates(primarySatellite)
+  Spatial->>Catalog: stream()
+  Catalog-->>Spatial: runtime catalog stream
+  Spatial->>Builder: build(stream)
+  Builder-->>Spatial: SpatialIndex
+  Spatial->>Index: query(primarySatellite)
+  Index-->>Spatial: SpatialCandidateResult
+  Spatial-->>Engine: candidate CatalogSatellite objects
+  loop each spatial candidate
+    Engine->>Pairwise: analyze(ConjunctionRequest)
+    Pairwise-->>Engine: ConjunctionResult
+    alt status is CONJUNCTION
+      Engine->>Engine: keep candidate
+    else status is CLEAR
+      Engine->>Engine: count clear candidate
+    end
+  end
+  Engine->>Engine: sort candidates by miss distance
+```
+
+## Spatial Index Responsibilities
+
+`SpatialIndexEngine`
+
+Public internal boundary for candidate reduction. It owns the workflow of reading the runtime catalog through `CatalogService`, building an index, and querying candidates around the primary satellite. Screening code depends on this boundary rather than scanning catalog streams directly.
+
+`DefaultSpatialIndexEngine`
+
+Current runtime implementation. It builds a fresh in-memory index from the latest catalog stream for each screening request and returns only candidate satellites plus screening counters. It does not know Orekit, propagation, conjunction math, repositories, or providers.
+
+`SpatialIndexBuilder`
+
+Factory boundary for constructing a replaceable in-memory index from streamed `CatalogSatellite` objects. The default builder uses coarse orbital-element bins and can be replaced later without changing `CatalogConjunctionService` or the public screening API.
+
+`SpatialIndex`
+
+Query interface for an in-memory candidate index. It accepts a `SpatialIndexQuery` and returns a `SpatialCandidateResult`.
+
+`SpatialIndexQuery`
+
+Immutable query model containing the primary `CatalogSatellite`. It intentionally does not include Orekit states or propagated ephemerides.
+
+`SpatialCandidate`
+
+Immutable wrapper around a candidate `CatalogSatellite`. It keeps the index result shape explicit while exposing no physics or provider objects.
+
+`SpatialCandidateResult`
+
+Immutable index result containing spatial candidates and index-level counters. The result defensively copies candidate lists and exposes convenience access to candidate satellites for screening.
+
+## Spatial Index Rules
+
+Spatial indexing is only a prefilter. Pairwise physics remains inside `ConjunctionService`, and the screening engine still invokes pairwise analysis for every returned candidate.
+
+The default index is deliberately simple. It is not a KD-tree, R-tree, octree, spatial database, cache, parallel executor, covariance engine, or collision-probability model. Future high-performance implementations can replace `SpatialIndexBuilder` or `SpatialIndexEngine` without changing public catalog-screening callers.
