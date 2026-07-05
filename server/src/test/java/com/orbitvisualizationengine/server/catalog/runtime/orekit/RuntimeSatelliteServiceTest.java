@@ -10,7 +10,6 @@ import org.junit.jupiter.api.Test;
 
 class RuntimeSatelliteServiceTest {
   private final OrekitTleFactory tleFactory = new OrekitTleFactory();
-  private final OrekitPropagatorFactory propagatorFactory = new OrekitPropagatorFactory(tleFactory);
 
   @BeforeAll
   static void initOrekit() {
@@ -21,26 +20,24 @@ class RuntimeSatelliteServiceTest {
   void createsRuntimeSatelliteFromCatalogSatellite() {
     RuntimeSatelliteService service = new RuntimeSatelliteService(
         new FakeCatalogService(RuntimeOrekitTestFixtures.catalogSatellite()),
-        tleFactory,
-        propagatorFactory);
+        tleFactory);
 
     RuntimeSatellite runtimeSatellite = service.createRuntimeSatellite(RuntimeOrekitTestFixtures.catalogSatellite());
 
     assertThat(runtimeSatellite.catalogSatellite().noradCatalogId()).isEqualTo(25544);
     assertThat(runtimeSatellite.tle().getSatelliteNumber()).isEqualTo(25544);
-    assertThat(runtimeSatellite.propagator()).isNotNull();
   }
 
   @Test
   void loadsCatalogSatelliteByNoradIdThroughCatalogServiceOnly() {
     FakeCatalogService catalogService = new FakeCatalogService(RuntimeOrekitTestFixtures.catalogSatellite());
-    RuntimeSatelliteService service = new RuntimeSatelliteService(catalogService, tleFactory, propagatorFactory);
+    RuntimeSatelliteService service = new RuntimeSatelliteService(catalogService, tleFactory);
 
     RuntimeSatellite runtimeSatellite = service.findByNoradId(25544);
 
     assertThat(catalogService.lastNoradCatalogId).isEqualTo(25544);
     assertThat(runtimeSatellite.catalogSatellite().objectName()).isEqualTo("ISS");
-    assertThat(runtimeSatellite.propagator()).isNotNull();
+    assertThat(runtimeSatellite.tle().getSatelliteNumber()).isEqualTo(25544);
   }
 
   private static final class FakeCatalogService extends CatalogService {

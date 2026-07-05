@@ -198,7 +198,6 @@ sequenceDiagram
   participant Runtime as RuntimeSatelliteService
   participant Catalog as CatalogService
   participant TleFactory as OrekitTleFactory
-  participant PropFactory as OrekitPropagatorFactory
   participant Orekit as Orekit
 
   Caller->>Runtime: findByNoradId(noradCatalogId)
@@ -207,9 +206,6 @@ sequenceDiagram
   Runtime->>TleFactory: createTle(CatalogSatellite)
   TleFactory->>Orekit: new TLE(line1, line2)
   Orekit-->>TleFactory: TLE
-  Runtime->>PropFactory: createPropagator(TLE)
-  PropFactory->>Orekit: TLEPropagator.selectExtrapolator(TLE)
-  Orekit-->>PropFactory: TLEPropagator
   Runtime-->>Caller: RuntimeSatellite
 ```
 
@@ -221,15 +217,15 @@ Validates the runtime catalog TLE fields and constructs an Orekit `TLE`. It chec
 
 `OrekitPropagatorFactory`
 
-Constructs Orekit `TLEPropagator` instances from a validated `TLE`. It owns propagator construction only and does not run propagation.
+Constructs Orekit `TLEPropagator` instances from a validated `TLE` or `CatalogSatellite` on demand. It owns propagator construction only and does not run propagation. Propagators are deliberately not stored inside `RuntimeSatellite`, keeping the runtime model independent from a specific propagation algorithm lifecycle.
 
 `RuntimeSatellite`
 
-Immutable wrapper containing the source `CatalogSatellite`, the Orekit `TLE`, and the `TLEPropagator`. It is the handoff object future analysis services can consume.
+Immutable wrapper containing the source `CatalogSatellite` and validated Orekit `TLE`. It is the handoff object future analysis services can consume before choosing an SGP4, numerical, DSST, ephemeris, or custom propagation strategy.
 
 `RuntimeSatelliteService`
 
-Coordinates the bridge from catalog lookup to runtime satellite construction. It depends on `CatalogService`, `OrekitTleFactory`, and `OrekitPropagatorFactory`; it never talks to repositories or providers.
+Coordinates the bridge from catalog lookup to runtime satellite construction. It depends on `CatalogService` and `OrekitTleFactory`; it never talks to repositories or providers.
 
 `InvalidCatalogTleException`
 
@@ -239,4 +235,4 @@ Runtime-specific exception for malformed catalog TLEs. It keeps Orekit parsing f
 
 The Orekit runtime bridge is provider-neutral. It does not know whether a satellite came from CelesTrak, Space-Track, a user import, or a commercial catalog. Its only input is the published `CatalogSatellite` model.
 
-The bridge creates propagator objects but performs no propagation loops. Time-stepping, event detection, proximity analysis, visibility, and relative-motion workflows belong to later modules.
+The bridge validates TLEs and can create propagator objects on demand through `OrekitPropagatorFactory`, but performs no propagation loops. Time-stepping, event detection, proximity analysis, visibility, and relative-motion workflows belong to later modules.
