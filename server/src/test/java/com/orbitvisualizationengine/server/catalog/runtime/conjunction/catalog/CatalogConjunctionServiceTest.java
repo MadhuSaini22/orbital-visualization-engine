@@ -73,7 +73,8 @@ class CatalogConjunctionServiceTest {
           request,
           primarySatellite,
           List.of(),
-          new CatalogScreeningStatistics(1, 1, 0, 0, 0));
+          new CatalogScreeningStatistics(1, 1, 0, 0, 0),
+          new ScreeningExecutionStatistics(0, 0, 0));
     }
   }
 

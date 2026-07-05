@@ -897,3 +897,58 @@ Immutable index result containing spatial candidates and index-level counters. T
 Spatial indexing is only a prefilter. Pairwise physics remains inside `ConjunctionService`, and the screening engine still invokes pairwise analysis for every returned candidate.
 
 The default index is deliberately simple. It is not a KD-tree, R-tree, octree, spatial database, cache, parallel executor, covariance engine, or collision-probability model. Future high-performance implementations can replace `SpatialIndexBuilder` or `SpatialIndexEngine` without changing public catalog-screening callers.
+
+## Milestone 15: Parallel Catalog Screening
+
+Milestone 15 adds a replaceable execution boundary for running independent pairwise conjunction analyses concurrently. It preserves the public `CatalogConjunctionService` API and keeps the screening flow layered: spatial indexing reduces candidates, the executor runs independent pairwise tasks, and `ConjunctionService` remains the only owner of pairwise physics.
+
+The executor does not know Orekit, propagation math, relative-motion math, spatial indexing, repositories, schedulers, REST endpoints, cache state, covariance, collision probability, or maneuver planning.
+
+## Parallel Screening Sequence
+
+```mermaid
+sequenceDiagram
+  participant Service as CatalogConjunctionService
+  participant Engine as CatalogConjunctionEngine
+  participant Spatial as SpatialIndexEngine
+  participant Executor as ScreeningExecutor
+  participant Pairwise as ConjunctionService
+
+  Service->>Engine: screen(request, primarySatellite)
+  Engine->>Spatial: findCandidates(primarySatellite)
+  Spatial-->>Engine: SpatialCandidateResult
+  Engine->>Engine: build one pairwise task per candidate
+  Engine->>Executor: execute(tasks)
+  par independent candidate analyses
+    Executor->>Pairwise: analyze(ConjunctionRequest)
+    Pairwise-->>Executor: ConjunctionResult
+  end
+  Executor-->>Engine: ScreeningExecutionStatistics
+  Engine->>Engine: aggregate clear/conjunction screening statistics
+  Engine->>Engine: sort retained candidates by miss distance
+  Engine-->>Service: CatalogConjunctionResult
+```
+
+## Parallel Screening Responsibilities
+
+`ScreeningExecutor`
+
+Concurrency boundary for catalog screening. It accepts independent tasks, executes them, returns execution statistics, and surfaces failures clearly. It does not build conjunction requests, inspect satellite data, or classify results.
+
+`DefaultScreeningExecutor`
+
+Current local implementation. It uses a per-request virtual-thread executor to run candidate analyses concurrently without exposing custom thread-pool tuning APIs. If any task fails, it throws a catalog conjunction exception with the failed task count and suppressed causes rather than silently dropping candidates.
+
+`ScreeningExecutionStatistics`
+
+Immutable execution counters for submitted, successful, and failed tasks. These counters are separate from `CatalogScreeningStatistics`, which describes domain screening outcomes such as analyzed, clear, and conjunction candidates.
+
+`DefaultCatalogConjunctionEngine`
+
+Remains orchestration-only. It obtains candidates from `SpatialIndexEngine`, builds pairwise work items, delegates concurrency to `ScreeningExecutor`, aggregates completed pairwise results, and sorts retained conjunction candidates by increasing miss distance. It does not own thread management or pairwise physics.
+
+## Parallel Screening Rules
+
+Pairwise analyses are independent and may complete in any order. Public output remains deterministic because retained conjunction candidates are sorted by miss distance, then by NORAD id for ties.
+
+Parallel screening is local execution only. Distributed execution, scheduler integration, custom tuning APIs, caching, database changes, collision probability, covariance, and maneuver planning remain later focused modules.

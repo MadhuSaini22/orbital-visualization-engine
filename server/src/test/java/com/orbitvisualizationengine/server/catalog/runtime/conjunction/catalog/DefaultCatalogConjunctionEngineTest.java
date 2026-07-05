@@ -12,8 +12,8 @@ import com.orbitvisualizationengine.server.catalog.runtime.conjunction.Conjuncti
 import com.orbitvisualizationengine.server.catalog.runtime.conjunction.catalog.spatial.SpatialCandidate;
 import com.orbitvisualizationengine.server.catalog.runtime.conjunction.catalog.spatial.SpatialCandidateResult;
 import com.orbitvisualizationengine.server.catalog.runtime.conjunction.catalog.spatial.SpatialIndexEngine;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import org.junit.jupiter.api.Test;
 
 class DefaultCatalogConjunctionEngineTest {
@@ -26,14 +26,15 @@ class DefaultCatalogConjunctionEngineTest {
     RecordingConjunctionService conjunctionService = new RecordingConjunctionService();
     DefaultCatalogConjunctionEngine engine = new DefaultCatalogConjunctionEngine(
         new FakeSpatialIndexEngine(primary, List.of(clear, farther, closer)),
-        conjunctionService);
+        conjunctionService,
+        new DefaultScreeningExecutor());
     CatalogConjunctionRequest request = CatalogConjunctionModelTest.request(1000.0, null);
 
     CatalogConjunctionResult result = engine.screen(request, primary);
 
     assertThat(conjunctionService.requests)
         .extracting(ConjunctionRequest::secondaryNoradCatalogId)
-        .containsExactly(10001, 10002, 10003);
+        .containsExactlyInAnyOrder(10001, 10002, 10003);
     assertThat(result.candidates())
         .extracting(candidate -> candidate.satellite().noradCatalogId())
         .containsExactly(10003, 10002);
@@ -41,10 +42,11 @@ class DefaultCatalogConjunctionEngineTest {
         .extracting(candidate -> candidate.conjunctionResult().closestApproach().missDistanceMeters())
         .containsExactly(25.0, 250.0);
     assertThat(result.statistics()).isEqualTo(new CatalogScreeningStatistics(4, 1, 3, 2, 1));
+    assertThat(result.executionStatistics()).isEqualTo(new ScreeningExecutionStatistics(3, 3, 0));
   }
 
   private static final class RecordingConjunctionService extends ConjunctionService {
-    private final List<ConjunctionRequest> requests = new ArrayList<>();
+    private final List<ConjunctionRequest> requests = new CopyOnWriteArrayList<>();
 
     private RecordingConjunctionService() {
       super(null, null, null, null);

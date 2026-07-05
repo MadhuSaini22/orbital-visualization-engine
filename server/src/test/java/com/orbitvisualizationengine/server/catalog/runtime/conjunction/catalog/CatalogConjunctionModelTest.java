@@ -55,6 +55,16 @@ class CatalogConjunctionModelTest {
   }
 
   @Test
+  void executionStatisticsValidateInternalConsistency() {
+    ScreeningExecutionStatistics statistics = new ScreeningExecutionStatistics(3, 2, 1);
+
+    assertThat(statistics.failedTasks()).isEqualTo(1);
+    assertThatThrownBy(() -> new ScreeningExecutionStatistics(3, 3, 1))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Submitted tasks must equal successful plus failed tasks");
+  }
+
+  @Test
   void resultDefensivelyCopiesCandidates() {
     CatalogConjunctionRequest request = request(1000.0, RelativeFrame.LVLH_RTN);
     List<CatalogConjunctionCandidate> candidates = new ArrayList<>();
@@ -64,7 +74,8 @@ class CatalogConjunctionModelTest {
         request,
         satellite(25544),
         candidates,
-        new CatalogScreeningStatistics(2, 1, 1, 1, 0));
+        new CatalogScreeningStatistics(2, 1, 1, 1, 0),
+        new ScreeningExecutionStatistics(1, 1, 0));
     candidates.clear();
 
     assertThat(result.candidates()).hasSize(1);

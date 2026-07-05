@@ -8,20 +8,26 @@ import com.orbitvisualizationengine.server.catalog.runtime.conjunction.Conjuncti
 import com.orbitvisualizationengine.server.catalog.runtime.conjunction.catalog.spatial.SpatialCandidateResult;
 import com.orbitvisualizationengine.server.catalog.runtime.conjunction.catalog.spatial.SpatialIndexEngine;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import org.springframework.stereotype.Component;
 
 @Component
 public class DefaultCatalogConjunctionEngine implements CatalogConjunctionEngine {
   private final SpatialIndexEngine spatialIndexEngine;
   private final ConjunctionService conjunctionService;
+  private final ScreeningExecutor screeningExecutor;
 
   public DefaultCatalogConjunctionEngine(
       SpatialIndexEngine spatialIndexEngine,
-      ConjunctionService conjunctionService) {
+      ConjunctionService conjunctionService,
+      ScreeningExecutor screeningExecutor) {
     this.spatialIndexEngine = spatialIndexEngine;
     this.conjunctionService = conjunctionService;
+    this.screeningExecutor = screeningExecutor;
   }
 
   @Override
@@ -39,30 +45,32 @@ public class DefaultCatalogConjunctionEngine implements CatalogConjunctionEngine
     SpatialCandidateResult spatialCandidates = spatialIndexEngine.findCandidates(primarySatellite);
     accumulator.catalogSatellitesSeen = spatialCandidates.spatialCandidatesSeen();
     accumulator.skippedPrimarySatellites = spatialCandidates.skippedPrimarySatellites();
-    spatialCandidates.satellites()
-        .forEach(candidate -> screenCandidate(request, candidate, accumulator));
-    accumulator.candidates.sort(Comparator.comparingDouble(
-        candidate -> candidate.conjunctionResult().closestApproach().missDistanceMeters()));
+    Queue<ScreeningOutcome> outcomes = new ConcurrentLinkedQueue<>();
+    ScreeningExecutionStatistics executionStatistics = screeningExecutor.execute(
+        spatialCandidates.satellites().stream()
+            .map(candidate -> screeningTask(request, candidate, outcomes))
+            .toList());
+    accumulator.addOutcomes(outcomes);
+    accumulator.candidates.sort(Comparator
+        .comparingDouble((CatalogConjunctionCandidate candidate) ->
+            candidate.conjunctionResult().closestApproach().missDistanceMeters())
+        .thenComparingInt(candidate -> candidate.satellite().noradCatalogId()));
 
     return new CatalogConjunctionResult(
         request,
         primarySatellite,
         accumulator.candidates,
-        accumulator.statistics());
+        accumulator.statistics(),
+        executionStatistics);
   }
 
-  private void screenCandidate(
+  private Runnable screeningTask(
       CatalogConjunctionRequest request,
       CatalogSatellite candidate,
-      ScreeningAccumulator accumulator) {
-    accumulator.analyzedCandidates++;
-    ConjunctionResult conjunctionResult = conjunctionService.analyze(conjunctionRequest(request, candidate));
-    if (conjunctionResult.status() == ConjunctionStatus.CONJUNCTION) {
-      accumulator.conjunctionCandidates++;
-      accumulator.candidates.add(new CatalogConjunctionCandidate(candidate, conjunctionResult));
-    } else {
-      accumulator.clearCandidates++;
-    }
+      Queue<ScreeningOutcome> outcomes) {
+    return () -> outcomes.add(new ScreeningOutcome(
+        candidate,
+        conjunctionService.analyze(conjunctionRequest(request, candidate))));
   }
 
   private static ConjunctionRequest conjunctionRequest(
@@ -78,6 +86,11 @@ public class DefaultCatalogConjunctionEngine implements CatalogConjunctionEngine
         request.missDistanceThresholdMeters());
   }
 
+  private record ScreeningOutcome(
+      CatalogSatellite candidate,
+      ConjunctionResult conjunctionResult) {
+  }
+
   private static final class ScreeningAccumulator {
     private final List<CatalogConjunctionCandidate> candidates = new ArrayList<>();
     private long catalogSatellitesSeen;
@@ -85,6 +98,18 @@ public class DefaultCatalogConjunctionEngine implements CatalogConjunctionEngine
     private long analyzedCandidates;
     private long conjunctionCandidates;
     private long clearCandidates;
+
+    private void addOutcomes(Collection<ScreeningOutcome> outcomes) {
+      for (ScreeningOutcome outcome : outcomes) {
+        analyzedCandidates++;
+        if (outcome.conjunctionResult().status() == ConjunctionStatus.CONJUNCTION) {
+          conjunctionCandidates++;
+          candidates.add(new CatalogConjunctionCandidate(outcome.candidate(), outcome.conjunctionResult()));
+        } else {
+          clearCandidates++;
+        }
+      }
+    }
 
     private CatalogScreeningStatistics statistics() {
       return new CatalogScreeningStatistics(
