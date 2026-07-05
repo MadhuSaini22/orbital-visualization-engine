@@ -665,3 +665,80 @@ Relative motion is layered above runtime propagation. The service intentionally 
 Milestone 11 computes relative motion only. Distance thresholds, encounter detection, covariance, probability of collision, maneuver planning, docking, and formation control belong to later focused modules.
 
 No Orekit classes escape the relative-motion package. Public callers receive only immutable runtime relative-motion models.
+
+## Milestone 12: Pairwise Conjunction Analysis
+
+Milestone 12 adds provider-neutral pairwise conjunction analysis between two runtime catalog satellites. It propagates both satellites, computes their relative-motion history, and reduces that history to the closest approach over the requested interval. It does not implement whole-catalog search, spatial indexing, covariance, collision probability, maneuver planning, screening thousands of satellites, REST endpoints, scheduler workflows, caching, database schema, or provider integration.
+
+The conjunction layer consumes runtime satellite, propagation, and relative-motion services. It never talks to catalog providers, ingestion services, repositories, controllers, or schedulers.
+
+## Conjunction Sequence
+
+```mermaid
+sequenceDiagram
+  participant Caller as Future Collision-Risk Service
+  participant Service as ConjunctionService
+  participant Runtime as RuntimeSatelliteService
+  participant Propagation as PropagationService
+  participant Relative as RelativeMotionService
+  participant Engine as ConjunctionEngine
+  participant OrekitEngine as OrekitConjunctionEngine
+
+  Caller->>Service: analyze(ConjunctionRequest)
+  Service->>Runtime: findByNoradId(primaryNoradCatalogId)
+  Runtime-->>Service: primary RuntimeSatellite
+  Service->>Runtime: findByNoradId(secondaryNoradCatalogId)
+  Runtime-->>Service: secondary RuntimeSatellite
+  Service->>Propagation: propagate(primary, start, stop, step)
+  Propagation-->>Service: primary PropagationResult
+  Service->>Propagation: propagate(secondary, start, stop, step)
+  Propagation-->>Service: secondary PropagationResult
+  Service->>Relative: computeRelativeMotion(relativeRequest, primaryResult, secondaryResult)
+  Relative-->>Service: RelativeMotionResult
+  Service->>Engine: analyze(request, relativeMotionResult)
+  Engine->>OrekitEngine: closest-approach implementation
+  OrekitEngine->>OrekitEngine: scan relative states
+  OrekitEngine->>OrekitEngine: compute miss distance and relative speed
+  OrekitEngine->>OrekitEngine: compare against configured threshold
+  OrekitEngine-->>Engine: ConjunctionResult
+  Engine-->>Service: ConjunctionResult
+  Service-->>Caller: immutable closest-approach result
+```
+
+## Conjunction Responsibilities
+
+`ConjunctionService`
+
+Public runtime entry point for pairwise conjunction analysis. It validates the request boundary, loads both `RuntimeSatellite` objects through `RuntimeSatelliteService`, propagates both satellites with `PropagationService`, asks `RelativeMotionService` for the relative-motion history, and delegates closest-approach analysis to `ConjunctionEngine`. It does not know Orekit and does not access providers, repositories, or database state.
+
+`ConjunctionEngine`
+
+Internal boundary between service orchestration and closest-approach analysis. This keeps future catalog-wide screening and collision-risk modules dependent on stable runtime models rather than a specific propagation or relative-motion implementation.
+
+`OrekitConjunctionEngine`
+
+Current pairwise implementation. It analyzes the sampled `RelativeMotionResult`, finds the state with the minimum relative-position norm, computes time of closest approach, miss distance, relative speed, and compares the miss distance against the configured threshold. It does not compute covariance or collision probability.
+
+`ConjunctionRequest`
+
+Immutable request model containing primary NORAD id, secondary NORAD id, start time, stop time, propagation step, relative frame, and miss-distance threshold. It rejects invalid ids, identical primary/secondary ids, invalid time spans, non-positive step durations, and invalid thresholds. A null relative frame defaults to `LVLH_RTN`.
+
+`ClosestApproach`
+
+Immutable closest-approach model containing TCA, miss distance, relative speed, and the closest `RelativeState`. It validates that the TCA matches the closest relative state's timestamp.
+
+`ConjunctionStatus`
+
+Runtime status taxonomy with `CLEAR` and `CONJUNCTION`. The status is based only on the configured miss-distance threshold in this milestone.
+
+`ConjunctionResult`
+
+Immutable result containing the source request, closest approach, and conjunction status. Future catalog-wide screening, collision probability, and maneuver-planning modules can consume this result without querying catalog tables or calling Orekit directly.
+
+## Conjunction Rules
+
+Pairwise conjunction analysis is layered above runtime propagation and relative motion. The service intentionally reuses `RelativeMotionService` so later improvements to propagation families or relative-frame handling flow into pairwise conjunction analysis without duplicating math.
+
+Milestone 12 uses sampled relative-motion history. Continuous TCA refinement, covariance, probability of collision, maneuver planning, large-scale screening, and spatial indexing belong to later focused modules.
+
+No Orekit classes escape the conjunction package. Public callers receive only immutable runtime conjunction models.

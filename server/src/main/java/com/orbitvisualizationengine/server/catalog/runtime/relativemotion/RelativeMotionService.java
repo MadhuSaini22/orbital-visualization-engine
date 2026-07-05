@@ -34,6 +34,22 @@ public class RelativeMotionService {
     return relativeMotionEngine.computeRelativeMotion(request, primaryPropagation, secondaryPropagation);
   }
 
+  public RelativeMotionResult computeRelativeMotion(
+      RelativeMotionRequest request,
+      PropagationResult primaryPropagation,
+      PropagationResult secondaryPropagation) {
+    if (request == null) {
+      throw new IllegalArgumentException("Relative motion request is required");
+    }
+    if (primaryPropagation == null) {
+      throw new IllegalArgumentException("Primary propagation result is required");
+    }
+    if (secondaryPropagation == null) {
+      throw new IllegalArgumentException("Secondary propagation result is required");
+    }
+    return relativeMotionEngine.computeRelativeMotion(request, primaryPropagation, secondaryPropagation);
+  }
+
   private PropagationResult propagate(RuntimeSatellite satellite, RelativeMotionRequest request) {
     return propagationService.propagate(
         satellite,
