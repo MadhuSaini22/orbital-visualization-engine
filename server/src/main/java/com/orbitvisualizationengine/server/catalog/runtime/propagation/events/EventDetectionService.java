@@ -8,7 +8,7 @@ import java.time.Instant;
 import java.util.List;
 import org.springframework.stereotype.Service;
 
-@Service
+@Service("runtimeEventDetectionService")
 public class EventDetectionService {
   private final PropagationService propagationService;
   private final EventDetectionEngine eventDetectionEngine;

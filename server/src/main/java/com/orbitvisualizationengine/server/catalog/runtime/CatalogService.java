@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.stream.Stream;
 import org.springframework.stereotype.Service;
 
-@Service
+@Service("runtimeCatalogService")
 public class CatalogService {
   private final CatalogRepository repository;
   private final CatalogSatelliteMapper mapper;

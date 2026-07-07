@@ -388,11 +388,11 @@ create table if not exists catalog_versions (
 create or replace function prevent_catalog_reference_delete()
 returns trigger
 language plpgsql
-as $$
+as '
 begin
-  raise exception '% rows are historical catalog references and cannot be deleted', tg_table_name;
+  raise exception ''% rows are historical catalog references and cannot be deleted'', tg_table_name;
 end;
-$$;
+';
 
 drop trigger if exists catalog_sources_no_delete on catalog_sources;
 drop trigger if exists catalog_versions_no_delete on catalog_versions;
@@ -462,7 +462,7 @@ create trigger catalog_sync_runs_no_delete
 create or replace function validate_catalog_sync_run_source()
 returns trigger
 language plpgsql
-as $$
+as '
 declare
   version_source_id bigint;
 begin
@@ -472,16 +472,16 @@ begin
   where id = new.catalog_version_id;
 
   if version_source_id is null then
-    raise exception 'catalog_sync_runs catalog_version_id % does not exist', new.catalog_version_id;
+    raise exception ''catalog_sync_runs catalog_version_id % does not exist'', new.catalog_version_id;
   end if;
 
   if version_source_id <> new.source_id then
-    raise exception 'catalog_sync_runs source_id % must match catalog_versions source_id %', new.source_id, version_source_id;
+    raise exception ''catalog_sync_runs source_id % must match catalog_versions source_id %'', new.source_id, version_source_id;
   end if;
 
   return new;
 end;
-$$;
+';
 
 drop trigger if exists catalog_sync_runs_source_valid on catalog_sync_runs;
 
@@ -599,15 +599,15 @@ create index if not exists satellite_catalog_history_ingested_brin_idx
 create or replace function prevent_satellite_catalog_history_mutation()
 returns trigger
 language plpgsql
-as $$
+as '
 begin
-  if tg_op = 'TRUNCATE' then
-    raise exception 'satellite_catalog_history is append-only; attempted TRUNCATE';
+  if tg_op = ''TRUNCATE'' then
+    raise exception ''satellite_catalog_history is append-only; attempted TRUNCATE'';
   end if;
 
-  raise exception 'satellite_catalog_history is append-only; attempted % on history id %', tg_op, old.id;
+  raise exception ''satellite_catalog_history is append-only; attempted % on history id %'', tg_op, old.id;
 end;
-$$;
+';
 
 drop trigger if exists satellite_catalog_history_append_only on satellite_catalog_history;
 drop trigger if exists satellite_catalog_history_no_truncate on satellite_catalog_history;
@@ -646,7 +646,7 @@ create index if not exists satellite_catalog_last_seen_version_idx
 create or replace function validate_satellite_catalog_projection()
 returns trigger
 language plpgsql
-as $$
+as '
 declare
   history_row satellite_catalog_history%rowtype;
 begin
@@ -656,24 +656,24 @@ begin
   where id = new.current_history_id;
 
   if history_row.id is null then
-    raise exception 'satellite_catalog current_history_id % does not exist', new.current_history_id;
+    raise exception ''satellite_catalog current_history_id % does not exist'', new.current_history_id;
   end if;
 
-  if history_row.record_type <> 'TLE' then
-    raise exception 'satellite_catalog current_history_id % must reference a TLE history row', new.current_history_id;
+  if history_row.record_type <> ''TLE'' then
+    raise exception ''satellite_catalog current_history_id % must reference a TLE history row'', new.current_history_id;
   end if;
 
   if history_row.norad_cat_id <> new.norad_cat_id then
-    raise exception 'satellite_catalog NORAD % cannot reference history NORAD %', new.norad_cat_id, history_row.norad_cat_id;
+    raise exception ''satellite_catalog NORAD % cannot reference history NORAD %'', new.norad_cat_id, history_row.norad_cat_id;
   end if;
 
   if history_row.catalog_version_id <> new.current_version_id then
-    raise exception 'satellite_catalog current_version_id % must match history version %', new.current_version_id, history_row.catalog_version_id;
+    raise exception ''satellite_catalog current_version_id % must match history version %'', new.current_version_id, history_row.catalog_version_id;
   end if;
 
   return new;
 end;
-$$;
+';
 
 drop trigger if exists satellite_catalog_projection_valid on satellite_catalog;
 

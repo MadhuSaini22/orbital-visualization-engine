@@ -9,7 +9,7 @@ import com.orbitvisualizationengine.server.catalog.runtime.relativemotion.Relati
 import com.orbitvisualizationengine.server.catalog.runtime.relativemotion.RelativeMotionService;
 import org.springframework.stereotype.Service;
 
-@Service
+@Service("runtimeConjunctionService")
 public class ConjunctionService {
   private final RuntimeSatelliteService runtimeSatelliteService;
   private final PropagationService propagationService;
