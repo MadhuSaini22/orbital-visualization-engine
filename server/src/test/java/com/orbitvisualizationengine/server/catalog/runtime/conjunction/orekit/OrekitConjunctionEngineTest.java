@@ -9,12 +9,13 @@ import com.orbitvisualizationengine.server.catalog.runtime.conjunction.Conjuncti
 import com.orbitvisualizationengine.server.catalog.runtime.conjunction.ConjunctionRequest;
 import com.orbitvisualizationengine.server.catalog.runtime.conjunction.ConjunctionResult;
 import com.orbitvisualizationengine.server.catalog.runtime.conjunction.ConjunctionStatus;
+import com.orbitvisualizationengine.server.catalog.runtime.conjunction.refinement.DefaultClosestApproachRefiner;
 import com.orbitvisualizationengine.server.catalog.runtime.relativemotion.RelativeMotionResult;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class OrekitConjunctionEngineTest {
-  private final OrekitConjunctionEngine engine = new OrekitConjunctionEngine();
+  private final OrekitConjunctionEngine engine = new OrekitConjunctionEngine(new DefaultClosestApproachRefiner());
 
   @Test
   void computesClosestApproachAndConjunctionStatus() {
@@ -51,10 +52,12 @@ class OrekitConjunctionEngineTest {
 
     assertThat(result.status()).isEqualTo(ConjunctionStatus.CONJUNCTION);
     assertThat(result.closestApproach().timeOfClosestApproach())
-        .isEqualTo(request.startTime().plusSeconds(60));
-    assertThat(result.closestApproach().missDistanceMeters()).isCloseTo(5.0, within(1.0e-12));
+        .isAfter(request.startTime().plusSeconds(59))
+        .isBefore(request.startTime().plusSeconds(60));
+    assertThat(result.closestApproach().missDistanceMeters()).isLessThan(5.0);
     assertThat(result.closestApproach().relativeSpeedMetersPerSecond()).isCloseTo(13.0, within(1.0e-12));
-    assertThat(result.closestApproach().relativeState()).isSameAs(relativeMotionResult.states().get(1));
+    assertThat(result.refinementStatistics().refined()).isTrue();
+    assertThat(result.refinementStatistics().sampledMinimumIndex()).isEqualTo(1);
   }
 
   @Test
@@ -75,6 +78,7 @@ class OrekitConjunctionEngineTest {
 
     assertThat(result.status()).isEqualTo(ConjunctionStatus.CLEAR);
     assertThat(result.closestApproach().missDistanceMeters()).isCloseTo(5.0, within(1.0e-12));
+    assertThat(result.refinementStatistics().refined()).isFalse();
   }
 
   @Test

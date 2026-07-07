@@ -952,3 +952,54 @@ Remains orchestration-only. It obtains candidates from `SpatialIndexEngine`, bui
 Pairwise analyses are independent and may complete in any order. Public output remains deterministic because retained conjunction candidates are sorted by miss distance, then by NORAD id for ties.
 
 Parallel screening is local execution only. Distributed execution, scheduler integration, custom tuning APIs, caching, database changes, collision probability, covariance, and maneuver planning remain later focused modules.
+
+## Milestone 16: Continuous Time of Closest Approach Refinement
+
+Milestone 16 adds a replaceable closest-approach refinement layer inside pairwise conjunction analysis. The system still uses `RelativeMotionService` to generate sampled relative states, but the sampled minimum is now refined locally before `ConjunctionResult` is returned. It does not implement collision probability, covariance, maneuver planning, catalog-wide optimization, spatial-index changes, parallel-execution changes, scheduler integration, REST endpoints, or database changes.
+
+The first implementation is Orekit-free. It uses the sampled relative position and velocity at the minimum-distance sample to estimate a local continuous TCA, then clamps that estimate to a configurable refinement window around the sampled minimum. Future higher-order interpolation or numerical optimization implementations can replace this boundary without changing `ConjunctionService` or the public pairwise API.
+
+## TCA Refinement Sequence
+
+```mermaid
+sequenceDiagram
+  participant Service as ConjunctionService
+  participant Relative as RelativeMotionService
+  participant Engine as ConjunctionEngine
+  participant Refiner as ClosestApproachRefiner
+
+  Service->>Relative: computeRelativeMotion(...)
+  Relative-->>Service: sampled RelativeMotionResult
+  Service->>Engine: analyze(request, relativeMotionResult)
+  Engine->>Refiner: refine(relativeMotionResult)
+  Refiner->>Refiner: locate sampled minimum miss distance
+  Refiner->>Refiner: estimate local continuous TCA
+  Refiner->>Refiner: clamp to refinement window
+  Refiner-->>Engine: refined ClosestApproach + statistics
+  Engine->>Engine: classify against miss-distance threshold
+  Engine-->>Service: ConjunctionResult
+```
+
+## TCA Refinement Responsibilities
+
+`ClosestApproachRefiner`
+
+Replaceable boundary for improving closest approach from sampled relative-motion output. It accepts `RelativeMotionResult` and returns a refined closest approach plus refinement statistics. It does not propagate, query catalogs, screen candidates, or classify conjunction status.
+
+`DefaultClosestApproachRefiner`
+
+Current local implementation. It finds the sampled minimum, estimates continuous TCA from the sampled relative position and velocity, clamps the estimate to a configurable time window around that sample, and returns a refined `ClosestApproach`. If there is only one sample or no useful relative velocity, it returns the sampled closest approach unchanged.
+
+`ClosestApproachRefinementStatistics`
+
+Immutable refinement metadata containing the number of sampled states examined, the sampled minimum index, whether refinement occurred, and the refinement time offset from the sampled minimum. This is separate from conjunction status and catalog-screening statistics.
+
+`ConjunctionResult`
+
+Continues to expose the request, closest approach, and status. The closest approach is now refined when possible, and the result also carries refinement statistics for auditability. Existing construction remains source-compatible through a convenience constructor.
+
+## TCA Refinement Rules
+
+Refinement is a local improvement step only. Pairwise conjunction still depends on sampled relative motion from `RelativeMotionService`; refinement does not change propagation, relative-frame computation, spatial indexing, parallel screening, or catalog access.
+
+The default refiner is deliberately modest. It is not covariance analysis, collision probability, maneuver planning, global optimization, or a replacement for future high-order interpolation. It creates no Orekit objects and exposes no Orekit classes.
