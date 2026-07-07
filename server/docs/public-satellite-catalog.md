@@ -1067,3 +1067,73 @@ Immutable result containing the source request, probability of collision, and ca
 Collision probability is layered above refined pairwise conjunction. It consumes `ConjunctionResult`; it does not alter TCA refinement, relative motion, propagation, spatial indexing, parallel screening, catalog access, or provider integration.
 
 The default method is deliberately limited and replaceable. Monte Carlo simulation, covariance generation, high-fidelity Pc models, maneuver generation, avoidance planning, catalog-wide optimization, scheduler integration, REST endpoints, caching, and database persistence remain later focused modules.
+
+## Milestone 18: Covariance Propagation
+
+Milestone 18 adds a provider-neutral covariance propagation layer that can generate runtime covariance samples for later collision-probability workflows. It loads a runtime satellite, accepts an initial Cartesian covariance matrix, samples the requested time span, and returns immutable covariance states. It does not compute collision probability, generate covariance, estimate covariance from observations, run filters, perform conjunction analysis, screen catalogs, plan maneuvers, expose REST endpoints, schedule work, cache results, or modify database/provider state.
+
+The first implementation lives under `catalog.runtime.covariance.orekit`. It creates an Orekit TLE propagator for the nominal runtime satellite and samples the requested epochs. For the covariance transport itself, it applies a local Cartesian constant-velocity state-transition model to the initial 6x6 covariance. This keeps the first milestone deterministic and useful while leaving the propagation boundary replaceable for future Orekit STM, numerical, DSST, ephemeris, or estimation-driven covariance engines.
+
+## Covariance Propagation Sequence
+
+```mermaid
+sequenceDiagram
+  participant Caller as Future Collision-Risk Workflow
+  participant Service as CovariancePropagationService
+  participant Runtime as RuntimeSatelliteService
+  participant Engine as CovariancePropagationEngine
+  participant OrekitEngine as OrekitCovariancePropagationEngine
+  participant Orekit as Orekit TLEPropagator
+
+  Caller->>Service: propagate(CovariancePropagationRequest)
+  Service->>Service: validate request presence
+  Service->>Runtime: findByNoradId(noradCatalogId)
+  Runtime-->>Service: RuntimeSatellite
+  Service->>Engine: propagate(request, runtimeSatellite)
+  Engine->>OrekitEngine: current implementation
+  OrekitEngine->>Orekit: create TLE propagator
+  loop each sample epoch
+    OrekitEngine->>Orekit: propagate(epoch)
+    OrekitEngine->>OrekitEngine: transport covariance to epoch
+    OrekitEngine->>OrekitEngine: create immutable CovarianceState
+  end
+  OrekitEngine-->>Engine: CovariancePropagationResult
+  Engine-->>Service: CovariancePropagationResult
+  Service-->>Caller: immutable covariance samples
+```
+
+## Covariance Responsibilities
+
+`CovariancePropagationService`
+
+Public runtime entry point. It validates request presence, loads the `RuntimeSatellite` through `RuntimeSatelliteService`, and delegates propagation to `CovariancePropagationEngine`. It owns no Orekit calls, matrix propagation math, covariance estimation, collision probability, or catalog screening.
+
+`CovariancePropagationEngine`
+
+Replaceable boundary for covariance propagation algorithms. Future engines can use numerical state-transition matrices, DSST, ephemeris products, or estimation outputs without changing public callers.
+
+`OrekitCovariancePropagationEngine`
+
+Current Orekit-isolated implementation. It creates a TLE propagator for the nominal runtime satellite, samples each requested epoch, and propagates the supplied 6x6 Cartesian covariance with a local state-transition model. Orekit types remain inside `catalog.runtime.covariance.orekit`.
+
+`CovariancePropagationRequest`
+
+Immutable request model containing NORAD catalog id, start time, stop time, step duration, and initial 6x6 Cartesian covariance. It validates positive NORAD id, valid time bounds, positive step, and covariance dimension.
+
+`CovariancePropagationResult`
+
+Immutable result containing the source request, runtime satellite, and defensively copied covariance states.
+
+`CovarianceState`
+
+Immutable covariance sample containing timestamp and propagated covariance matrix.
+
+`CovarianceMatrix`
+
+Immutable matrix wrapper. It validates square dimensions, finite values, and defensively copies nested lists. It exposes no Hipparchus, Orekit, or mutable matrix objects.
+
+## Covariance Rules
+
+Covariance propagation is a data-product layer. It prepares covariance states that future collision-probability workflows can consume, but it does not call `CollisionProbabilityService` or alter conjunction analysis.
+
+No Orekit classes escape the covariance package. Public callers receive only immutable runtime models.
