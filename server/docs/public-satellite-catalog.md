@@ -1003,3 +1003,67 @@ Continues to expose the request, closest approach, and status. The closest appro
 Refinement is a local improvement step only. Pairwise conjunction still depends on sampled relative motion from `RelativeMotionService`; refinement does not change propagation, relative-frame computation, spatial indexing, parallel screening, or catalog access.
 
 The default refiner is deliberately modest. It is not covariance analysis, collision probability, maneuver planning, global optimization, or a replacement for future high-order interpolation. It creates no Orekit objects and exposes no Orekit classes.
+
+## Milestone 17: Collision Probability Analysis
+
+Milestone 17 adds a replaceable collision-probability layer above refined pairwise conjunction analysis. It consumes an existing `ConjunctionResult`, primary and secondary covariance matrices, and a hard-body radius, then returns a probability of collision. It does not generate covariance, propagate satellites, compute relative motion, perform catalog screening, create maneuvers, plan avoidance, expose REST endpoints, schedule work, cache results, or modify database schema.
+
+The first implementation supports one method: `ISOTROPIC_GAUSSIAN_ENCOUNTER_PLANE`. It combines the two 3x3 covariances, projects the combined covariance into the encounter plane defined by the refined closest relative state, reduces the plane covariance to an equivalent isotropic sigma, and computes Pc from the refined miss distance and hard-body radius. This is intentionally a bounded initial probability model, not a final high-fidelity collision-risk library.
+
+## Collision Probability Sequence
+
+```mermaid
+sequenceDiagram
+  participant Caller as Future Collision-Risk Workflow
+  participant Service as CollisionProbabilityService
+  participant Engine as CollisionProbabilityEngine
+  participant DefaultEngine as DefaultCollisionProbabilityEngine
+
+  Caller->>Service: compute(CollisionProbabilityRequest)
+  Service->>Service: validate request presence
+  Service->>Engine: compute(request)
+  Engine->>DefaultEngine: current implementation
+  DefaultEngine->>DefaultEngine: combine primary and secondary covariance
+  DefaultEngine->>DefaultEngine: build encounter plane from refined relative state
+  DefaultEngine->>DefaultEngine: project covariance into encounter plane
+  DefaultEngine->>DefaultEngine: compute isotropic Gaussian Pc
+  DefaultEngine-->>Engine: CollisionProbabilityResult
+  Engine-->>Service: CollisionProbabilityResult
+  Service-->>Caller: immutable probability result
+```
+
+## Collision Probability Responsibilities
+
+`CollisionProbabilityService`
+
+Public runtime entry point for collision-probability analysis. It validates that a request was provided and delegates computation to `CollisionProbabilityEngine`. It owns no math, catalog access, propagation, covariance generation, or maneuver logic.
+
+`CollisionProbabilityEngine`
+
+Replaceable computation boundary for Pc methods. Future probability models can implement this interface without changing conjunction, relative-motion, propagation, or catalog-screening services.
+
+`DefaultCollisionProbabilityEngine`
+
+Current analytic implementation. It validates covariance symmetry and positive-semidefinite structure, combines covariances, projects them into the encounter plane, computes an equivalent isotropic uncertainty, and evaluates the initial Gaussian encounter-plane Pc approximation. It does not call Orekit, repositories, providers, propagation, relative motion, or screening code.
+
+`CollisionProbabilityRequest`
+
+Immutable request model containing the refined `ConjunctionResult`, primary covariance, secondary covariance, hard-body radius, and probability method. A null method defaults to `ISOTROPIC_GAUSSIAN_ENCOUNTER_PLANE`. Covariance matrices are defensively copied and must be finite 3x3 matrices.
+
+`CollisionProbabilityMethod`
+
+Runtime taxonomy of supported Pc methods. Milestone 17 supports only `ISOTROPIC_GAUSSIAN_ENCOUNTER_PLANE`; additional methods should be introduced only when a concrete analysis workflow needs them.
+
+`CollisionProbabilityStatistics`
+
+Immutable audit metadata for the probability calculation: method, combined encounter-plane variance, equivalent sigma, normalized miss distance, and normalized hard-body radius.
+
+`CollisionProbabilityResult`
+
+Immutable result containing the source request, probability of collision, and calculation statistics. Public callers receive only runtime models; no Orekit objects or matrix implementation details escape the package.
+
+## Collision Probability Rules
+
+Collision probability is layered above refined pairwise conjunction. It consumes `ConjunctionResult`; it does not alter TCA refinement, relative motion, propagation, spatial indexing, parallel screening, catalog access, or provider integration.
+
+The default method is deliberately limited and replaceable. Monte Carlo simulation, covariance generation, high-fidelity Pc models, maneuver generation, avoidance planning, catalog-wide optimization, scheduler integration, REST endpoints, caching, and database persistence remain later focused modules.
