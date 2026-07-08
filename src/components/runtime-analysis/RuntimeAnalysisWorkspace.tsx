@@ -33,6 +33,7 @@ export type RuntimePrimaryCandidate = {
   label: string;
   source: string;
   noradCatalogId: string | null;
+  orbitId?: string | null;
   satellite: SatelliteObject | null;
   snapshot?: SatelliteSnapshot | null;
 };
@@ -133,6 +134,7 @@ export function RuntimeAnalysisWorkspace({ primaryContext = emptyPrimaryContext 
       label: catalogSearchNorad.trim() ? `NORAD ${catalogSearchNorad.trim()}` : "Catalog Search",
       source: "Catalog Search",
       noradCatalogId: catalogSearchNorad.trim() || null,
+      orbitId: null,
       satellite: null,
       snapshot: null,
       mode: "catalog-search",

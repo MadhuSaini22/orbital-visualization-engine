@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { runRuntimeCatalogScreening, type RuntimeCatalogConjunctionResult, type RuntimeRelativeFrame } from "@/services/orbitServerApi";
+import { runRuntimeCatalogScreening, runRuntimeOrbitCatalogScreening, type RuntimeCatalogConjunctionResult, type RuntimeRelativeFrame } from "@/services/orbitServerApi";
 import type { RuntimePageProps } from "@/components/runtime-analysis/RuntimeAnalysisWorkspace";
 import { TimeRangePicker } from "@/components/runtime-analysis/runtime-components/TimeRangePicker";
 import { StepSelector } from "@/components/runtime-analysis/runtime-components/StepSelector";
@@ -12,6 +12,7 @@ import { ResultSummary } from "@/components/runtime-analysis/runtime-components/
 import { StatisticsPanel } from "@/components/runtime-analysis/runtime-components/StatisticsPanel";
 import { ErrorPanel } from "@/components/runtime-analysis/runtime-components/ErrorPanel";
 import { validateRuntimeTimeRange } from "@/components/runtime-analysis/runtime-components/time";
+import { manualOrbitRuntimeRef } from "@/components/runtime-analysis/runtime-components/runtimeObjectRef";
 
 export function CatalogScreeningPage({ primaryObject, primaryNoradCatalogId, onResult, onLoadingChange, onLog, onCatalogScreening, onPrimaryNoradChange }: RuntimePageProps) {
   const [start, setStart] = useState("2026-07-07T00:00");
@@ -25,16 +26,18 @@ export function CatalogScreeningPage({ primaryObject, primaryNoradCatalogId, onR
   const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
-    const validation = validate(primaryNoradCatalogId, start, stop, stepSeconds, missDistanceThresholdMeters);
+    const validation = validate(primaryNoradCatalogId, primaryObject.orbitId ?? null, start, stop, stepSeconds, missDistanceThresholdMeters);
     if (validation) return setError(validation);
     const primaryNorad = primaryNoradCatalogId;
-    if (!primaryNorad) return;
+    if (!primaryNorad && !primaryObject.orbitId) return;
     setLoading(true); onLoadingChange(true); setError(null);
     try {
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
-      const next = await runRuntimeCatalogScreening({ primaryNoradCatalogId: Number(primaryNorad), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, relativeFrame, missDistanceThresholdMeters: Number(missDistanceThresholdMeters) });
-      setResult(next); onResult(next); onCatalogScreening(next); onPrimaryNoradChange(primaryNorad); onLog("Catalog Screening completed.");
+      const next = primaryObject.orbitId
+        ? await runRuntimeOrbitCatalogScreening({ primaryObject: manualOrbitRuntimeRef(primaryObject.orbitId), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, relativeFrame, missDistanceThresholdMeters: Number(missDistanceThresholdMeters), propagatorType: null })
+        : await runRuntimeCatalogScreening({ primaryNoradCatalogId: Number(primaryNorad), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, relativeFrame, missDistanceThresholdMeters: Number(missDistanceThresholdMeters) });
+      setResult(next); onResult(next); onCatalogScreening(next); if (primaryNorad) onPrimaryNoradChange(primaryNorad); onLog("Catalog Screening completed.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Catalog screening request failed.";
       setError(message); onLog(`Catalog Screening failed: ${message}`);
@@ -58,10 +61,10 @@ export function CatalogScreeningPage({ primaryObject, primaryNoradCatalogId, onR
   );
 }
 
-function validate(primary: string | null, start: string, stop: string, step: string, threshold: string) {
+function validate(primary: string | null, orbitId: string | null, start: string, stop: string, step: string, threshold: string) {
   const range = validateRuntimeTimeRange(start, stop);
-  if (!primary) return "This runtime endpoint requires a primary catalog NORAD ID. Use an orbit with NORAD metadata, imported TLE, or Advanced Catalog NORAD.";
-  if (!Number.isInteger(Number(primary)) || Number(primary) <= 0) return "Primary NORAD must be a positive integer.";
+  if (!primary && !orbitId) return "Select a current orbit, imported TLE satellite, or Advanced Catalog NORAD before screening.";
+  if (primary && (!Number.isInteger(Number(primary)) || Number(primary) <= 0)) return "Primary NORAD must be a positive integer.";
   if (range.error) return range.error;
   if (!Number.isFinite(Number(step)) || Number(step) < 5 || Number(step) > 3600) return "Step must be between 5 and 3600 seconds.";
   if (!Number.isFinite(Number(threshold)) || Number(threshold) < 0) return "Miss-distance threshold must be non-negative.";

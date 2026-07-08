@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { runRuntimeVisibility, type RuntimeVisibilityResult } from "@/services/orbitServerApi";
+import { runRuntimeOrbitVisibility, runRuntimeVisibility, type RuntimeVisibilityResult } from "@/services/orbitServerApi";
 import type { RuntimePageProps } from "@/components/runtime-analysis/RuntimeAnalysisWorkspace";
 import { TimeRangePicker } from "@/components/runtime-analysis/runtime-components/TimeRangePicker";
 import { StepSelector } from "@/components/runtime-analysis/runtime-components/StepSelector";
@@ -11,6 +11,7 @@ import { AnalysisTable } from "@/components/runtime-analysis/runtime-components/
 import { ResultSummary } from "@/components/runtime-analysis/runtime-components/ResultSummary";
 import { ErrorPanel } from "@/components/runtime-analysis/runtime-components/ErrorPanel";
 import { validateRuntimeTimeRange } from "@/components/runtime-analysis/runtime-components/time";
+import { manualOrbitRuntimeRef } from "@/components/runtime-analysis/runtime-components/runtimeObjectRef";
 
 export function VisibilityPage({ primaryObject, primaryNoradCatalogId, onResult, onLoadingChange, onLog, onVisibility, onPrimaryNoradChange }: RuntimePageProps) {
   const [groundStationId, setGroundStationId] = useState("nasa-nen-wallops");
@@ -23,16 +24,18 @@ export function VisibilityPage({ primaryObject, primaryNoradCatalogId, onResult,
   const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
-    const validation = validate(primaryNoradCatalogId, groundStationId, start, stop, stepSeconds, minimumElevationDegrees);
+    const validation = validate(primaryNoradCatalogId, primaryObject.orbitId ?? null, groundStationId, start, stop, stepSeconds, minimumElevationDegrees);
     if (validation) return setError(validation);
     const noradCatalogId = primaryNoradCatalogId;
-    if (!noradCatalogId) return;
+    if (!noradCatalogId && !primaryObject.orbitId) return;
     setLoading(true); onLoadingChange(true); setError(null);
     try {
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
-      const next = await runRuntimeVisibility({ noradCatalogId: Number(noradCatalogId), groundStationId: { value: groundStationId.trim() }, startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, minimumElevationDegrees: Number(minimumElevationDegrees) });
-      setResult(next); onResult(next); onVisibility(next); onPrimaryNoradChange(noradCatalogId); onLog("Visibility completed.");
+      const next = primaryObject.orbitId
+        ? await runRuntimeOrbitVisibility({ primaryObject: manualOrbitRuntimeRef(primaryObject.orbitId), groundStationId: { value: groundStationId.trim() }, startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, minimumElevationDegrees: Number(minimumElevationDegrees), propagatorType: null })
+        : await runRuntimeVisibility({ noradCatalogId: Number(noradCatalogId), groundStationId: { value: groundStationId.trim() }, startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, minimumElevationDegrees: Number(minimumElevationDegrees) });
+      setResult(next); onResult(next); onVisibility(next); if (noradCatalogId) onPrimaryNoradChange(noradCatalogId); onLog("Visibility completed.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Visibility request failed.";
       setError(message); onLog(`Visibility failed: ${message}`);
@@ -55,10 +58,10 @@ export function VisibilityPage({ primaryObject, primaryNoradCatalogId, onResult,
   );
 }
 
-function validate(norad: string | null, groundStationId: string, start: string, stop: string, step: string, elevation: string) {
+function validate(norad: string | null, orbitId: string | null, groundStationId: string, start: string, stop: string, step: string, elevation: string) {
   const range = validateRuntimeTimeRange(start, stop);
-  if (!norad) return "This runtime endpoint requires a catalog NORAD ID. Use an orbit with NORAD metadata, imported TLE, or Advanced Catalog NORAD.";
-  if (!Number.isInteger(Number(norad)) || Number(norad) <= 0) return "NORAD catalog ID must be a positive integer.";
+  if (!norad && !orbitId) return "Select a current orbit, imported TLE, catalog satellite, or Advanced Catalog NORAD.";
+  if (norad && (!Number.isInteger(Number(norad)) || Number(norad) <= 0)) return "NORAD catalog ID must be a positive integer.";
   if (!groundStationId.trim()) return "Ground station ID is required.";
   if (range.error) return range.error;
   if (!Number.isFinite(Number(step)) || Number(step) < 5 || Number(step) > 3600) return "Step must be between 5 and 3600 seconds.";

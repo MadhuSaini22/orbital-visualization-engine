@@ -54,11 +54,18 @@ export function buildRuntimeRenderModel({
   covarianceOpacity,
 }: RuntimeRenderModelInput): CesiumRenderModel {
   const states = propagation?.states ?? [];
-  const primaryId = `runtime-${propagation?.satellite.catalogSatellite.noradCatalogId ?? fallbackNorad}`;
+  const primaryCatalogId = String(propagation?.satellite?.catalogSatellite.noradCatalogId ?? (fallbackNorad || "orbit"));
+  const primaryName = propagation?.satellite?.catalogSatellite.objectName ?? `Runtime ${fallbackNorad || "Orbit"}`;
+  const primaryId = `runtime-${primaryCatalogId}`;
   const trajectory = states.map((state) => runtimeStateToOrbitState(primaryId, state));
   const currentState = stateAtTime(trajectory, currentTimeIso) ?? trajectory[0] ?? null;
   const inEclipse = isInsideEclipse(eclipse, currentTimeIso);
-  const primarySatellite = makeSatellite(primaryId, propagation?.satellite.catalogSatellite.objectName ?? `Runtime ${fallbackNorad}`, String(propagation?.satellite.catalogSatellite.noradCatalogId ?? fallbackNorad), inEclipse ? "#f97316" : "#67e8f9");
+  const primarySatellite = makeSatellite(
+    primaryId,
+    primaryName,
+    primaryCatalogId,
+    inEclipse ? "#f97316" : "#67e8f9",
+  );
   const primarySnapshot: SatelliteSnapshot = { satellite: primarySatellite, state: currentState, trajectory, futureTrajectory: trajectory, pastTrail: trailToTime(trajectory, currentTimeIso), groundTrack: trajectory };
   const snapshots: SatelliteSnapshot[] = propagation ? [primarySnapshot] : [];
   const selectedSatelliteIds = [primaryId];

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { runRuntimePairwiseConjunction, type RuntimeConjunctionResult, type RuntimeRelativeFrame } from "@/services/orbitServerApi";
+import { runRuntimeOrbitPairwiseConjunction, runRuntimePairwiseConjunction, type RuntimeConjunctionResult, type RuntimeRelativeFrame } from "@/services/orbitServerApi";
 import type { RuntimePageProps } from "@/components/runtime-analysis/RuntimeAnalysisWorkspace";
 import { SatelliteSelector } from "@/components/runtime-analysis/runtime-components/SatelliteSelector";
 import { TimeRangePicker } from "@/components/runtime-analysis/runtime-components/TimeRangePicker";
@@ -12,6 +12,7 @@ import { ResultSummary } from "@/components/runtime-analysis/runtime-components/
 import { StatisticsPanel } from "@/components/runtime-analysis/runtime-components/StatisticsPanel";
 import { ErrorPanel } from "@/components/runtime-analysis/runtime-components/ErrorPanel";
 import { validateRuntimeTimeRange } from "@/components/runtime-analysis/runtime-components/time";
+import { catalogRuntimeRef, manualOrbitRuntimeRef } from "@/components/runtime-analysis/runtime-components/runtimeObjectRef";
 
 export function PairwiseConjunctionPage({ primaryObject, primaryNoradCatalogId, onResult, onLoadingChange, onLog, onPairwiseConjunction, onPrimaryNoradChange }: RuntimePageProps) {
   const [secondaryNoradCatalogId, setSecondaryNoradCatalogId] = useState("40967");
@@ -25,16 +26,27 @@ export function PairwiseConjunctionPage({ primaryObject, primaryNoradCatalogId, 
   const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
-    const validation = validate(primaryNoradCatalogId, secondaryNoradCatalogId, start, stop, stepSeconds, missDistanceThresholdMeters);
+    const validation = validate(primaryNoradCatalogId, primaryObject.orbitId ?? null, secondaryNoradCatalogId, start, stop, stepSeconds, missDistanceThresholdMeters);
     if (validation) return setError(validation);
     const primaryNorad = primaryNoradCatalogId;
-    if (!primaryNorad) return;
+    if (!primaryNorad && !primaryObject.orbitId) return;
     setLoading(true); onLoadingChange(true); setError(null);
     try {
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
-      const next = await runRuntimePairwiseConjunction({ primaryNoradCatalogId: Number(primaryNorad), secondaryNoradCatalogId: Number(secondaryNoradCatalogId), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, relativeFrame, missDistanceThresholdMeters: Number(missDistanceThresholdMeters) });
-      setResult(next); onResult(next); onPairwiseConjunction(next); onPrimaryNoradChange(primaryNorad); onLog("Pairwise Conjunction completed.");
+      const next = primaryObject.orbitId
+        ? await runRuntimeOrbitPairwiseConjunction({
+          primaryObject: manualOrbitRuntimeRef(primaryObject.orbitId),
+          secondaryObject: catalogRuntimeRef(secondaryNoradCatalogId),
+          startTime: range.startIso,
+          stopTime: range.stopIso,
+          step: `PT${Number(stepSeconds)}S`,
+          relativeFrame,
+          missDistanceThresholdMeters: Number(missDistanceThresholdMeters),
+          propagatorType: null,
+        })
+        : await runRuntimePairwiseConjunction({ primaryNoradCatalogId: Number(primaryNorad), secondaryNoradCatalogId: Number(secondaryNoradCatalogId), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, relativeFrame, missDistanceThresholdMeters: Number(missDistanceThresholdMeters) });
+      setResult(next); onResult(next); onPairwiseConjunction(next); if (primaryNorad) onPrimaryNoradChange(primaryNorad); onLog("Pairwise Conjunction completed.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Pairwise conjunction request failed.";
       setError(message); onLog(`Pairwise Conjunction failed: ${message}`);
@@ -58,10 +70,10 @@ export function PairwiseConjunctionPage({ primaryObject, primaryNoradCatalogId, 
   );
 }
 
-function validate(primary: string | null, secondary: string, start: string, stop: string, step: string, threshold: string) {
+function validate(primary: string | null, primaryOrbitId: string | null, secondary: string, start: string, stop: string, step: string, threshold: string) {
   const range = validateRuntimeTimeRange(start, stop);
-  if (!primary) return "This runtime endpoint requires a primary catalog NORAD ID. Use an orbit with NORAD metadata, imported TLE, or Advanced Catalog NORAD.";
-  if (!Number.isInteger(Number(primary)) || Number(primary) <= 0) return "Primary NORAD must be a positive integer.";
+  if (!primary && !primaryOrbitId) return "This runtime endpoint requires a primary orbit or catalog NORAD ID.";
+  if (primary && (!Number.isInteger(Number(primary)) || Number(primary) <= 0)) return "Primary NORAD must be a positive integer.";
   if (!Number.isInteger(Number(secondary)) || Number(secondary) <= 0) return "Secondary NORAD must be a positive integer.";
   if (primary === secondary) return "Primary and secondary satellites must differ.";
   if (range.error) return range.error;

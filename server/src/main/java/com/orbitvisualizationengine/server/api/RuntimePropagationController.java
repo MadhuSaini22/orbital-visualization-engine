@@ -15,12 +15,15 @@ import org.springframework.web.bind.annotation.RestController;
 public class RuntimePropagationController {
   private final RuntimeSatelliteService runtimeSatelliteService;
   private final PropagationService propagationService;
+  private final RuntimeOrbitAnalysisSupport runtimeOrbitAnalysisSupport;
 
   public RuntimePropagationController(
       RuntimeSatelliteService runtimeSatelliteService,
-      PropagationService propagationService) {
+      PropagationService propagationService,
+      RuntimeOrbitAnalysisSupport runtimeOrbitAnalysisSupport) {
     this.runtimeSatelliteService = runtimeSatelliteService;
     this.propagationService = propagationService;
+    this.runtimeOrbitAnalysisSupport = runtimeOrbitAnalysisSupport;
   }
 
   @PostMapping
@@ -31,5 +34,15 @@ public class RuntimePropagationController {
             request.start(),
             request.end(),
             Duration.ofSeconds(request.stepSeconds())));
+  }
+
+  @PostMapping("/orbit")
+  RuntimePropagationResponse propagateOrbit(@Valid @RequestBody RuntimeOrbitPropagationRequest request) {
+    return RuntimePropagationResponse.from(runtimeOrbitAnalysisSupport.propagate(
+        request.primaryObject(),
+        request.start(),
+        request.end(),
+        Duration.ofSeconds(request.stepSeconds()),
+        request.propagatorType()));
   }
 }

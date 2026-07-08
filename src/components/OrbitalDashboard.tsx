@@ -1909,6 +1909,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
         label: "Current Orbit",
         source: "Orbit Workspace",
         noradCatalogId: catalogIdFromSatellite(currentOrbitSnapshot.satellite),
+        orbitId: activeStoredOrbit?.orbitDefinition.backendManualOrbitId ?? manualOrbitId,
         satellite: currentOrbitSnapshot.satellite,
         snapshot: currentOrbitSnapshot,
       }
@@ -1921,12 +1922,13 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
           label: satellite.name,
           source: "Imported TLE",
           noradCatalogId: catalogIdFromSatellite(satellite),
+          orbitId: null,
           satellite,
           snapshot: snapshots.find((snapshot) => snapshot.satellite.id === satellite.id) ?? null,
         }))
       : [];
     return { currentOrbit, importedTleSatellites };
-  }, [activeDataSource, activeStoredOrbit, activeWorkspaceOrbitId, satellites, selectedSnapshot, snapshots]);
+  }, [activeDataSource, activeStoredOrbit, activeWorkspaceOrbitId, manualOrbitId, satellites, selectedSnapshot, snapshots]);
   const groundOperationsOrbitId = (
     activeStoredOrbit?.orbitId
     ?? activeWorkspaceOrbitId

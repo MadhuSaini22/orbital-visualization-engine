@@ -356,6 +356,10 @@ export type RuntimeSatelliteResponse = {
   catalogSatellite: RuntimeCatalogSatellite;
 };
 
+export type RuntimeObjectRef =
+  | { type: "CATALOG_NORAD"; noradCatalogId: number; orbitId?: null }
+  | { type: "MANUAL_ORBIT"; orbitId: string; noradCatalogId?: null };
+
 export type RuntimeCartesianVector = {
   xMeters: number;
   yMeters: number;
@@ -377,8 +381,16 @@ export type RuntimePropagationRequest = {
   model?: string | null;
 };
 
+export type RuntimeOrbitPropagationRequest = {
+  primaryObject: RuntimeObjectRef;
+  start: string;
+  end: string;
+  stepSeconds: number;
+  propagatorType?: PropagatorTypeId | null;
+};
+
 export type RuntimePropagationResponse = {
-  satellite: RuntimeSatelliteResponse;
+  satellite: RuntimeSatelliteResponse | null;
   startTime: string;
   stopTime: string;
   step: string;
@@ -396,6 +408,16 @@ export type RuntimeVisibilityRequest = {
   stopTime: string;
   step: string;
   minimumElevationDegrees: number;
+};
+
+export type RuntimeOrbitVisibilityRequest = {
+  primaryObject: RuntimeObjectRef;
+  groundStationId: RuntimeGroundStationId;
+  startTime: string;
+  stopTime: string;
+  step: string;
+  minimumElevationDegrees: number;
+  propagatorType?: PropagatorTypeId | null;
 };
 
 export type RuntimeVisibilityWindow = {
@@ -416,6 +438,14 @@ export type RuntimeEclipseRequest = {
   startTime: string;
   stopTime: string;
   step: string;
+};
+
+export type RuntimeOrbitEclipseRequest = {
+  primaryObject: RuntimeObjectRef;
+  startTime: string;
+  stopTime: string;
+  step: string;
+  propagatorType?: PropagatorTypeId | null;
 };
 
 export type RuntimeEclipseInterval = {
@@ -441,6 +471,16 @@ export type RuntimeRelativeMotionRequest = {
   frame: RuntimeRelativeFrame;
 };
 
+export type RuntimeOrbitRelativeMotionRequest = {
+  primaryObject: RuntimeObjectRef;
+  secondaryObject: RuntimeObjectRef;
+  startTime: string;
+  stopTime: string;
+  step: string;
+  frame: RuntimeRelativeFrame;
+  propagatorType?: PropagatorTypeId | null;
+};
+
 export type RuntimeRelativeState = {
   timestamp: string;
   frame: RuntimeRelativeFrame;
@@ -461,6 +501,17 @@ export type RuntimeConjunctionRequest = {
   step: string;
   relativeFrame: RuntimeRelativeFrame;
   missDistanceThresholdMeters: number;
+};
+
+export type RuntimeOrbitConjunctionRequest = {
+  primaryObject: RuntimeObjectRef;
+  secondaryObject: RuntimeObjectRef;
+  startTime: string;
+  stopTime: string;
+  step: string;
+  relativeFrame: RuntimeRelativeFrame;
+  missDistanceThresholdMeters: number;
+  propagatorType?: PropagatorTypeId | null;
 };
 
 export type RuntimeClosestApproach = {
@@ -491,14 +542,25 @@ export type RuntimeCatalogConjunctionRequest = {
   missDistanceThresholdMeters: number;
 };
 
+export type RuntimeOrbitCatalogScreeningRequest = {
+  primaryObject: RuntimeObjectRef;
+  startTime: string;
+  stopTime: string;
+  step: string;
+  relativeFrame: RuntimeRelativeFrame;
+  missDistanceThresholdMeters: number;
+  propagatorType?: PropagatorTypeId | null;
+};
+
 export type RuntimeCatalogConjunctionCandidate = {
   satellite: RuntimeCatalogSatellite;
   conjunctionResult: RuntimeConjunctionResult;
 };
 
 export type RuntimeCatalogConjunctionResult = {
-  request: RuntimeCatalogConjunctionRequest;
-  primarySatellite: RuntimeCatalogSatellite;
+  request: RuntimeCatalogConjunctionRequest | RuntimeOrbitCatalogScreeningRequest;
+  primarySatellite?: RuntimeCatalogSatellite | null;
+  primaryObject?: RuntimeObjectRef | null;
   candidates: RuntimeCatalogConjunctionCandidate[];
   statistics: {
     catalogSatellitesSeen: number;
@@ -548,14 +610,23 @@ export type RuntimeCovariancePropagationRequest = {
   initialCovariance: RuntimeCovarianceMatrix;
 };
 
+export type RuntimeOrbitCovariancePropagationRequest = {
+  primaryObject: RuntimeObjectRef;
+  startTime: string;
+  stopTime: string;
+  step: string;
+  initialCovariance: RuntimeCovarianceMatrix;
+  propagatorType?: PropagatorTypeId | null;
+};
+
 export type RuntimeCovarianceState = {
   timestamp: string;
   covarianceMatrix: RuntimeCovarianceMatrix;
 };
 
 export type RuntimeCovariancePropagationResponse = {
-  request: RuntimeCovariancePropagationRequest;
-  satellite: RuntimeSatelliteResponse;
+  request: RuntimeCovariancePropagationRequest | RuntimeOrbitCovariancePropagationRequest;
+  satellite?: RuntimeSatelliteResponse | null;
   states: RuntimeCovarianceState[];
 };
 
@@ -782,24 +853,48 @@ export async function runRuntimePropagation(request: RuntimePropagationRequest) 
   return postRuntimeJson<RuntimePropagationResponse, RuntimePropagationRequest>("/api/runtime/propagation", request);
 }
 
+export async function runRuntimeOrbitPropagation(request: RuntimeOrbitPropagationRequest) {
+  return postRuntimeJson<RuntimePropagationResponse, RuntimeOrbitPropagationRequest>("/api/runtime/propagation/orbit", request);
+}
+
 export async function runRuntimeVisibility(request: RuntimeVisibilityRequest) {
   return postRuntimeJson<RuntimeVisibilityResult, RuntimeVisibilityRequest>("/api/runtime/visibility", request);
+}
+
+export async function runRuntimeOrbitVisibility(request: RuntimeOrbitVisibilityRequest) {
+  return postRuntimeJson<RuntimeVisibilityResult, RuntimeOrbitVisibilityRequest>("/api/runtime/visibility/orbit", request);
 }
 
 export async function runRuntimeEclipse(request: RuntimeEclipseRequest) {
   return postRuntimeJson<RuntimeEclipseResult, RuntimeEclipseRequest>("/api/runtime/eclipse", request);
 }
 
+export async function runRuntimeOrbitEclipse(request: RuntimeOrbitEclipseRequest) {
+  return postRuntimeJson<RuntimeEclipseResult, RuntimeOrbitEclipseRequest>("/api/runtime/eclipse/orbit", request);
+}
+
 export async function runRuntimeRelativeMotion(request: RuntimeRelativeMotionRequest) {
   return postRuntimeJson<RuntimeRelativeMotionResult, RuntimeRelativeMotionRequest>("/api/runtime/relative-motion", request);
+}
+
+export async function runRuntimeOrbitRelativeMotion(request: RuntimeOrbitRelativeMotionRequest) {
+  return postRuntimeJson<RuntimeRelativeMotionResult, RuntimeOrbitRelativeMotionRequest>("/api/runtime/relative-motion/orbit", request);
 }
 
 export async function runRuntimePairwiseConjunction(request: RuntimeConjunctionRequest) {
   return postRuntimeJson<RuntimeConjunctionResult, RuntimeConjunctionRequest>("/api/runtime/conjunctions/pairwise", request);
 }
 
+export async function runRuntimeOrbitPairwiseConjunction(request: RuntimeOrbitConjunctionRequest) {
+  return postRuntimeJson<RuntimeConjunctionResult, RuntimeOrbitConjunctionRequest>("/api/runtime/conjunctions/pairwise/orbit", request);
+}
+
 export async function runRuntimeCatalogScreening(request: RuntimeCatalogConjunctionRequest) {
   return postRuntimeJson<RuntimeCatalogConjunctionResult, RuntimeCatalogConjunctionRequest>("/api/runtime/conjunctions/catalog-screening", request);
+}
+
+export async function runRuntimeOrbitCatalogScreening(request: RuntimeOrbitCatalogScreeningRequest) {
+  return postRuntimeJson<RuntimeCatalogConjunctionResult, RuntimeOrbitCatalogScreeningRequest>("/api/runtime/conjunctions/catalog-screening/orbit", request);
 }
 
 export async function runRuntimeCollisionProbability(request: RuntimeCollisionProbabilityRequest) {
@@ -808,4 +903,8 @@ export async function runRuntimeCollisionProbability(request: RuntimeCollisionPr
 
 export async function runRuntimeCovariancePropagation(request: RuntimeCovariancePropagationRequest) {
   return postRuntimeJson<RuntimeCovariancePropagationResponse, RuntimeCovariancePropagationRequest>("/api/runtime/covariance/propagate", request);
+}
+
+export async function runRuntimeOrbitCovariancePropagation(request: RuntimeOrbitCovariancePropagationRequest) {
+  return postRuntimeJson<RuntimeCovariancePropagationResponse, RuntimeOrbitCovariancePropagationRequest>("/api/runtime/covariance/propagate/orbit", request);
 }

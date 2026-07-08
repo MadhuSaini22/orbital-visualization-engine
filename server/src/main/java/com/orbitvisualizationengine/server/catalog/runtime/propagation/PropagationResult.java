@@ -12,9 +12,6 @@ public record PropagationResult(
     Duration step,
     List<PropagatedState> states) {
   public PropagationResult {
-    if (satellite == null) {
-      throw new IllegalArgumentException("Runtime satellite is required");
-    }
     if (startTime == null) {
       throw new IllegalArgumentException("Start time is required");
     }

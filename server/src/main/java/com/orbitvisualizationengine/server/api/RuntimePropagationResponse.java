@@ -14,7 +14,7 @@ public record RuntimePropagationResponse(
     List<PropagatedState> states) {
   public static RuntimePropagationResponse from(PropagationResult result) {
     return new RuntimePropagationResponse(
-        RuntimeSatelliteResponse.from(result.satellite()),
+        result.satellite() == null ? null : RuntimeSatelliteResponse.from(result.satellite()),
         result.startTime(),
         result.stopTime(),
         result.step(),

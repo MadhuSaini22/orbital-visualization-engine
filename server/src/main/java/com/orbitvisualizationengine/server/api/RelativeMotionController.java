@@ -13,13 +13,42 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/runtime/relative-motion")
 public class RelativeMotionController {
   private final RelativeMotionService relativeMotionService;
+  private final RuntimeOrbitAnalysisSupport runtimeOrbitAnalysisSupport;
 
-  public RelativeMotionController(RelativeMotionService relativeMotionService) {
+  public RelativeMotionController(
+      RelativeMotionService relativeMotionService,
+      RuntimeOrbitAnalysisSupport runtimeOrbitAnalysisSupport) {
     this.relativeMotionService = relativeMotionService;
+    this.runtimeOrbitAnalysisSupport = runtimeOrbitAnalysisSupport;
   }
 
   @PostMapping
   RelativeMotionResult compute(@Valid @RequestBody RelativeMotionRequest request) {
     return relativeMotionService.computeRelativeMotion(request);
+  }
+
+  @PostMapping("/orbit")
+  RelativeMotionResult computeOrbit(@Valid @RequestBody RuntimeOrbitRelativeMotionRequest request) {
+    RelativeMotionRequest delegate = new RelativeMotionRequest(
+        runtimeOrbitAnalysisSupport.stableObjectId(request.primaryObject()),
+        runtimeOrbitAnalysisSupport.stableObjectId(request.secondaryObject()),
+        request.startTime(),
+        request.stopTime(),
+        request.step(),
+        request.frame());
+    return relativeMotionService.computeRelativeMotion(
+        delegate,
+        runtimeOrbitAnalysisSupport.propagate(
+            request.primaryObject(),
+            request.startTime(),
+            request.stopTime(),
+            request.step(),
+            request.propagatorType()),
+        runtimeOrbitAnalysisSupport.propagate(
+            request.secondaryObject(),
+            request.startTime(),
+            request.stopTime(),
+            request.step(),
+            request.propagatorType()));
   }
 }
