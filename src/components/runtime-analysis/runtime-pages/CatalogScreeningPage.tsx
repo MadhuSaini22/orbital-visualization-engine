@@ -14,7 +14,7 @@ import { StatisticsPanel } from "@/components/runtime-analysis/runtime-component
 import { ErrorPanel } from "@/components/runtime-analysis/runtime-components/ErrorPanel";
 import { validateRuntimeTimeRange } from "@/components/runtime-analysis/runtime-components/time";
 
-export function CatalogScreeningPage({ onResult, onLoadingChange, onLog, onPrimaryNoradChange }: RuntimePageProps) {
+export function CatalogScreeningPage({ onResult, onLoadingChange, onLog, onCatalogScreening, onPrimaryNoradChange }: RuntimePageProps) {
   const [primaryNoradCatalogId, setPrimaryNoradCatalogId] = useState("25544");
   const [start, setStart] = useState("2026-07-07T00:00");
   const [stop, setStop] = useState("2026-07-07T01:30");
@@ -34,7 +34,7 @@ export function CatalogScreeningPage({ onResult, onLoadingChange, onLog, onPrima
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
       const next = await runRuntimeCatalogScreening({ primaryNoradCatalogId: Number(primaryNoradCatalogId), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, relativeFrame, missDistanceThresholdMeters: Number(missDistanceThresholdMeters) });
-      setResult(next); onResult(next); onPrimaryNoradChange(primaryNoradCatalogId); onLog("Catalog Screening completed.");
+      setResult(next); onResult(next); onCatalogScreening(next); onPrimaryNoradChange(primaryNoradCatalogId); onLog("Catalog Screening completed.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Catalog screening request failed.";
       setError(message); onLog(`Catalog Screening failed: ${message}`);

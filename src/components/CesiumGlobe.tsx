@@ -435,6 +435,7 @@ export function CesiumGlobe({
   const stationAccessRegionEntitiesRef = useRef<Map<string, Entity>>(new Map());
   const satelliteFootprintEntityRef = useRef<Entity | null>(null);
   const groundStationContactLineEntitiesRef = useRef<Entity[]>([]);
+  const runtimeCovarianceEllipsoidEntityRef = useRef<Entity | null>(null);
   const latestSnapshotsRef = useRef<SatelliteSnapshot[]>(snapshots);
   const latestClockTickMsRef = useRef(0);
   const onClockTickRef = useRef(onClockTick);
@@ -703,6 +704,7 @@ export function CesiumGlobe({
       stationAccessRegionEntityMap.clear();
       satelliteFootprintEntityRef.current = null;
       groundStationContactLineEntitiesRef.current = [];
+      runtimeCovarianceEllipsoidEntityRef.current = null;
       pathPrimitiveRef.current = null;
       hoverInfoRef.current = null;
       entityMap.clear();
@@ -1433,6 +1435,66 @@ export function CesiumGlobe({
       rangeLabelEntityRef.current.label.text = new Cesium.ConstantProperty(labelText);
     }
   }, [rangeMeasurement, viewerReady]);
+
+  useEffect(() => {
+    const Cesium = cesiumRef.current;
+    const viewer = viewerRef.current;
+    if (!viewerReady || !Cesium || !viewer) {
+      return;
+    }
+
+    const ellipsoid = renderModel.runtimeCovarianceEllipsoid ?? null;
+    if (!ellipsoid) {
+      if (runtimeCovarianceEllipsoidEntityRef.current) {
+        viewer.entities.remove(runtimeCovarianceEllipsoidEntityRef.current);
+        runtimeCovarianceEllipsoidEntityRef.current = null;
+        viewer.scene.requestRender();
+      }
+      return;
+    }
+
+    const position = stateToSpaceCartesian(Cesium, ellipsoid.satelliteState);
+    const color = Cesium.Color.fromCssColorString(ellipsoid.color);
+    if (!runtimeCovarianceEllipsoidEntityRef.current) {
+      runtimeCovarianceEllipsoidEntityRef.current = viewer.entities.add({
+        id: ellipsoid.id,
+        name: ellipsoid.label,
+        position,
+        ellipsoid: {
+          radii: new Cesium.Cartesian3(...ellipsoid.radiiMeters),
+          material: color.withAlpha(ellipsoid.opacity),
+          outline: true,
+          outlineColor: color.withAlpha(Math.min(1, ellipsoid.opacity + 0.35)),
+        },
+        label: {
+          text: ellipsoid.label,
+          font: "700 11px monospace",
+          fillColor: color,
+          outlineColor: Cesium.Color.BLACK,
+          outlineWidth: 2,
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          showBackground: true,
+          backgroundColor: Cesium.Color.BLACK.withAlpha(0.72),
+          backgroundPadding: new Cesium.Cartesian2(6, 4),
+          pixelOffset: new Cesium.Cartesian2(0, -20),
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+      });
+    } else {
+      runtimeCovarianceEllipsoidEntityRef.current.position = new Cesium.ConstantPositionProperty(position);
+      runtimeCovarianceEllipsoidEntityRef.current.name = ellipsoid.label;
+      if (runtimeCovarianceEllipsoidEntityRef.current.ellipsoid) {
+        runtimeCovarianceEllipsoidEntityRef.current.ellipsoid.radii = new Cesium.ConstantProperty(new Cesium.Cartesian3(...ellipsoid.radiiMeters));
+        runtimeCovarianceEllipsoidEntityRef.current.ellipsoid.material = new Cesium.ColorMaterialProperty(color.withAlpha(ellipsoid.opacity));
+        runtimeCovarianceEllipsoidEntityRef.current.ellipsoid.outlineColor = new Cesium.ConstantProperty(color.withAlpha(Math.min(1, ellipsoid.opacity + 0.35)));
+      }
+      if (runtimeCovarianceEllipsoidEntityRef.current.label) {
+        runtimeCovarianceEllipsoidEntityRef.current.label.text = new Cesium.ConstantProperty(ellipsoid.label);
+      }
+    }
+
+    viewer.scene.requestRender();
+  }, [renderModel.runtimeCovarianceEllipsoid, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;

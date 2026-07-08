@@ -9,7 +9,7 @@ import { ResultSummary } from "@/components/runtime-analysis/runtime-components/
 import { StatisticsPanel } from "@/components/runtime-analysis/runtime-components/StatisticsPanel";
 import { ErrorPanel } from "@/components/runtime-analysis/runtime-components/ErrorPanel";
 
-export function CollisionProbabilityPage({ lastPairwiseConjunction, onResult, onLoadingChange, onLog }: RuntimePageProps) {
+export function CollisionProbabilityPage({ lastPairwiseConjunction, onResult, onLoadingChange, onLog, onCollisionProbability }: RuntimePageProps) {
   const [primaryCovariance, setPrimaryCovariance] = useState<number[][]>(identityMatrix(3));
   const [secondaryCovariance, setSecondaryCovariance] = useState<number[][]>(identityMatrix(3));
   const [hardBodyRadiusMeters, setHardBodyRadiusMeters] = useState("2");
@@ -24,7 +24,7 @@ export function CollisionProbabilityPage({ lastPairwiseConjunction, onResult, on
     setLoading(true); onLoadingChange(true); setError(null);
     try {
       const next = await runRuntimeCollisionProbability({ conjunctionResult: lastPairwiseConjunction, primaryCovarianceMetersSquared: primaryCovariance, secondaryCovarianceMetersSquared: secondaryCovariance, hardBodyRadiusMeters: Number(hardBodyRadiusMeters), method: "ISOTROPIC_GAUSSIAN_ENCOUNTER_PLANE" });
-      setResult(next); onResult(next); onLog("Collision Probability completed.");
+      setResult(next); onResult(next); onCollisionProbability(next); onLog("Collision Probability completed.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Collision probability request failed.";
       setError(message); onLog(`Collision Probability failed: ${message}`);

@@ -11,7 +11,7 @@ import { ResultSummary } from "@/components/runtime-analysis/runtime-components/
 import { ErrorPanel } from "@/components/runtime-analysis/runtime-components/ErrorPanel";
 import { validateRuntimeTimeRange } from "@/components/runtime-analysis/runtime-components/time";
 
-export function EclipsePage({ onResult, onLoadingChange, onLog, onPrimaryNoradChange }: RuntimePageProps) {
+export function EclipsePage({ onResult, onLoadingChange, onLog, onEclipse, onPrimaryNoradChange }: RuntimePageProps) {
   const [noradCatalogId, setNoradCatalogId] = useState("25544");
   const [start, setStart] = useState("2026-07-07T00:00");
   const [stop, setStop] = useState("2026-07-07T01:30");
@@ -28,7 +28,7 @@ export function EclipsePage({ onResult, onLoadingChange, onLog, onPrimaryNoradCh
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
       const next = await runRuntimeEclipse({ noradCatalogId: Number(noradCatalogId), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S` });
-      setResult(next); onResult(next); onPrimaryNoradChange(noradCatalogId); onLog("Eclipse completed.");
+      setResult(next); onResult(next); onEclipse(next); onPrimaryNoradChange(noradCatalogId); onLog("Eclipse completed.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Eclipse request failed.";
       setError(message); onLog(`Eclipse failed: ${message}`);

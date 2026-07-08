@@ -12,7 +12,7 @@ import { ResultSummary } from "@/components/runtime-analysis/runtime-components/
 import { ErrorPanel } from "@/components/runtime-analysis/runtime-components/ErrorPanel";
 import { validateRuntimeTimeRange } from "@/components/runtime-analysis/runtime-components/time";
 
-export function RelativeMotionPage({ onResult, onLoadingChange, onLog, onPrimaryNoradChange }: RuntimePageProps) {
+export function RelativeMotionPage({ onResult, onLoadingChange, onLog, onRelativeMotion, onPrimaryNoradChange }: RuntimePageProps) {
   const [primaryNoradCatalogId, setPrimaryNoradCatalogId] = useState("25544");
   const [secondaryNoradCatalogId, setSecondaryNoradCatalogId] = useState("40967");
   const [start, setStart] = useState("2026-07-07T00:00");
@@ -31,7 +31,7 @@ export function RelativeMotionPage({ onResult, onLoadingChange, onLog, onPrimary
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
       const next = await runRuntimeRelativeMotion({ primaryNoradCatalogId: Number(primaryNoradCatalogId), secondaryNoradCatalogId: Number(secondaryNoradCatalogId), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, frame });
-      setResult(next); onResult(next); onPrimaryNoradChange(primaryNoradCatalogId); onLog("Relative Motion completed.");
+      setResult(next); onResult(next); onRelativeMotion(next); onPrimaryNoradChange(primaryNoradCatalogId); onLog("Relative Motion completed.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Relative motion request failed.";
       setError(message); onLog(`Relative Motion failed: ${message}`);

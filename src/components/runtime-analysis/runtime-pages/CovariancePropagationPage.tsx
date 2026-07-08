@@ -13,7 +13,7 @@ import { JsonViewer } from "@/components/runtime-analysis/runtime-components/Jso
 import { ErrorPanel } from "@/components/runtime-analysis/runtime-components/ErrorPanel";
 import { validateRuntimeTimeRange } from "@/components/runtime-analysis/runtime-components/time";
 
-export function CovariancePropagationPage({ onResult, onLoadingChange, onLog, onPrimaryNoradChange }: RuntimePageProps) {
+export function CovariancePropagationPage({ onResult, onLoadingChange, onLog, onCovariancePropagation, onPrimaryNoradChange }: RuntimePageProps) {
   const [noradCatalogId, setNoradCatalogId] = useState("25544");
   const [start, setStart] = useState("2026-07-07T00:00");
   const [stop, setStop] = useState("2026-07-07T01:30");
@@ -31,7 +31,7 @@ export function CovariancePropagationPage({ onResult, onLoadingChange, onLog, on
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
       const next = await runRuntimeCovariancePropagation({ noradCatalogId: Number(noradCatalogId), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, initialCovariance: { values: covariance } });
-      setResult(next); onResult(next); onPrimaryNoradChange(noradCatalogId); onLog("Covariance Propagation completed.");
+      setResult(next); onResult(next); onCovariancePropagation(next); onPrimaryNoradChange(noradCatalogId); onLog("Covariance Propagation completed.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Covariance propagation request failed.";
       setError(message); onLog(`Covariance Propagation failed: ${message}`);

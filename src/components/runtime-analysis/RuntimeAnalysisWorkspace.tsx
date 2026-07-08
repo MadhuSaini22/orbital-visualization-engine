@@ -61,7 +61,13 @@ export type RuntimePageProps = {
   onLoadingChange: (loading: boolean) => void;
   onLog: (message: string) => void;
   onPropagation: (result: RuntimePropagationResponse) => void;
+  onVisibility: (result: RuntimeVisibilityResult) => void;
+  onEclipse: (result: RuntimeEclipseResult) => void;
+  onRelativeMotion: (result: RuntimeRelativeMotionResult) => void;
   onPairwiseConjunction: (result: RuntimeConjunctionResult) => void;
+  onCatalogScreening: (result: RuntimeCatalogConjunctionResult) => void;
+  onCollisionProbability: (result: RuntimeCollisionProbabilityResult) => void;
+  onCovariancePropagation: (result: RuntimeCovariancePropagationResponse) => void;
   onPrimaryNoradChange: (noradCatalogId: string) => void;
 };
 
@@ -71,7 +77,13 @@ export function RuntimeAnalysisWorkspace() {
   const [result, setResult] = useState<RuntimeWorkspaceResult>(null);
   const [logs, setLogs] = useState<RuntimeLogEntry[]>([]);
   const [lastPropagation, setLastPropagation] = useState<RuntimePropagationResponse | null>(null);
+  const [lastVisibility, setLastVisibility] = useState<RuntimeVisibilityResult | null>(null);
+  const [lastEclipse, setLastEclipse] = useState<RuntimeEclipseResult | null>(null);
+  const [lastRelativeMotion, setLastRelativeMotion] = useState<RuntimeRelativeMotionResult | null>(null);
   const [lastPairwiseConjunction, setLastPairwiseConjunction] = useState<RuntimeConjunctionResult | null>(null);
+  const [lastCatalogScreening, setLastCatalogScreening] = useState<RuntimeCatalogConjunctionResult | null>(null);
+  const [lastCollisionProbability, setLastCollisionProbability] = useState<RuntimeCollisionProbabilityResult | null>(null);
+  const [lastCovariancePropagation, setLastCovariancePropagation] = useState<RuntimeCovariancePropagationResponse | null>(null);
   const [primaryNorad, setPrimaryNorad] = useState("25544");
   const activeLabel = useMemo(() => runtimePages.find((page) => page.id === activePage)?.label ?? "Runtime Analysis", [activePage]);
 
@@ -81,7 +93,13 @@ export function RuntimeAnalysisWorkspace() {
     onLoadingChange: setLoading,
     onLog: (message) => setLogs((current) => [{ time: new Date().toISOString(), message }, ...current].slice(0, 30)),
     onPropagation: setLastPropagation,
+    onVisibility: setLastVisibility,
+    onEclipse: setLastEclipse,
+    onRelativeMotion: setLastRelativeMotion,
     onPairwiseConjunction: setLastPairwiseConjunction,
+    onCatalogScreening: setLastCatalogScreening,
+    onCollisionProbability: setLastCollisionProbability,
+    onCovariancePropagation: setLastCovariancePropagation,
     onPrimaryNoradChange: setPrimaryNorad,
   };
 
@@ -95,7 +113,19 @@ export function RuntimeAnalysisWorkspace() {
             <PanelTitle eyebrow="Analysis Inputs" title={activeLabel} />
             <div className="mt-4">{renderPage(activePage, pageProps)}</div>
           </section>
-          <RuntimeVisualizationPanel propagation={lastPropagation} loading={loading} fallbackNorad={primaryNorad} />
+          <RuntimeVisualizationPanel
+            activePage={activePage}
+            propagation={lastPropagation}
+            visibility={lastVisibility}
+            eclipse={lastEclipse}
+            relativeMotion={lastRelativeMotion}
+            pairwiseConjunction={lastPairwiseConjunction}
+            catalogScreening={lastCatalogScreening}
+            collisionProbability={lastCollisionProbability}
+            covariancePropagation={lastCovariancePropagation}
+            loading={loading}
+            fallbackNorad={primaryNorad}
+          />
           <RuntimeResultPanel result={result} />
         </div>
         <RuntimeBottomPanel result={result} logs={logs} />

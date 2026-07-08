@@ -13,7 +13,7 @@ import { ResultSummary } from "@/components/runtime-analysis/runtime-components/
 import { ErrorPanel } from "@/components/runtime-analysis/runtime-components/ErrorPanel";
 import { validateRuntimeTimeRange } from "@/components/runtime-analysis/runtime-components/time";
 
-export function VisibilityPage({ onResult, onLoadingChange, onLog, onPrimaryNoradChange }: RuntimePageProps) {
+export function VisibilityPage({ onResult, onLoadingChange, onLog, onVisibility, onPrimaryNoradChange }: RuntimePageProps) {
   const [noradCatalogId, setNoradCatalogId] = useState("25544");
   const [groundStationId, setGroundStationId] = useState("DEFAULT");
   const [start, setStart] = useState("2026-07-07T00:00");
@@ -32,7 +32,7 @@ export function VisibilityPage({ onResult, onLoadingChange, onLog, onPrimaryNora
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
       const next = await runRuntimeVisibility({ noradCatalogId: Number(noradCatalogId), groundStationId: { value: groundStationId.trim() }, startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, minimumElevationDegrees: Number(minimumElevationDegrees) });
-      setResult(next); onResult(next); onPrimaryNoradChange(noradCatalogId); onLog("Visibility completed.");
+      setResult(next); onResult(next); onVisibility(next); onPrimaryNoradChange(noradCatalogId); onLog("Visibility completed.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Visibility request failed.";
       setError(message); onLog(`Visibility failed: ${message}`);

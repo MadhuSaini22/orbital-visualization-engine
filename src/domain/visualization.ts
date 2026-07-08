@@ -77,6 +77,14 @@ export type CesiumRenderModel = {
   showConjunctions: boolean;
   groundStationVisualization: GroundStationVisualizationModel;
   groundOperationsGroundTrackSnapshot: SatelliteSnapshot | null;
+  runtimeCovarianceEllipsoid?: {
+    id: string;
+    label: string;
+    satelliteState: OrbitState;
+    radiiMeters: [number, number, number];
+    opacity: number;
+    color: string;
+  } | null;
 };
 
 export type VisualizationModel = {
