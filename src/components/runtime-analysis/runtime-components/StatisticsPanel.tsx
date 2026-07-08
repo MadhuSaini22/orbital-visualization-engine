@@ -1,6 +1,6 @@
 "use client";
 
-export function StatisticsPanel({ title = "Statistics", stats }: { title?: string; stats: Record<string, string | number | boolean | null | undefined> }) {
+export function StatisticsPanel({ title = "Statistics", stats }: { title?: string; stats: Record<string, unknown> }) {
   const entries = Object.entries(stats).filter(([, value]) => value !== undefined && value !== null);
   if (entries.length === 0) return null;
   return (

@@ -21,8 +21,8 @@ export function RuntimeResultPanel({ result }: { result: RuntimeWorkspaceResult 
       ) : (
         <div className="space-y-3">
           <ResultSummary items={summaryItems(result)} />
-          {"statistics" in result && typeof result.statistics === "object" && result.statistics && <StatisticsPanel stats={result.statistics as Record<string, string | number | boolean>} />}
-          {"executionStatistics" in result && typeof result.executionStatistics === "object" && result.executionStatistics && <StatisticsPanel title="Execution Statistics" stats={result.executionStatistics as Record<string, string | number | boolean>} />}
+          {"statistics" in result && isStatsRecord(result.statistics) && <StatisticsPanel stats={result.statistics} />}
+          {"executionStatistics" in result && isStatsRecord(result.executionStatistics) && <StatisticsPanel title="Execution Statistics" stats={result.executionStatistics} />}
           <JsonViewer value={result} />
         </div>
       )}
@@ -67,4 +67,8 @@ function exportJson(filename: string, value: unknown) {
   anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+function isStatsRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

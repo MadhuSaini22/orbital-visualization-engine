@@ -15,7 +15,7 @@ import { validateRuntimeTimeRange } from "@/components/runtime-analysis/runtime-
 
 export function VisibilityPage({ onResult, onLoadingChange, onLog, onVisibility, onPrimaryNoradChange }: RuntimePageProps) {
   const [noradCatalogId, setNoradCatalogId] = useState("25544");
-  const [groundStationId, setGroundStationId] = useState("DEFAULT");
+  const [groundStationId, setGroundStationId] = useState("nasa-nen-wallops");
   const [start, setStart] = useState("2026-07-07T00:00");
   const [stop, setStop] = useState("2026-07-07T01:30");
   const [stepSeconds, setStepSeconds] = useState("60");
@@ -25,7 +25,7 @@ export function VisibilityPage({ onResult, onLoadingChange, onLog, onVisibility,
   const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
-    const validation = validate(noradCatalogId, start, stop, stepSeconds, minimumElevationDegrees);
+    const validation = validate(noradCatalogId, groundStationId, start, stop, stepSeconds, minimumElevationDegrees);
     if (validation) return setError(validation);
     setLoading(true); onLoadingChange(true); setError(null);
     try {
@@ -55,9 +55,10 @@ export function VisibilityPage({ onResult, onLoadingChange, onLog, onVisibility,
   );
 }
 
-function validate(norad: string, start: string, stop: string, step: string, elevation: string) {
+function validate(norad: string, groundStationId: string, start: string, stop: string, step: string, elevation: string) {
   const range = validateRuntimeTimeRange(start, stop);
   if (!Number.isInteger(Number(norad)) || Number(norad) <= 0) return "NORAD catalog ID must be a positive integer.";
+  if (!groundStationId.trim()) return "Ground station ID is required.";
   if (range.error) return range.error;
   if (!Number.isFinite(Number(step)) || Number(step) < 5 || Number(step) > 3600) return "Step must be between 5 and 3600 seconds.";
   if (!Number.isFinite(Number(elevation)) || Number(elevation) < -90 || Number(elevation) > 90) return "Minimum elevation must be between -90 and 90 degrees.";
