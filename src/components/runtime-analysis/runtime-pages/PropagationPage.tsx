@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { runRuntimePropagation, type RuntimePropagationResponse } from "@/services/orbitServerApi";
 import type { RuntimePageProps } from "@/components/runtime-analysis/RuntimeAnalysisWorkspace";
-import { SatelliteSelector } from "@/components/runtime-analysis/runtime-components/SatelliteSelector";
 import { TimeRangePicker } from "@/components/runtime-analysis/runtime-components/TimeRangePicker";
 import { StepSelector } from "@/components/runtime-analysis/runtime-components/StepSelector";
 import { AnalysisTable } from "@/components/runtime-analysis/runtime-components/AnalysisTable";
@@ -11,8 +10,7 @@ import { ResultSummary } from "@/components/runtime-analysis/runtime-components/
 import { ErrorPanel } from "@/components/runtime-analysis/runtime-components/ErrorPanel";
 import { validateRuntimeTimeRange } from "@/components/runtime-analysis/runtime-components/time";
 
-export function PropagationPage({ onResult, onLoadingChange, onLog, onPropagation, onPrimaryNoradChange }: RuntimePageProps) {
-  const [noradCatalogId, setNoradCatalogId] = useState("25544");
+export function PropagationPage({ primaryObject, primaryNoradCatalogId, onResult, onLoadingChange, onLog, onPropagation, onPrimaryNoradChange }: RuntimePageProps) {
   const [start, setStart] = useState("2026-07-07T00:00");
   const [stop, setStop] = useState("2026-07-07T01:30");
   const [stepSeconds, setStepSeconds] = useState("60");
@@ -21,11 +19,13 @@ export function PropagationPage({ onResult, onLoadingChange, onLog, onPropagatio
   const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
-    const validation = validate(noradCatalogId, start, stop, stepSeconds);
+    const validation = validate(primaryNoradCatalogId, start, stop, stepSeconds);
     if (validation) {
       setError(validation);
       return;
     }
+    const noradCatalogId = primaryNoradCatalogId;
+    if (!noradCatalogId) return;
     setLoading(true);
     onLoadingChange(true);
     setError(null);
@@ -50,7 +50,7 @@ export function PropagationPage({ onResult, onLoadingChange, onLog, onPropagatio
 
   return (
     <div className="space-y-4">
-      <SatelliteSelector label="NORAD Catalog ID" value={noradCatalogId} onChange={setNoradCatalogId} />
+      <ResultSummary items={[{ label: "Primary", value: primaryObject.label }, { label: "Source", value: primaryObject.source }, { label: "Catalog ID", value: primaryNoradCatalogId ?? "Direct orbit" }]} />
       <TimeRangePicker start={start} stop={stop} onStartChange={setStart} onStopChange={setStop} />
       <StepSelector value={stepSeconds} onChange={setStepSeconds} />
       <ErrorPanel message={error} />
@@ -65,10 +65,11 @@ export function PropagationPage({ onResult, onLoadingChange, onLog, onPropagatio
   );
 }
 
-function validate(norad: string, start: string, stop: string, step: string) {
+function validate(norad: string | null, start: string, stop: string, step: string) {
   const id = Number(norad);
   const seconds = Number(step);
   const range = validateRuntimeTimeRange(start, stop);
+  if (!norad) return "This runtime endpoint requires a catalog NORAD ID. Use an orbit with NORAD metadata, imported TLE, or Advanced Catalog NORAD.";
   if (!Number.isInteger(id) || id <= 0) return "NORAD catalog ID must be a positive integer.";
   if (range.error) return range.error;
   if (!Number.isFinite(seconds) || seconds < 5 || seconds > 3600) return "Step must be between 5 and 3600 seconds.";

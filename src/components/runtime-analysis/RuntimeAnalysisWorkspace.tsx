@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import type { SatelliteObject, SatelliteSnapshot } from "@/domain/orbit";
 import { RuntimeSidebar, runtimePages } from "@/components/runtime-analysis/RuntimeSidebar";
 import { RuntimeToolbar } from "@/components/runtime-analysis/RuntimeToolbar";
 import { RuntimeVisualizationPanel } from "@/components/runtime-analysis/RuntimeVisualizationPanel";
@@ -26,6 +27,26 @@ import type {
   RuntimeSatelliteResponse,
   RuntimeVisibilityResult,
 } from "@/services/orbitServerApi";
+
+export type RuntimePrimaryCandidate = {
+  id: string;
+  label: string;
+  source: string;
+  noradCatalogId: string | null;
+  satellite: SatelliteObject | null;
+  snapshot?: SatelliteSnapshot | null;
+};
+
+export type RuntimePrimaryObjectContext = {
+  currentOrbit: RuntimePrimaryCandidate | null;
+  importedTleSatellites: RuntimePrimaryCandidate[];
+};
+
+export type RuntimePrimarySelectionMode = "current-orbit" | "imported-tle" | "catalog-search";
+
+export type RuntimePrimarySelection = RuntimePrimaryCandidate & {
+  mode: RuntimePrimarySelectionMode;
+};
 
 export type RuntimePageId =
   | "satellite"
@@ -57,6 +78,8 @@ export type RuntimeLogEntry = {
 
 export type RuntimePageProps = {
   lastPairwiseConjunction: RuntimeConjunctionResult | null;
+  primaryObject: RuntimePrimarySelection;
+  primaryNoradCatalogId: string | null;
   onResult: (result: Exclude<RuntimeWorkspaceResult, null>) => void;
   onLoadingChange: (loading: boolean) => void;
   onLog: (message: string) => void;
@@ -71,7 +94,12 @@ export type RuntimePageProps = {
   onPrimaryNoradChange: (noradCatalogId: string) => void;
 };
 
-export function RuntimeAnalysisWorkspace() {
+const emptyPrimaryContext: RuntimePrimaryObjectContext = {
+  currentOrbit: null,
+  importedTleSatellites: [],
+};
+
+export function RuntimeAnalysisWorkspace({ primaryContext = emptyPrimaryContext }: { primaryContext?: RuntimePrimaryObjectContext }) {
   const [activePage, setActivePage] = useState<RuntimePageId>("satellite");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<RuntimeWorkspaceResult>(null);
@@ -84,11 +112,38 @@ export function RuntimeAnalysisWorkspace() {
   const [lastCatalogScreening, setLastCatalogScreening] = useState<RuntimeCatalogConjunctionResult | null>(null);
   const [lastCollisionProbability, setLastCollisionProbability] = useState<RuntimeCollisionProbabilityResult | null>(null);
   const [lastCovariancePropagation, setLastCovariancePropagation] = useState<RuntimeCovariancePropagationResponse | null>(null);
-  const [primaryNorad, setPrimaryNorad] = useState("25544");
+  const [primaryNorad, setPrimaryNorad] = useState("");
+  const [selectedImportedId, setSelectedImportedId] = useState("");
+  const [catalogSearchNorad, setCatalogSearchNorad] = useState("");
   const activeLabel = useMemo(() => runtimePages.find((page) => page.id === activePage)?.label ?? "Runtime Analysis", [activePage]);
+  const selectedImportedCandidate = useMemo(() => {
+    const imported = primaryContext.importedTleSatellites;
+    if (imported.length === 0) return null;
+    return imported.find((candidate) => candidate.id === selectedImportedId) ?? imported[0];
+  }, [primaryContext.importedTleSatellites, selectedImportedId]);
+  const primaryObject = useMemo<RuntimePrimarySelection>(() => {
+    if (primaryContext.currentOrbit) {
+      return { ...primaryContext.currentOrbit, mode: "current-orbit" };
+    }
+    if (selectedImportedCandidate) {
+      return { ...selectedImportedCandidate, mode: "imported-tle" };
+    }
+    return {
+      id: "catalog-search",
+      label: catalogSearchNorad.trim() ? `NORAD ${catalogSearchNorad.trim()}` : "Catalog Search",
+      source: "Catalog Search",
+      noradCatalogId: catalogSearchNorad.trim() || null,
+      satellite: null,
+      snapshot: null,
+      mode: "catalog-search",
+    };
+  }, [catalogSearchNorad, primaryContext.currentOrbit, selectedImportedCandidate]);
+  const primaryNoradCatalogId = primaryObject.noradCatalogId;
 
   const pageProps: RuntimePageProps = {
     lastPairwiseConjunction,
+    primaryObject,
+    primaryNoradCatalogId,
     onResult: setResult,
     onLoadingChange: setLoading,
     onLog: (message) => setLogs((current) => [{ time: new Date().toISOString(), message }, ...current].slice(0, 30)),
@@ -111,6 +166,14 @@ export function RuntimeAnalysisWorkspace() {
           <RuntimeSidebar activePage={activePage} onPageChange={setActivePage} />
           <section className="thin-scrollbar min-h-0 overflow-auto border-r border-cyan-300/15 bg-[#071016] p-4 max-xl:border-r-0 max-xl:border-b">
             <PanelTitle eyebrow="Analysis Inputs" title={activeLabel} />
+            <RuntimePrimaryObjectPanel
+              primaryObject={primaryObject}
+              importedCandidates={primaryContext.importedTleSatellites}
+              selectedImportedId={selectedImportedCandidate?.id ?? selectedImportedId}
+              onSelectedImportedIdChange={setSelectedImportedId}
+              catalogSearchNorad={catalogSearchNorad}
+              onCatalogSearchNoradChange={setCatalogSearchNorad}
+            />
             <div className="mt-4">{renderPage(activePage, pageProps)}</div>
           </section>
           <RuntimeVisualizationPanel
@@ -124,12 +187,66 @@ export function RuntimeAnalysisWorkspace() {
             collisionProbability={lastCollisionProbability}
             covariancePropagation={lastCovariancePropagation}
             loading={loading}
-            fallbackNorad={primaryNorad}
+            fallbackNorad={primaryNoradCatalogId ?? primaryNorad}
           />
           <RuntimeResultPanel result={result} />
         </div>
         <RuntimeBottomPanel result={result} logs={logs} />
       </div>
+    </div>
+  );
+}
+
+function RuntimePrimaryObjectPanel({
+  primaryObject,
+  importedCandidates,
+  selectedImportedId,
+  onSelectedImportedIdChange,
+  catalogSearchNorad,
+  onCatalogSearchNoradChange,
+}: {
+  primaryObject: RuntimePrimarySelection;
+  importedCandidates: RuntimePrimaryCandidate[];
+  selectedImportedId: string;
+  onSelectedImportedIdChange: (id: string) => void;
+  catalogSearchNorad: string;
+  onCatalogSearchNoradChange: (value: string) => void;
+}) {
+  return (
+    <div className="mt-4 border border-cyan-300/20 bg-black/25 p-3">
+      <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-cyan-300">Primary Object</p>
+      <div className="mt-2 grid gap-1 text-sm">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-zinc-500">Object</span>
+          <span className="truncate text-right font-semibold text-white">{primaryObject.label}</span>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-zinc-500">Source:</span>
+          <span className="text-right text-cyan-100">{primaryObject.source}</span>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-zinc-500">Catalog ID</span>
+          <span className="text-right font-mono text-zinc-200">{primaryObject.noradCatalogId ?? "Direct orbit"}</span>
+        </div>
+      </div>
+
+      {primaryObject.mode === "imported-tle" && importedCandidates.length > 0 && (
+        <label className="mt-3 block">
+          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Imported TLE Primary</span>
+          <select value={selectedImportedId} onChange={(event) => onSelectedImportedIdChange(event.target.value)} className="mt-1 w-full border border-cyan-300/25 bg-black/45 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-cyan-300">
+            {importedCandidates.map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>{candidate.label}</option>
+            ))}
+          </select>
+        </label>
+      )}
+
+      {primaryObject.mode === "catalog-search" && (
+        <label className="mt-3 block">
+          <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-300/70">Advanced Catalog NORAD</span>
+          <input value={catalogSearchNorad} inputMode="numeric" onChange={(event) => onCatalogSearchNoradChange(event.target.value)} placeholder="Enter NORAD catalog ID" className="mt-1 w-full border border-cyan-300/25 bg-black/45 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-cyan-300" />
+        </label>
+      )}
     </div>
   );
 }

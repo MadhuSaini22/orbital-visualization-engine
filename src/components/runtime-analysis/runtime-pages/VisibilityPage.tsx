@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { runRuntimeVisibility, type RuntimeVisibilityResult } from "@/services/orbitServerApi";
 import type { RuntimePageProps } from "@/components/runtime-analysis/RuntimeAnalysisWorkspace";
-import { SatelliteSelector } from "@/components/runtime-analysis/runtime-components/SatelliteSelector";
 import { TimeRangePicker } from "@/components/runtime-analysis/runtime-components/TimeRangePicker";
 import { StepSelector } from "@/components/runtime-analysis/runtime-components/StepSelector";
 import { GroundStationSelector } from "@/components/runtime-analysis/runtime-components/GroundStationSelector";
@@ -13,8 +12,7 @@ import { ResultSummary } from "@/components/runtime-analysis/runtime-components/
 import { ErrorPanel } from "@/components/runtime-analysis/runtime-components/ErrorPanel";
 import { validateRuntimeTimeRange } from "@/components/runtime-analysis/runtime-components/time";
 
-export function VisibilityPage({ onResult, onLoadingChange, onLog, onVisibility, onPrimaryNoradChange }: RuntimePageProps) {
-  const [noradCatalogId, setNoradCatalogId] = useState("25544");
+export function VisibilityPage({ primaryObject, primaryNoradCatalogId, onResult, onLoadingChange, onLog, onVisibility, onPrimaryNoradChange }: RuntimePageProps) {
   const [groundStationId, setGroundStationId] = useState("nasa-nen-wallops");
   const [start, setStart] = useState("2026-07-07T00:00");
   const [stop, setStop] = useState("2026-07-07T01:30");
@@ -25,8 +23,10 @@ export function VisibilityPage({ onResult, onLoadingChange, onLog, onVisibility,
   const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
-    const validation = validate(noradCatalogId, groundStationId, start, stop, stepSeconds, minimumElevationDegrees);
+    const validation = validate(primaryNoradCatalogId, groundStationId, start, stop, stepSeconds, minimumElevationDegrees);
     if (validation) return setError(validation);
+    const noradCatalogId = primaryNoradCatalogId;
+    if (!noradCatalogId) return;
     setLoading(true); onLoadingChange(true); setError(null);
     try {
       const range = validateRuntimeTimeRange(start, stop);
@@ -43,7 +43,7 @@ export function VisibilityPage({ onResult, onLoadingChange, onLog, onVisibility,
 
   return (
     <div className="space-y-4">
-      <SatelliteSelector label="NORAD Catalog ID" value={noradCatalogId} onChange={setNoradCatalogId} />
+      <ResultSummary items={[{ label: "Primary", value: primaryObject.label }, { label: "Source", value: primaryObject.source }, { label: "Catalog ID", value: primaryNoradCatalogId ?? "Direct orbit" }]} />
       <GroundStationSelector value={groundStationId} onChange={setGroundStationId} />
       <TimeRangePicker start={start} stop={stop} onStartChange={setStart} onStopChange={setStop} />
       <StepSelector value={stepSeconds} onChange={setStepSeconds} />
@@ -55,8 +55,9 @@ export function VisibilityPage({ onResult, onLoadingChange, onLog, onVisibility,
   );
 }
 
-function validate(norad: string, groundStationId: string, start: string, stop: string, step: string, elevation: string) {
+function validate(norad: string | null, groundStationId: string, start: string, stop: string, step: string, elevation: string) {
   const range = validateRuntimeTimeRange(start, stop);
+  if (!norad) return "This runtime endpoint requires a catalog NORAD ID. Use an orbit with NORAD metadata, imported TLE, or Advanced Catalog NORAD.";
   if (!Number.isInteger(Number(norad)) || Number(norad) <= 0) return "NORAD catalog ID must be a positive integer.";
   if (!groundStationId.trim()) return "Ground station ID is required.";
   if (range.error) return range.error;

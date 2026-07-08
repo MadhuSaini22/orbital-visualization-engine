@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { runRuntimeCatalogScreening, type RuntimeCatalogConjunctionResult, type RuntimeRelativeFrame } from "@/services/orbitServerApi";
 import type { RuntimePageProps } from "@/components/runtime-analysis/RuntimeAnalysisWorkspace";
-import { SatelliteSelector } from "@/components/runtime-analysis/runtime-components/SatelliteSelector";
 import { TimeRangePicker } from "@/components/runtime-analysis/runtime-components/TimeRangePicker";
 import { StepSelector } from "@/components/runtime-analysis/runtime-components/StepSelector";
 import { RelativeFrameSelector } from "@/components/runtime-analysis/runtime-components/RelativeFrameSelector";
@@ -14,8 +13,7 @@ import { StatisticsPanel } from "@/components/runtime-analysis/runtime-component
 import { ErrorPanel } from "@/components/runtime-analysis/runtime-components/ErrorPanel";
 import { validateRuntimeTimeRange } from "@/components/runtime-analysis/runtime-components/time";
 
-export function CatalogScreeningPage({ onResult, onLoadingChange, onLog, onCatalogScreening, onPrimaryNoradChange }: RuntimePageProps) {
-  const [primaryNoradCatalogId, setPrimaryNoradCatalogId] = useState("25544");
+export function CatalogScreeningPage({ primaryObject, primaryNoradCatalogId, onResult, onLoadingChange, onLog, onCatalogScreening, onPrimaryNoradChange }: RuntimePageProps) {
   const [start, setStart] = useState("2026-07-07T00:00");
   const [stop, setStop] = useState("2026-07-07T01:30");
   const [stepSeconds, setStepSeconds] = useState("60");
@@ -29,12 +27,14 @@ export function CatalogScreeningPage({ onResult, onLoadingChange, onLog, onCatal
   const run = async () => {
     const validation = validate(primaryNoradCatalogId, start, stop, stepSeconds, missDistanceThresholdMeters);
     if (validation) return setError(validation);
+    const primaryNorad = primaryNoradCatalogId;
+    if (!primaryNorad) return;
     setLoading(true); onLoadingChange(true); setError(null);
     try {
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
-      const next = await runRuntimeCatalogScreening({ primaryNoradCatalogId: Number(primaryNoradCatalogId), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, relativeFrame, missDistanceThresholdMeters: Number(missDistanceThresholdMeters) });
-      setResult(next); onResult(next); onCatalogScreening(next); onPrimaryNoradChange(primaryNoradCatalogId); onLog("Catalog Screening completed.");
+      const next = await runRuntimeCatalogScreening({ primaryNoradCatalogId: Number(primaryNorad), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, relativeFrame, missDistanceThresholdMeters: Number(missDistanceThresholdMeters) });
+      setResult(next); onResult(next); onCatalogScreening(next); onPrimaryNoradChange(primaryNorad); onLog("Catalog Screening completed.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Catalog screening request failed.";
       setError(message); onLog(`Catalog Screening failed: ${message}`);
@@ -46,7 +46,7 @@ export function CatalogScreeningPage({ onResult, onLoadingChange, onLog, onCatal
 
   return (
     <div className="space-y-4">
-      <SatelliteSelector label="Primary NORAD" value={primaryNoradCatalogId} onChange={setPrimaryNoradCatalogId} />
+      <ResultSummary items={[{ label: "Primary", value: primaryObject.label }, { label: "Source", value: primaryObject.source }, { label: "Catalog ID", value: primaryNoradCatalogId ?? "Direct orbit" }]} />
       <TimeRangePicker start={start} stop={stop} onStartChange={setStart} onStopChange={setStop} />
       <StepSelector value={stepSeconds} onChange={setStepSeconds} />
       <RelativeFrameSelector value={relativeFrame} onChange={setRelativeFrame} />
@@ -58,8 +58,9 @@ export function CatalogScreeningPage({ onResult, onLoadingChange, onLog, onCatal
   );
 }
 
-function validate(primary: string, start: string, stop: string, step: string, threshold: string) {
+function validate(primary: string | null, start: string, stop: string, step: string, threshold: string) {
   const range = validateRuntimeTimeRange(start, stop);
+  if (!primary) return "This runtime endpoint requires a primary catalog NORAD ID. Use an orbit with NORAD metadata, imported TLE, or Advanced Catalog NORAD.";
   if (!Number.isInteger(Number(primary)) || Number(primary) <= 0) return "Primary NORAD must be a positive integer.";
   if (range.error) return range.error;
   if (!Number.isFinite(Number(step)) || Number(step) < 5 || Number(step) > 3600) return "Step must be between 5 and 3600 seconds.";

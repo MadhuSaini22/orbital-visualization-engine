@@ -14,7 +14,7 @@ import {
   groundOpsHorizonOptions,
   type GroundOpsHorizon,
 } from "@/components/ground-operations/GroundOperationsModal";
-import { RuntimeAnalysisWorkspace } from "@/components/runtime-analysis/RuntimeAnalysisWorkspace";
+import { RuntimeAnalysisWorkspace, type RuntimePrimaryObjectContext } from "@/components/runtime-analysis/RuntimeAnalysisWorkspace";
 import {
   GroundStationScenarioProvider,
   useGroundStationScenario,
@@ -419,6 +419,11 @@ function getRangePair(selectedSatelliteIds: string[]) {
     primaryId: selectedSatelliteIds[0] ?? "",
     secondaryId: selectedSatelliteIds[1] ?? "",
   };
+}
+
+function catalogIdFromSatellite(satellite: SatelliteObject | null | undefined) {
+  const candidate = satellite?.noradId ?? (satellite?.sourceType !== "MANUAL_STATE" ? satellite?.id : null);
+  return candidate && /^\d+$/.test(candidate) ? candidate : null;
 }
 
 function addMinutes(date: Date, minutes: number) {
@@ -1894,6 +1899,34 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     }
     return null;
   }, [activeWorkspaceOrbitId, manualOrbitId, orbitLibrary, selectedNoradId]);
+  const runtimePrimaryContext = useMemo<RuntimePrimaryObjectContext>(() => {
+    const currentOrbitSnapshot = activeWorkspaceOrbitId || activeDataSource === "manual" || activeDataSource === "backend"
+      ? selectedSnapshot
+      : null;
+    const currentOrbit = currentOrbitSnapshot?.satellite
+      ? {
+        id: activeStoredOrbit?.orbitId ?? currentOrbitSnapshot.satellite.id,
+        label: "Current Orbit",
+        source: "Orbit Workspace",
+        noradCatalogId: catalogIdFromSatellite(currentOrbitSnapshot.satellite),
+        satellite: currentOrbitSnapshot.satellite,
+        snapshot: currentOrbitSnapshot,
+      }
+      : null;
+    const importedTleSatellites = activeDataSource === "endpoint"
+      ? satellites
+        .filter((satellite) => Boolean(satellite.tle && catalogIdFromSatellite(satellite)))
+        .map((satellite) => ({
+          id: satellite.id,
+          label: satellite.name,
+          source: "Imported TLE",
+          noradCatalogId: catalogIdFromSatellite(satellite),
+          satellite,
+          snapshot: snapshots.find((snapshot) => snapshot.satellite.id === satellite.id) ?? null,
+        }))
+      : [];
+    return { currentOrbit, importedTleSatellites };
+  }, [activeDataSource, activeStoredOrbit, activeWorkspaceOrbitId, satellites, selectedSnapshot, snapshots]);
   const groundOperationsOrbitId = (
     activeStoredOrbit?.orbitId
     ?? activeWorkspaceOrbitId
@@ -4318,7 +4351,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
 
       {activeCommandModal === "proximity" && (
         <CommandModal title="Satellite Proximity" onClose={() => setActiveCommandModal(null)} size="runtime">
-          <RuntimeAnalysisWorkspace />
+          <RuntimeAnalysisWorkspace primaryContext={runtimePrimaryContext} />
         </CommandModal>
       )}
 

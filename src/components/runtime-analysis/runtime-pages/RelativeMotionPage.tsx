@@ -12,8 +12,7 @@ import { ResultSummary } from "@/components/runtime-analysis/runtime-components/
 import { ErrorPanel } from "@/components/runtime-analysis/runtime-components/ErrorPanel";
 import { validateRuntimeTimeRange } from "@/components/runtime-analysis/runtime-components/time";
 
-export function RelativeMotionPage({ onResult, onLoadingChange, onLog, onRelativeMotion, onPrimaryNoradChange }: RuntimePageProps) {
-  const [primaryNoradCatalogId, setPrimaryNoradCatalogId] = useState("25544");
+export function RelativeMotionPage({ primaryObject, primaryNoradCatalogId, onResult, onLoadingChange, onLog, onRelativeMotion, onPrimaryNoradChange }: RuntimePageProps) {
   const [secondaryNoradCatalogId, setSecondaryNoradCatalogId] = useState("40967");
   const [start, setStart] = useState("2026-07-07T00:00");
   const [stop, setStop] = useState("2026-07-07T01:30");
@@ -26,12 +25,14 @@ export function RelativeMotionPage({ onResult, onLoadingChange, onLog, onRelativ
   const run = async () => {
     const validation = validate(primaryNoradCatalogId, secondaryNoradCatalogId, start, stop, stepSeconds);
     if (validation) return setError(validation);
+    const primaryNorad = primaryNoradCatalogId;
+    if (!primaryNorad) return;
     setLoading(true); onLoadingChange(true); setError(null);
     try {
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
-      const next = await runRuntimeRelativeMotion({ primaryNoradCatalogId: Number(primaryNoradCatalogId), secondaryNoradCatalogId: Number(secondaryNoradCatalogId), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, frame });
-      setResult(next); onResult(next); onRelativeMotion(next); onPrimaryNoradChange(primaryNoradCatalogId); onLog("Relative Motion completed.");
+      const next = await runRuntimeRelativeMotion({ primaryNoradCatalogId: Number(primaryNorad), secondaryNoradCatalogId: Number(secondaryNoradCatalogId), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, frame });
+      setResult(next); onResult(next); onRelativeMotion(next); onPrimaryNoradChange(primaryNorad); onLog("Relative Motion completed.");
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Relative motion request failed.";
       setError(message); onLog(`Relative Motion failed: ${message}`);
@@ -42,7 +43,7 @@ export function RelativeMotionPage({ onResult, onLoadingChange, onLog, onRelativ
 
   return (
     <div className="space-y-4">
-      <SatelliteSelector label="Primary NORAD" value={primaryNoradCatalogId} onChange={setPrimaryNoradCatalogId} />
+      <ResultSummary items={[{ label: "Primary", value: primaryObject.label }, { label: "Source", value: primaryObject.source }, { label: "Catalog ID", value: primaryNoradCatalogId ?? "Direct orbit" }]} />
       <SatelliteSelector label="Secondary NORAD" value={secondaryNoradCatalogId} onChange={setSecondaryNoradCatalogId} />
       <TimeRangePicker start={start} stop={stop} onStartChange={setStart} onStopChange={setStop} />
       <StepSelector value={stepSeconds} onChange={setStepSeconds} />
@@ -54,8 +55,9 @@ export function RelativeMotionPage({ onResult, onLoadingChange, onLog, onRelativ
   );
 }
 
-function validate(primary: string, secondary: string, start: string, stop: string, step: string) {
+function validate(primary: string | null, secondary: string, start: string, stop: string, step: string) {
   const range = validateRuntimeTimeRange(start, stop);
+  if (!primary) return "This runtime endpoint requires a primary catalog NORAD ID. Use an orbit with NORAD metadata, imported TLE, or Advanced Catalog NORAD.";
   if (!Number.isInteger(Number(primary)) || Number(primary) <= 0) return "Primary NORAD must be a positive integer.";
   if (!Number.isInteger(Number(secondary)) || Number(secondary) <= 0) return "Secondary NORAD must be a positive integer.";
   if (primary === secondary) return "Primary and secondary satellites must differ.";
