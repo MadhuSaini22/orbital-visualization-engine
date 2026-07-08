@@ -26,17 +26,18 @@ export function PairwiseConjunctionPage({ primaryObject, primaryNoradCatalogId, 
   const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
-    const validation = validate(primaryNoradCatalogId, primaryObject.orbitId ?? null, secondaryNoradCatalogId, start, stop, stepSeconds, missDistanceThresholdMeters);
+    const hasDirectOrbit = Boolean(primaryObject.orbitId || primaryObject.orbitDefinition);
+    const validation = validate(primaryNoradCatalogId, hasDirectOrbit ? "direct-orbit" : null, secondaryNoradCatalogId, start, stop, stepSeconds, missDistanceThresholdMeters);
     if (validation) return setError(validation);
     const primaryNorad = primaryNoradCatalogId;
-    if (!primaryNorad && !primaryObject.orbitId) return;
+    if (!primaryNorad && !hasDirectOrbit) return;
     setLoading(true); onLoadingChange(true); setError(null);
     try {
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
-      const next = primaryObject.orbitId
+      const next = hasDirectOrbit
         ? await runRuntimeOrbitPairwiseConjunction({
-          primaryObject: manualOrbitRuntimeRef(primaryObject.orbitId),
+          primaryObject: manualOrbitRuntimeRef(primaryObject.orbitId, primaryObject.orbitDefinition),
           secondaryObject: catalogRuntimeRef(secondaryNoradCatalogId),
           startTime: range.startIso,
           stopTime: range.stopIso,

@@ -20,16 +20,17 @@ export function EclipsePage({ primaryObject, primaryNoradCatalogId, onResult, on
   const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
-    const validation = validate(primaryNoradCatalogId, primaryObject.orbitId ?? null, start, stop, stepSeconds);
+    const hasDirectOrbit = Boolean(primaryObject.orbitId || primaryObject.orbitDefinition);
+    const validation = validate(primaryNoradCatalogId, hasDirectOrbit ? "direct-orbit" : null, start, stop, stepSeconds);
     if (validation) return setError(validation);
     const noradCatalogId = primaryNoradCatalogId;
-    if (!noradCatalogId && !primaryObject.orbitId) return;
+    if (!noradCatalogId && !hasDirectOrbit) return;
     setLoading(true); onLoadingChange(true); setError(null);
     try {
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
-      const next = primaryObject.orbitId
-        ? await runRuntimeOrbitEclipse({ primaryObject: manualOrbitRuntimeRef(primaryObject.orbitId), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, propagatorType: null })
+      const next = hasDirectOrbit
+        ? await runRuntimeOrbitEclipse({ primaryObject: manualOrbitRuntimeRef(primaryObject.orbitId, primaryObject.orbitDefinition), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, propagatorType: null })
         : await runRuntimeEclipse({ noradCatalogId: Number(noradCatalogId), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S` });
       setResult(next); onResult(next); onEclipse(next); if (noradCatalogId) onPrimaryNoradChange(noradCatalogId); onLog("Eclipse completed.");
     } catch (caught) {

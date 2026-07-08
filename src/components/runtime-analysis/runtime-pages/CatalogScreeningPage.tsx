@@ -26,16 +26,17 @@ export function CatalogScreeningPage({ primaryObject, primaryNoradCatalogId, onR
   const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
-    const validation = validate(primaryNoradCatalogId, primaryObject.orbitId ?? null, start, stop, stepSeconds, missDistanceThresholdMeters);
+    const hasDirectOrbit = Boolean(primaryObject.orbitId || primaryObject.orbitDefinition);
+    const validation = validate(primaryNoradCatalogId, hasDirectOrbit ? "direct-orbit" : null, start, stop, stepSeconds, missDistanceThresholdMeters);
     if (validation) return setError(validation);
     const primaryNorad = primaryNoradCatalogId;
-    if (!primaryNorad && !primaryObject.orbitId) return;
+    if (!primaryNorad && !hasDirectOrbit) return;
     setLoading(true); onLoadingChange(true); setError(null);
     try {
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
-      const next = primaryObject.orbitId
-        ? await runRuntimeOrbitCatalogScreening({ primaryObject: manualOrbitRuntimeRef(primaryObject.orbitId), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, relativeFrame, missDistanceThresholdMeters: Number(missDistanceThresholdMeters), propagatorType: null })
+      const next = hasDirectOrbit
+        ? await runRuntimeOrbitCatalogScreening({ primaryObject: manualOrbitRuntimeRef(primaryObject.orbitId, primaryObject.orbitDefinition), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, relativeFrame, missDistanceThresholdMeters: Number(missDistanceThresholdMeters), propagatorType: null })
         : await runRuntimeCatalogScreening({ primaryNoradCatalogId: Number(primaryNorad), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, relativeFrame, missDistanceThresholdMeters: Number(missDistanceThresholdMeters) });
       setResult(next); onResult(next); onCatalogScreening(next); if (primaryNorad) onPrimaryNoradChange(primaryNorad); onLog("Catalog Screening completed.");
     } catch (caught) {

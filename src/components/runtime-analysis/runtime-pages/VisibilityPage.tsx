@@ -24,16 +24,17 @@ export function VisibilityPage({ primaryObject, primaryNoradCatalogId, onResult,
   const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
-    const validation = validate(primaryNoradCatalogId, primaryObject.orbitId ?? null, groundStationId, start, stop, stepSeconds, minimumElevationDegrees);
+    const hasDirectOrbit = Boolean(primaryObject.orbitId || primaryObject.orbitDefinition);
+    const validation = validate(primaryNoradCatalogId, hasDirectOrbit ? "direct-orbit" : null, groundStationId, start, stop, stepSeconds, minimumElevationDegrees);
     if (validation) return setError(validation);
     const noradCatalogId = primaryNoradCatalogId;
-    if (!noradCatalogId && !primaryObject.orbitId) return;
+    if (!noradCatalogId && !hasDirectOrbit) return;
     setLoading(true); onLoadingChange(true); setError(null);
     try {
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
-      const next = primaryObject.orbitId
-        ? await runRuntimeOrbitVisibility({ primaryObject: manualOrbitRuntimeRef(primaryObject.orbitId), groundStationId: { value: groundStationId.trim() }, startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, minimumElevationDegrees: Number(minimumElevationDegrees), propagatorType: null })
+      const next = hasDirectOrbit
+        ? await runRuntimeOrbitVisibility({ primaryObject: manualOrbitRuntimeRef(primaryObject.orbitId, primaryObject.orbitDefinition), groundStationId: { value: groundStationId.trim() }, startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, minimumElevationDegrees: Number(minimumElevationDegrees), propagatorType: null })
         : await runRuntimeVisibility({ noradCatalogId: Number(noradCatalogId), groundStationId: { value: groundStationId.trim() }, startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, minimumElevationDegrees: Number(minimumElevationDegrees) });
       setResult(next); onResult(next); onVisibility(next); if (noradCatalogId) onPrimaryNoradChange(noradCatalogId); onLog("Visibility completed.");
     } catch (caught) {

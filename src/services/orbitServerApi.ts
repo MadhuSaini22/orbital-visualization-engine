@@ -357,8 +357,8 @@ export type RuntimeSatelliteResponse = {
 };
 
 export type RuntimeObjectRef =
-  | { type: "CATALOG_NORAD"; noradCatalogId: number; orbitId?: null }
-  | { type: "MANUAL_ORBIT"; orbitId: string; noradCatalogId?: null };
+  | { type: "CATALOG_NORAD"; noradCatalogId: number; orbitId?: null; orbitDefinition?: null }
+  | { type: "MANUAL_ORBIT"; orbitId?: string | null; noradCatalogId?: null; orbitDefinition?: CreateManualOrbitRequest | null };
 
 export type RuntimeCartesianVector = {
   xMeters: number;

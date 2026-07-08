@@ -1910,6 +1910,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
         source: "Orbit Workspace",
         noradCatalogId: catalogIdFromSatellite(currentOrbitSnapshot.satellite),
         orbitId: activeStoredOrbit?.orbitDefinition.backendManualOrbitId ?? manualOrbitId,
+        orbitDefinition: activeStoredOrbit?.orbitDefinition.manualRequest ?? null,
         satellite: currentOrbitSnapshot.satellite,
         snapshot: currentOrbitSnapshot,
       }
@@ -1923,6 +1924,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
           source: "Imported TLE",
           noradCatalogId: catalogIdFromSatellite(satellite),
           orbitId: null,
+          orbitDefinition: null,
           satellite,
           snapshot: snapshots.find((snapshot) => snapshot.satellite.id === satellite.id) ?? null,
         }))

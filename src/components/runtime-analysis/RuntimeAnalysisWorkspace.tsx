@@ -17,6 +17,7 @@ import { CatalogScreeningPage } from "@/components/runtime-analysis/runtime-page
 import { CollisionProbabilityPage } from "@/components/runtime-analysis/runtime-pages/CollisionProbabilityPage";
 import { CovariancePropagationPage } from "@/components/runtime-analysis/runtime-pages/CovariancePropagationPage";
 import type {
+  CreateManualOrbitRequest,
   RuntimeCatalogConjunctionResult,
   RuntimeCollisionProbabilityResult,
   RuntimeConjunctionResult,
@@ -34,6 +35,7 @@ export type RuntimePrimaryCandidate = {
   source: string;
   noradCatalogId: string | null;
   orbitId?: string | null;
+  orbitDefinition?: CreateManualOrbitRequest | null;
   satellite: SatelliteObject | null;
   snapshot?: SatelliteSnapshot | null;
 };

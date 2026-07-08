@@ -20,21 +20,22 @@ export function PropagationPage({ primaryObject, primaryNoradCatalogId, onResult
   const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
-    const validation = validate(primaryNoradCatalogId, primaryObject.orbitId ?? null, start, stop, stepSeconds);
+    const hasDirectOrbit = Boolean(primaryObject.orbitId || primaryObject.orbitDefinition);
+    const validation = validate(primaryNoradCatalogId, hasDirectOrbit ? "direct-orbit" : null, start, stop, stepSeconds);
     if (validation) {
       setError(validation);
       return;
     }
     const noradCatalogId = primaryNoradCatalogId;
-    if (!noradCatalogId && !primaryObject.orbitId) return;
+    if (!noradCatalogId && !hasDirectOrbit) return;
     setLoading(true);
     onLoadingChange(true);
     setError(null);
     try {
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
-      const next = primaryObject.orbitId
-        ? await runRuntimeOrbitPropagation({ primaryObject: manualOrbitRuntimeRef(primaryObject.orbitId), start: range.startIso, end: range.stopIso, stepSeconds: Number(stepSeconds), propagatorType: null })
+      const next = hasDirectOrbit
+        ? await runRuntimeOrbitPropagation({ primaryObject: manualOrbitRuntimeRef(primaryObject.orbitId, primaryObject.orbitDefinition), start: range.startIso, end: range.stopIso, stepSeconds: Number(stepSeconds), propagatorType: null })
         : await runRuntimePropagation({ noradCatalogId: Number(noradCatalogId), start: range.startIso, end: range.stopIso, stepSeconds: Number(stepSeconds), model: null });
       setResult(next);
       onResult(next);

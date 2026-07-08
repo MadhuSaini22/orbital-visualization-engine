@@ -40,7 +40,7 @@ public class RuntimeOrbitAnalysisSupport {
     }
     return switch (object.type()) {
       case CATALOG_NORAD -> propagateCatalog(object.noradCatalogId(), startTime, stopTime, step);
-      case MANUAL_ORBIT -> propagateManualOrbit(object.orbitId(), startTime, stopTime, step, propagatorType);
+      case MANUAL_ORBIT -> propagateManualOrbit(object, startTime, stopTime, step, propagatorType);
     };
   }
 
@@ -48,7 +48,10 @@ public class RuntimeOrbitAnalysisSupport {
     if (object.type() == RuntimeObjectType.CATALOG_NORAD) {
       return object.noradCatalogId();
     }
-    return Math.floorMod(object.orbitId().hashCode(), Integer.MAX_VALUE - 1) + 1;
+    String stableKey = object.orbitId() != null
+        ? object.orbitId()
+        : object.orbitDefinition().name() + ":" + object.orbitDefinition().type();
+    return Math.floorMod(stableKey.hashCode(), Integer.MAX_VALUE - 1) + 1;
   }
 
   private PropagationResult propagateCatalog(
@@ -61,15 +64,41 @@ public class RuntimeOrbitAnalysisSupport {
   }
 
   private PropagationResult propagateManualOrbit(
-      String orbitId,
+      RuntimeObjectRef object,
       Instant startTime,
       Instant stopTime,
       Duration step,
       PropagatorType propagatorType) {
     int stepSeconds = Math.toIntExact(step.toSeconds());
-    List<PropagatedState> states = manualOrbitService
-        .propagate(orbitId, startTime, stopTime, stepSeconds, propagatorType)
-        .stream()
+    List<EphemerisState> ephemerisStates;
+    if (object.orbitId() != null) {
+      try {
+        ephemerisStates = manualOrbitService.propagate(
+            object.orbitId(),
+            startTime,
+            stopTime,
+            stepSeconds,
+            propagatorType);
+      } catch (IllegalArgumentException exception) {
+        if (object.orbitDefinition() == null) {
+          throw exception;
+        }
+        ephemerisStates = manualOrbitService.propagate(
+            object.orbitDefinition(),
+            startTime,
+            stopTime,
+            stepSeconds,
+            propagatorType);
+      }
+    } else {
+      ephemerisStates = manualOrbitService.propagate(
+          object.orbitDefinition(),
+          startTime,
+          stopTime,
+          stepSeconds,
+          propagatorType);
+    }
+    List<PropagatedState> states = ephemerisStates.stream()
         .map(RuntimeOrbitAnalysisSupport::toPropagatedState)
         .toList();
     return new PropagationResult(null, startTime, stopTime, step, states);

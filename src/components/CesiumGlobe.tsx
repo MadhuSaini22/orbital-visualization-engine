@@ -62,6 +62,16 @@ const EMPTY_GROUND_STATION_VISUALIZATION: GroundStationVisualizationModel = {
   contactLines: [],
 };
 
+let cesiumDebugCreateCount = 0;
+let cesiumDebugDestroyCount = 0;
+let cesiumDebugMountCount = 0;
+let cesiumDebugUnmountCount = 0;
+let cesiumDebugResizeCount = 0;
+
+function cesiumDebug(message: string, details?: Record<string, unknown>) {
+  console.debug(`[CesiumGlobe] ${message}`, details ?? {});
+}
+
 type HoverInfo = {
   name: string;
   noradId: string;
@@ -439,6 +449,9 @@ export function CesiumGlobe({
   const latestSnapshotsRef = useRef<SatelliteSnapshot[]>(snapshots);
   const latestClockTickMsRef = useRef(0);
   const onClockTickRef = useRef(onClockTick);
+  const onSelectConjunctionRef = useRef(onSelectConjunction);
+  const onSelectManeuverRef = useRef(onSelectManeuver);
+  const onToggleSatelliteRef = useRef(onToggleSatellite);
   const initialClockRef = useRef({ isPlaying, simTimeIso, simulationSpeed });
   const hoverInfoRef = useRef<HoverInfo>(null);
   const [layerStats, setLayerStats] = useState({
@@ -458,6 +471,18 @@ export function CesiumGlobe({
   useEffect(() => {
     onClockTickRef.current = onClockTick;
   }, [onClockTick]);
+
+  useEffect(() => {
+    onSelectConjunctionRef.current = onSelectConjunction;
+  }, [onSelectConjunction]);
+
+  useEffect(() => {
+    onSelectManeuverRef.current = onSelectManeuver;
+  }, [onSelectManeuver]);
+
+  useEffect(() => {
+    onToggleSatelliteRef.current = onToggleSatellite;
+  }, [onToggleSatellite]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;
@@ -554,6 +579,8 @@ export function CesiumGlobe({
 
   useEffect(() => {
     let isMounted = true;
+    let bootFrame: number | null = null;
+    let resizeObserver: ResizeObserver | null = null;
     let removeClockTick: (() => void) | null = null;
     let removeCameraChanged: (() => void) | null = null;
     const entityMap = entitiesRef.current;
@@ -562,20 +589,57 @@ export function CesiumGlobe({
     const groundStationMarkerEntityMap = groundStationMarkerEntitiesRef.current;
     const stationAccessRegionEntityMap = stationAccessRegionEntitiesRef.current;
 
+    cesiumDebugMountCount++;
+    cesiumDebug("mount", {
+      mountCount: cesiumDebugMountCount,
+      unmountCount: cesiumDebugUnmountCount,
+    });
+
+    function containerSize() {
+      const rect = containerRef.current?.getBoundingClientRect();
+      return {
+        width: rect?.width ?? 0,
+        height: rect?.height ?? 0,
+        canvasWidth: viewerRef.current?.scene.canvas.width ?? 0,
+        canvasHeight: viewerRef.current?.scene.canvas.height ?? 0,
+      };
+    }
+
+    function hasValidContainerSize() {
+      const size = containerSize();
+      return size.width > 0 && size.height > 0;
+    }
+
     async function boot() {
       if (!containerRef.current || viewerRef.current) {
+        return;
+      }
+
+      if (!hasValidContainerSize()) {
+        cesiumDebug("defer viewer creation: zero-size container", containerSize());
+        bootFrame = window.requestAnimationFrame(boot);
         return;
       }
 
       window.CESIUM_BASE_URL = "/cesium";
       const Cesium = await import("cesium");
 
-      if (!isMounted || !containerRef.current) {
+      if (!isMounted || !containerRef.current || !hasValidContainerSize()) {
+        if (isMounted) {
+          cesiumDebug("defer viewer creation after import: zero-size container", containerSize());
+          bootFrame = window.requestAnimationFrame(boot);
+        }
         return;
       }
 
       cesiumRef.current = Cesium;
       Cesium.Ion.defaultAccessToken = "";
+      cesiumDebugCreateCount++;
+      cesiumDebug("create viewer", {
+        createCount: cesiumDebugCreateCount,
+        destroyCount: cesiumDebugDestroyCount,
+        ...containerSize(),
+      });
 
       const viewer = new Cesium.Viewer(containerRef.current, {
         animation: false,
@@ -594,6 +658,7 @@ export function CesiumGlobe({
         timeline: false,
         navigationHelpButton: false,
         shouldAnimate: initialClockRef.current.isPlaying,
+        useDefaultRenderLoop: true,
       });
 
       viewer.clock.currentTime = Cesium.JulianDate.fromIso8601(initialClockRef.current.simTimeIso);
@@ -628,19 +693,19 @@ export function CesiumGlobe({
         const picked = viewer.scene.pick(movement.position);
         const pickedManeuverId = picked?.id?.properties?.maneuverId?.getValue();
         if (typeof pickedManeuverId === "string") {
-          onSelectManeuver(pickedManeuverId);
+          onSelectManeuverRef.current(pickedManeuverId);
           return;
         }
 
         const pickedConjunctionId = picked?.id?.properties?.conjunctionId?.getValue();
         if (typeof pickedConjunctionId === "string") {
-          onSelectConjunction(pickedConjunctionId);
+          onSelectConjunctionRef.current(pickedConjunctionId);
           return;
         }
 
         const pickedId = picked?.id?.properties?.satelliteId?.getValue();
         if (typeof pickedId === "string") {
-          onToggleSatellite(pickedId);
+          onToggleSatelliteRef.current(pickedId);
         }
       }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
       handler.setInputAction((movement: import("cesium").ScreenSpaceEventHandler.MotionEvent) => {
@@ -679,6 +744,38 @@ export function CesiumGlobe({
       });
 
       viewerRef.current = viewer;
+      resizeObserver = new ResizeObserver(([entry]) => {
+        if (!entry || !viewerRef.current || viewerRef.current.isDestroyed()) {
+          return;
+        }
+        const width = entry.contentRect.width;
+        const height = entry.contentRect.height;
+        cesiumDebugResizeCount++;
+        const canvas = viewerRef.current.scene.canvas;
+        cesiumDebug("resize event", {
+          resizeCount: cesiumDebugResizeCount,
+          width,
+          height,
+          canvasWidth: canvas.width,
+          canvasHeight: canvas.height,
+          createCount: cesiumDebugCreateCount,
+          destroyCount: cesiumDebugDestroyCount,
+        });
+        if (width <= 0 || height <= 0) {
+          viewerRef.current.useDefaultRenderLoop = false;
+          cesiumDebug("skip resize/render: zero-size container", {
+            width,
+            height,
+            canvasWidth: canvas.width,
+            canvasHeight: canvas.height,
+          });
+          return;
+        }
+        viewerRef.current.useDefaultRenderLoop = true;
+        viewerRef.current.resize();
+        viewerRef.current.scene.requestRender();
+      });
+      resizeObserver.observe(containerRef.current);
       setViewerReady(true);
     }
 
@@ -686,10 +783,28 @@ export function CesiumGlobe({
 
     return () => {
       isMounted = false;
+      cesiumDebugUnmountCount++;
+      cesiumDebug("unmount", {
+        mountCount: cesiumDebugMountCount,
+        unmountCount: cesiumDebugUnmountCount,
+        createCount: cesiumDebugCreateCount,
+        destroyCount: cesiumDebugDestroyCount,
+        ...containerSize(),
+      });
+      if (bootFrame !== null) {
+        window.cancelAnimationFrame(bootFrame);
+      }
+      resizeObserver?.disconnect();
       const viewer = viewerRef.current;
       if (viewer && !viewer.isDestroyed()) {
         removeClockTick?.();
         removeCameraChanged?.();
+        cesiumDebugDestroyCount++;
+        cesiumDebug("destroy viewer", {
+          createCount: cesiumDebugCreateCount,
+          destroyCount: cesiumDebugDestroyCount,
+          ...containerSize(),
+        });
         viewer.destroy();
       }
       viewerRef.current = null;
@@ -710,7 +825,7 @@ export function CesiumGlobe({
       entityMap.clear();
       entityEphemerisKeyMap.clear();
     };
-  }, [onSelectConjunction, onSelectManeuver, onToggleSatellite]);
+  }, []);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;

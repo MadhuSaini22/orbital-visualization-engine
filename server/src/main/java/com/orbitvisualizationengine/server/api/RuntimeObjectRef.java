@@ -1,9 +1,12 @@
 package com.orbitvisualizationengine.server.api;
 
+import com.orbitvisualizationengine.server.dto.CreateOrbitRequest;
+
 public record RuntimeObjectRef(
     RuntimeObjectType type,
     Integer noradCatalogId,
-    String orbitId) {
+    String orbitId,
+    CreateOrbitRequest orbitDefinition) {
   public RuntimeObjectRef {
     if (type == null) {
       throw new IllegalArgumentException("Runtime object type is required");
@@ -15,10 +18,12 @@ public record RuntimeObjectRef(
         }
       }
       case MANUAL_ORBIT -> {
-        if (orbitId == null || orbitId.isBlank()) {
-          throw new IllegalArgumentException("Orbit id is required");
+        if ((orbitId == null || orbitId.isBlank()) && orbitDefinition == null) {
+          throw new IllegalArgumentException("Orbit id or orbit definition is required");
         }
-        orbitId = orbitId.trim();
+        if (orbitId != null) {
+          orbitId = orbitId.trim();
+        }
       }
     }
   }

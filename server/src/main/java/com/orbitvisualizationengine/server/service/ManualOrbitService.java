@@ -88,6 +88,11 @@ public class ManualOrbitService {
     return selectPropagator(orbit, requestedType).trajectory(context(orbit, requestedType), start, end, stepSeconds);
   }
 
+  public List<EphemerisState> propagate(CreateOrbitRequest request, Instant start, Instant end, int stepSeconds, PropagatorType requestedType) {
+    ManualOrbitRecord orbit = transientOrbit(request, requestedType);
+    return selectPropagator(orbit, requestedType).trajectory(context(orbit, requestedType), start, end, stepSeconds);
+  }
+
   public PropagationContext missionPropagationContext(String orbitId) {
     ManualOrbitRecord orbit = get(orbitId);
     validatePropagatorCompatibility(orbit.type(), PropagatorType.NUMERICAL);
@@ -129,6 +134,24 @@ public class ManualOrbitService {
       case KEPLERIAN -> keplerianPropagator;
       case NUMERICAL -> numericalPropagator;
     };
+  }
+
+  private ManualOrbitRecord transientOrbit(CreateOrbitRequest request, PropagatorType requestedType) {
+    orbitFactory.validate(request);
+    PropagatorType propagatorType = defaultPropagator(request.type(), requestedType == null ? request.propagatorType() : requestedType);
+    validatePropagatorCompatibility(request.type(), propagatorType);
+    Instant now = Instant.now();
+    return new ManualOrbitRecord(
+        "runtime-transient-manual-orbit",
+        request.name().trim(),
+        request.type(),
+        request.type() == OrbitDefinitionType.TLE ? orbitFactory.createTle(request.tle()).getDate().toDate(TimeScalesFactory.getUTC()).toInstant() : request.epoch(),
+        request.type() == OrbitDefinitionType.TLE ? "TEME" : normalize(request.frame(), "EME2000"),
+        normalize(request.centralBody(), "EARTH"),
+        payload(request),
+        propagatorType,
+        now,
+        now);
   }
 
   private PropagatorType defaultPropagator(OrbitDefinitionType definitionType, PropagatorType requestedType) {

@@ -77,6 +77,7 @@ public class CatalogScreeningController {
       RuntimeObjectRef candidateObject = new RuntimeObjectRef(
           RuntimeObjectType.CATALOG_NORAD,
           candidate.noradCatalogId(),
+          null,
           null);
       ConjunctionRequest conjunctionRequest = new ConjunctionRequest(
           primaryObjectId,

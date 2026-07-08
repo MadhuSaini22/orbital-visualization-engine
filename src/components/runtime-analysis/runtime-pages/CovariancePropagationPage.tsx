@@ -23,16 +23,17 @@ export function CovariancePropagationPage({ primaryObject, primaryNoradCatalogId
   const [error, setError] = useState<string | null>(null);
 
   const run = async () => {
-    const validation = validate(primaryNoradCatalogId, primaryObject.orbitId ?? null, start, stop, stepSeconds, covariance);
+    const hasDirectOrbit = Boolean(primaryObject.orbitId || primaryObject.orbitDefinition);
+    const validation = validate(primaryNoradCatalogId, hasDirectOrbit ? "direct-orbit" : null, start, stop, stepSeconds, covariance);
     if (validation) return setError(validation);
     const noradCatalogId = primaryNoradCatalogId;
-    if (!noradCatalogId && !primaryObject.orbitId) return;
+    if (!noradCatalogId && !hasDirectOrbit) return;
     setLoading(true); onLoadingChange(true); setError(null);
     try {
       const range = validateRuntimeTimeRange(start, stop);
       if (range.error) throw new Error(range.error);
-      const next = primaryObject.orbitId
-        ? await runRuntimeOrbitCovariancePropagation({ primaryObject: manualOrbitRuntimeRef(primaryObject.orbitId), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, initialCovariance: { values: covariance }, propagatorType: null })
+      const next = hasDirectOrbit
+        ? await runRuntimeOrbitCovariancePropagation({ primaryObject: manualOrbitRuntimeRef(primaryObject.orbitId, primaryObject.orbitDefinition), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, initialCovariance: { values: covariance }, propagatorType: null })
         : await runRuntimeCovariancePropagation({ noradCatalogId: Number(noradCatalogId), startTime: range.startIso, stopTime: range.stopIso, step: `PT${Number(stepSeconds)}S`, initialCovariance: { values: covariance } });
       setResult(next); onResult(next); onCovariancePropagation(next); if (noradCatalogId) onPrimaryNoradChange(noradCatalogId); onLog("Covariance Propagation completed.");
     } catch (caught) {
