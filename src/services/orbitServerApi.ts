@@ -316,6 +316,249 @@ export type BackendManualOrbitResponse = {
   warnings: string[];
 };
 
+export type RuntimeCatalogSatellite = {
+  noradCatalogId: number;
+  catalogVersionId: number;
+  historyId: number;
+  sourceCode: string;
+  sourceDisplayName: string;
+  objectName: string;
+  objectId: string | null;
+  objectType: string | null;
+  classification: string | null;
+  countryCode: string | null;
+  launchYear: number | null;
+  launchNumber: number | null;
+  launchPiece: string | null;
+  epochAt: string;
+  tleLine1: string;
+  tleLine2: string;
+  tleSha256: string;
+  elementSetNo: number | null;
+  ephemerisType: number | null;
+  inclinationDeg: number;
+  raanDeg: number;
+  eccentricity: number;
+  argumentOfPerigeeDeg: number;
+  meanAnomalyDeg: number;
+  meanMotionRevPerDay: number;
+  meanMotionDot: number;
+  meanMotionDdot: number;
+  bstar: number;
+  revolutionNumber: number | null;
+  firstSeenVersionId: number;
+  lastSeenVersionId: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+};
+
+export type RuntimeSatelliteResponse = {
+  catalogSatellite: RuntimeCatalogSatellite;
+};
+
+export type RuntimeCartesianVector = {
+  xMeters: number;
+  yMeters: number;
+  zMeters: number;
+};
+
+export type RuntimePropagatedState = {
+  timestamp: string;
+  frameName: string;
+  position: RuntimeCartesianVector;
+  velocity: RuntimeCartesianVector;
+};
+
+export type RuntimePropagationRequest = {
+  noradCatalogId: number;
+  start: string;
+  end: string;
+  stepSeconds: number;
+  model?: string | null;
+};
+
+export type RuntimePropagationResponse = {
+  satellite: RuntimeSatelliteResponse;
+  startTime: string;
+  stopTime: string;
+  step: string;
+  states: RuntimePropagatedState[];
+};
+
+export type RuntimeGroundStationId = {
+  value: string;
+};
+
+export type RuntimeVisibilityRequest = {
+  noradCatalogId: number;
+  groundStationId: RuntimeGroundStationId;
+  startTime: string;
+  stopTime: string;
+  step: string;
+  minimumElevationDegrees: number;
+};
+
+export type RuntimeVisibilityWindow = {
+  acquisitionOfSignalTime: string;
+  lossOfSignalTime: string;
+  maximumElevationTime: string;
+  maximumElevationDegrees: number;
+  duration: string;
+};
+
+export type RuntimeVisibilityResult = {
+  request: RuntimeVisibilityRequest;
+  windows: RuntimeVisibilityWindow[];
+};
+
+export type RuntimeEclipseRequest = {
+  noradCatalogId: number;
+  startTime: string;
+  stopTime: string;
+  step: string;
+};
+
+export type RuntimeEclipseInterval = {
+  type: "SUNLIGHT" | "PENUMBRA" | "UMBRA";
+  startTime: string;
+  stopTime: string;
+  duration: string;
+};
+
+export type RuntimeEclipseResult = {
+  request: RuntimeEclipseRequest;
+  intervals: RuntimeEclipseInterval[];
+};
+
+export type RuntimeRelativeFrame = "LVLH_RTN";
+
+export type RuntimeRelativeMotionRequest = {
+  primaryNoradCatalogId: number;
+  secondaryNoradCatalogId: number;
+  startTime: string;
+  stopTime: string;
+  step: string;
+  frame: RuntimeRelativeFrame;
+};
+
+export type RuntimeRelativeState = {
+  timestamp: string;
+  frame: RuntimeRelativeFrame;
+  relativePosition: RuntimeCartesianVector;
+  relativeVelocity: RuntimeCartesianVector;
+};
+
+export type RuntimeRelativeMotionResult = {
+  request: RuntimeRelativeMotionRequest;
+  states: RuntimeRelativeState[];
+};
+
+export type RuntimeConjunctionRequest = {
+  primaryNoradCatalogId: number;
+  secondaryNoradCatalogId: number;
+  startTime: string;
+  stopTime: string;
+  step: string;
+  relativeFrame: RuntimeRelativeFrame;
+  missDistanceThresholdMeters: number;
+};
+
+export type RuntimeClosestApproach = {
+  timeOfClosestApproach: string;
+  missDistanceMeters: number;
+  relativeSpeedMetersPerSecond: number;
+  relativeState: RuntimeRelativeState;
+};
+
+export type RuntimeConjunctionResult = {
+  request: RuntimeConjunctionRequest;
+  closestApproach: RuntimeClosestApproach;
+  status: "CLEAR" | "CONJUNCTION";
+  refinementStatistics: {
+    sampledStatesExamined: number;
+    sampledMinimumIndex: number;
+    refined: boolean;
+    refinementOffsetSeconds: number;
+  };
+};
+
+export type RuntimeCatalogConjunctionRequest = {
+  primaryNoradCatalogId: number;
+  startTime: string;
+  stopTime: string;
+  step: string;
+  relativeFrame: RuntimeRelativeFrame;
+  missDistanceThresholdMeters: number;
+};
+
+export type RuntimeCatalogConjunctionCandidate = {
+  satellite: RuntimeCatalogSatellite;
+  conjunctionResult: RuntimeConjunctionResult;
+};
+
+export type RuntimeCatalogConjunctionResult = {
+  request: RuntimeCatalogConjunctionRequest;
+  primarySatellite: RuntimeCatalogSatellite;
+  candidates: RuntimeCatalogConjunctionCandidate[];
+  statistics: {
+    catalogSatellitesSeen: number;
+    skippedPrimarySatellites: number;
+    analyzedCandidates: number;
+    conjunctionCandidates: number;
+    clearCandidates: number;
+  };
+  executionStatistics: {
+    submittedTasks: number;
+    successfulTasks: number;
+    failedTasks: number;
+  };
+};
+
+export type RuntimeCollisionProbabilityMethod = "ISOTROPIC_GAUSSIAN_ENCOUNTER_PLANE";
+
+export type RuntimeCollisionProbabilityRequest = {
+  conjunctionResult: RuntimeConjunctionResult;
+  primaryCovarianceMetersSquared: number[][];
+  secondaryCovarianceMetersSquared: number[][];
+  hardBodyRadiusMeters: number;
+  method: RuntimeCollisionProbabilityMethod;
+};
+
+export type RuntimeCollisionProbabilityResult = {
+  request: RuntimeCollisionProbabilityRequest;
+  probabilityOfCollision: number;
+  statistics: {
+    method: RuntimeCollisionProbabilityMethod;
+    combinedEncounterPlaneVarianceMetersSquared: number;
+    equivalentSigmaMeters: number;
+    normalizedMissDistance: number;
+    normalizedHardBodyRadius: number;
+  };
+};
+
+export type RuntimeCovarianceMatrix = {
+  values: number[][];
+};
+
+export type RuntimeCovariancePropagationRequest = {
+  noradCatalogId: number;
+  startTime: string;
+  stopTime: string;
+  step: string;
+  initialCovariance: RuntimeCovarianceMatrix;
+};
+
+export type RuntimeCovarianceState = {
+  timestamp: string;
+  covarianceMatrix: RuntimeCovarianceMatrix;
+};
+
+export type RuntimeCovariancePropagationResponse = {
+  request: RuntimeCovariancePropagationRequest;
+  satellite: RuntimeSatelliteResponse;
+  states: RuntimeCovarianceState[];
+};
+
 export async function fetchManeuvers(noradId?: string | number) {
   return fetchJson<BackendManeuverEvent[]>("/api/maneuvers", {
     noradId,
@@ -519,4 +762,50 @@ export async function setAnalysisMode(noradId: string | number, mode: string, en
   }, {
     method: "POST",
   });
+}
+
+function postRuntimeJson<TResponse, TRequest>(path: string, request: TRequest) {
+  return fetchJson<TResponse>(path, {}, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function fetchRuntimeSatellite(noradCatalogId: string | number) {
+  return fetchJson<RuntimeSatelliteResponse>(`/api/runtime/satellites/${noradCatalogId}`);
+}
+
+export async function runRuntimePropagation(request: RuntimePropagationRequest) {
+  return postRuntimeJson<RuntimePropagationResponse, RuntimePropagationRequest>("/api/runtime/propagation", request);
+}
+
+export async function runRuntimeVisibility(request: RuntimeVisibilityRequest) {
+  return postRuntimeJson<RuntimeVisibilityResult, RuntimeVisibilityRequest>("/api/runtime/visibility", request);
+}
+
+export async function runRuntimeEclipse(request: RuntimeEclipseRequest) {
+  return postRuntimeJson<RuntimeEclipseResult, RuntimeEclipseRequest>("/api/runtime/eclipse", request);
+}
+
+export async function runRuntimeRelativeMotion(request: RuntimeRelativeMotionRequest) {
+  return postRuntimeJson<RuntimeRelativeMotionResult, RuntimeRelativeMotionRequest>("/api/runtime/relative-motion", request);
+}
+
+export async function runRuntimePairwiseConjunction(request: RuntimeConjunctionRequest) {
+  return postRuntimeJson<RuntimeConjunctionResult, RuntimeConjunctionRequest>("/api/runtime/conjunctions/pairwise", request);
+}
+
+export async function runRuntimeCatalogScreening(request: RuntimeCatalogConjunctionRequest) {
+  return postRuntimeJson<RuntimeCatalogConjunctionResult, RuntimeCatalogConjunctionRequest>("/api/runtime/conjunctions/catalog-screening", request);
+}
+
+export async function runRuntimeCollisionProbability(request: RuntimeCollisionProbabilityRequest) {
+  return postRuntimeJson<RuntimeCollisionProbabilityResult, RuntimeCollisionProbabilityRequest>("/api/runtime/collision-probability", request);
+}
+
+export async function runRuntimeCovariancePropagation(request: RuntimeCovariancePropagationRequest) {
+  return postRuntimeJson<RuntimeCovariancePropagationResponse, RuntimeCovariancePropagationRequest>("/api/runtime/covariance/propagate", request);
 }

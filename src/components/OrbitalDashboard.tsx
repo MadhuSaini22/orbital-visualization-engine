@@ -14,6 +14,7 @@ import {
   groundOpsHorizonOptions,
   type GroundOpsHorizon,
 } from "@/components/ground-operations/GroundOperationsModal";
+import { RuntimeAnalysisWorkspace } from "@/components/runtime-analysis/RuntimeAnalysisWorkspace";
 import {
   GroundStationScenarioProvider,
   useGroundStationScenario,
@@ -153,7 +154,7 @@ type TimelineModalMode = "create" | "edit";
 type TimelineScheduleMode = "UTC" | "MET" | "AFTER_EVENT";
 type TimelineSnapMode = "FREE" | "ONE_MIN" | "FIVE_MIN" | "TEN_MIN" | "THIRTY_MIN" | "ONE_HOUR";
 type MissionDurationPreset = "ONE_ORBIT" | "THREE_HOURS" | "TWELVE_HOURS" | "TWENTY_FOUR_HOURS" | "CUSTOM";
-type CommandModalId = "mission" | "analysis" | "workspace" | "templates" | "ground";
+type CommandModalId = "mission" | "analysis" | "workspace" | "templates" | "ground" | "proximity";
 type TimelineEventDraftType = "COAST" | "FINITE_BURN" | "IMPULSIVE_BURN";
 type ManeuverTemplateDraft = {
   type: ManeuverTemplateType;
@@ -3808,6 +3809,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
               <CompactNavButton label="New Orbit" icon="orbit" onClick={() => setIsSourcePickerOpen(true)} />
               <CompactNavButton label="Plan Mission" icon="mission" onClick={() => setActiveCommandModal("mission")} disabled={!hasOrbitLoaded} />
               <CompactNavButton label="Analysis" icon="analysis" onClick={() => setActiveCommandModal("analysis")} disabled={!hasOrbitLoaded} />
+              <CompactNavButton label="Satellite Proximity" icon="analysis" onClick={() => setActiveCommandModal("proximity")} />
               <CompactNavButton
                 label="Ground Operations"
                 icon="ground"
@@ -3982,6 +3984,18 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
             ["Conjunction", effectiveShowConjunctions ? `${conjunctionSnapshots.length} visible` : conjunctionSnapshots.length > 0 ? "Available" : "No events"],
             ["Mission Burns", `${missionSummaryAnalysis.finiteBurnCount} finite / ${missionSummaryAnalysis.impulsiveBurnCount} impulsive`],
             ["Last Analysis", analysisLastTimestamp],
+          ]}
+        />
+
+        <CommandSummaryCard
+          title="Satellite Proximity"
+          cta="Open Runtime"
+          onAction={() => setActiveCommandModal("proximity")}
+          rows={[
+            ["Runtime Satellite", "NORAD lookup"],
+            ["Propagation", "Orekit runtime endpoint"],
+            ["Screening", "Pairwise and catalog-wide"],
+            ["Risk", "Collision probability and covariance"],
           ]}
         />
 
@@ -4302,6 +4316,12 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
         </CommandModal>
       )}
 
+      {activeCommandModal === "proximity" && (
+        <CommandModal title="Satellite Proximity" onClose={() => setActiveCommandModal(null)} size="runtime">
+          <RuntimeAnalysisWorkspace />
+        </CommandModal>
+      )}
+
       {activeCommandModal === "ground" && (
         <CommandModal title="Ground Operations" onClose={() => setActiveCommandModal(null)} size="ground">
           <GroundOperationsModalContent
@@ -4545,9 +4565,11 @@ function CommandModal({
   title: string;
   children: ReactNode;
   onClose: () => void;
-  size?: "normal" | "wide" | "mission" | "analysis" | "ground";
+  size?: "normal" | "wide" | "mission" | "analysis" | "ground" | "runtime";
 }) {
-  const sizeClass = size === "analysis"
+  const sizeClass = size === "runtime"
+    ? "h-[92vh] w-[min(1580px,97vw)]"
+    : size === "analysis"
     ? "h-[min(78vh,calc(100vh-2rem))] w-[min(1180px,90vw)]"
     : size === "ground"
     ? "h-[90vh] w-[min(1320px,95vw)]"
@@ -4556,7 +4578,9 @@ function CommandModal({
     : size === "wide"
       ? "max-h-[min(85vh,calc(100vh-2rem))] w-[min(1180px,90vw)]"
       : "max-h-[min(85vh,calc(100vh-2rem))] w-[min(760px,94vw)]";
-  const bodyClass = size === "analysis"
+  const bodyClass = size === "runtime"
+    ? "min-h-0 flex-1 overflow-hidden p-0"
+    : size === "analysis"
     ? "thin-scrollbar always-scrollbar min-h-0 flex-1 overflow-y-scroll p-5"
     : size === "ground"
       ? "min-h-0 flex-1 overflow-hidden p-4"
