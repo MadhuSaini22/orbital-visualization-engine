@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { OrbitState, SatelliteSnapshot } from "@/domain/orbit";
 import type { ManeuverSnapshot } from "@/domain/maneuver";
 import { getConjunctionTone } from "@/domain/conjunction";
@@ -64,13 +65,75 @@ const EMPTY_GROUND_STATION_VISUALIZATION: GroundStationVisualizationModel = {
 
 type HoverInfo = {
   name: string;
-  noradId: string;
+  identifier: string;
   x: number;
   y: number;
 } | null;
 
+type SatellitePopup = {
+  satelliteId: string;
+  x: number;
+  y: number;
+} | null;
+
+type TleOrbitalElements = {
+  inclinationDeg: number;
+  raanDeg: number;
+  eccentricity: number;
+  argumentOfPerigeeDeg: number;
+  meanAnomalyDeg: number;
+  meanMotionRevPerDay: number;
+  periodMinutes: number;
+  epochUtc: string | null;
+};
+
 function stateTimeMs(state: OrbitState) {
   return new Date(state.timeUtc).getTime();
+}
+
+function finiteTleNumber(value: string) {
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseTleOrbitalElements(line1: string | undefined, line2: string | undefined): TleOrbitalElements | null {
+  if (!line2 || line2.length < 63) return null;
+  const inclinationDeg = finiteTleNumber(line2.slice(8, 16));
+  const raanDeg = finiteTleNumber(line2.slice(17, 25));
+  const eccentricity = finiteTleNumber(`0.${line2.slice(26, 33).trim()}`);
+  const argumentOfPerigeeDeg = finiteTleNumber(line2.slice(34, 42));
+  const meanAnomalyDeg = finiteTleNumber(line2.slice(43, 51));
+  const meanMotionRevPerDay = finiteTleNumber(line2.slice(52, 63));
+  if (
+    inclinationDeg === null
+    || raanDeg === null
+    || eccentricity === null
+    || argumentOfPerigeeDeg === null
+    || meanAnomalyDeg === null
+    || meanMotionRevPerDay === null
+    || meanMotionRevPerDay <= 0
+  ) {
+    return null;
+  }
+  const epochMs = tleEpochMs(line1);
+  return {
+    inclinationDeg,
+    raanDeg,
+    eccentricity,
+    argumentOfPerigeeDeg,
+    meanAnomalyDeg,
+    meanMotionRevPerDay,
+    periodMinutes: 1440 / meanMotionRevPerDay,
+    epochUtc: epochMs === null ? null : new Date(epochMs).toISOString(),
+  };
+}
+
+function snapshotVelocityKmps(state: OrbitState | null) {
+  if (!state) return null;
+  if (Number.isFinite(state.velocityKmps)) return state.velocityKmps ?? null;
+  const velocity = state.velocityEcefKmps ?? state.velocityEciKmps;
+  if (!velocity || velocity.some((component) => !Number.isFinite(component))) return null;
+  return Math.hypot(...velocity);
 }
 
 function stateToSpaceCartesian(Cesium: CesiumModule, state: OrbitState): Cartesian3 {
@@ -513,6 +576,7 @@ export function CesiumGlobe({
   });
   const layerStatsRef = useRef(layerStats);
   const [hoverInfo, setHoverInfo] = useState<HoverInfo>(null);
+  const [satellitePopup, setSatellitePopup] = useState<SatellitePopup>(null);
   const [viewerReady, setViewerReady] = useState(false);
   const runtimeSatelliteKey = snapshots
     .map((snapshot) => `${snapshot.satellite.id}:${snapshot.satellite.tle?.line1 ?? ""}:${snapshot.satellite.tle?.line2 ?? ""}`)
@@ -662,7 +726,7 @@ export function CesiumGlobe({
     const previous = hoverInfoRef.current;
     const isSame =
       previous?.name === nextHoverInfo?.name &&
-      previous?.noradId === nextHoverInfo?.noradId &&
+      previous?.identifier === nextHoverInfo?.identifier &&
       previous?.x === nextHoverInfo?.x &&
       previous?.y === nextHoverInfo?.y;
 
@@ -694,15 +758,25 @@ export function CesiumGlobe({
       }
 
       cesiumRef.current = Cesium;
-      Cesium.Ion.defaultAccessToken = "";
+      const ionAccessToken = process.env.NEXT_PUBLIC_CESIUM_ION_TOKEN?.trim() ?? "";
+      Cesium.Ion.defaultAccessToken = ionAccessToken;
+
+      const naturalEarthLayer = Cesium.ImageryLayer.fromProviderAsync(
+        Cesium.TileMapServiceImageryProvider.fromUrl(
+          Cesium.buildModuleUrl("Assets/Textures/NaturalEarthII"),
+        ),
+        {
+          brightness: 0.92,
+          contrast: 1.08,
+          saturation: 0.92,
+          gamma: 1.02,
+          maximumAnisotropy: 16,
+        },
+      );
 
       const viewer = new Cesium.Viewer(containerRef.current, {
         animation: false,
-        baseLayer: Cesium.ImageryLayer.fromProviderAsync(
-          Cesium.TileMapServiceImageryProvider.fromUrl(
-            Cesium.buildModuleUrl("Assets/Textures/NaturalEarthII"),
-          ),
-        ),
+        baseLayer: naturalEarthLayer,
         baseLayerPicker: false,
         fullscreenButton: false,
         geocoder: false,
@@ -723,15 +797,130 @@ export function CesiumGlobe({
       const antialiasScene = viewer.scene as import("cesium").Scene & { fxaa?: boolean };
       antialiasScene.fxaa = true;
       viewer.scene.postProcessStages.fxaa.enabled = true;
-      viewer.scene.msaaSamples = Math.max(viewer.scene.msaaSamples, 4);
-      viewer.scene.globe.enableLighting = true;
-      viewer.scene.globe.showGroundAtmosphere = true;
-      viewer.scene.globe.depthTestAgainstTerrain = false;
-      viewer.scene.screenSpaceCameraController.minimumZoomDistance = 1200000;
-      viewer.scene.screenSpaceCameraController.maximumZoomDistance = 60000000;
+      viewer.scene.msaaSamples = 4;
+      viewer.scene.highDynamicRange = viewer.scene.highDynamicRangeSupported;
+      viewer.scene.postProcessStages.tonemapper = Cesium.Tonemapper.ACES;
+      viewer.scene.gamma = 1.02;
+      viewer.scene.postProcessStages.bloom.enabled = false;
+
+      const globe = viewer.scene.globe;
+      globe.enableLighting = true;
+      globe.showGroundAtmosphere = true;
+      globe.dynamicAtmosphereLighting = true;
+      globe.dynamicAtmosphereLightingFromSun = true;
+      globe.atmosphereLightIntensity = 9.5;
+      globe.atmosphereSaturationShift = -0.08;
+      globe.atmosphereBrightnessShift = -0.03;
+      globe.lambertDiffuseMultiplier = 0.92;
+      globe.vertexShadowDarkness = 0.22;
+      globe.maximumScreenSpaceError = 1.35;
+      globe.tileCacheSize = 220;
+      globe.preloadAncestors = true;
+      globe.preloadSiblings = false;
+      globe.showWaterEffect = true;
+      globe.depthTestAgainstTerrain = false;
+
+      const cameraController = viewer.scene.screenSpaceCameraController;
+      cameraController.minimumZoomDistance = 1200000;
+      cameraController.maximumZoomDistance = 60000000;
+      cameraController.inertiaSpin = 0.9;
+      cameraController.inertiaTranslate = 0.86;
+      cameraController.inertiaZoom = 0.82;
+      cameraController.maximumMovementRatio = 0.12;
+      cameraController.zoomFactor = 3.5;
+
+      if (viewer.scene.skyBox) {
+        viewer.scene.skyBox.show = true;
+      }
       if (viewer.scene.skyAtmosphere) {
         viewer.scene.skyAtmosphere.show = true;
+        viewer.scene.skyAtmosphere.atmosphereLightIntensity = 9.5;
+        viewer.scene.skyAtmosphere.hueShift = -0.015;
+        viewer.scene.skyAtmosphere.saturationShift = -0.12;
+        viewer.scene.skyAtmosphere.brightnessShift = -0.04;
       }
+
+      if (ionAccessToken) {
+        void Cesium.createWorldImageryAsync({
+          style: Cesium.IonWorldImageryStyle.AERIAL,
+        }).then((imageryProvider) => {
+          if (!isMounted || viewer.isDestroyed()) return;
+          const premiumLayer = new Cesium.ImageryLayer(imageryProvider, {
+            brightness: 0.94,
+            contrast: 1.06,
+            saturation: 0.94,
+            gamma: 1.01,
+            maximumAnisotropy: 16,
+          });
+          viewer.imageryLayers.add(premiumLayer, 0);
+          viewer.imageryLayers.remove(naturalEarthLayer, true);
+          viewer.scene.requestRender();
+        }).catch((error: unknown) => {
+          console.info("[Cesium imagery] World Imagery unavailable; using offline Natural Earth.", error);
+        });
+
+        void Cesium.createWorldTerrainAsync({
+          requestVertexNormals: true,
+          requestWaterMask: true,
+        }).then((terrainProvider) => {
+          if (!isMounted || viewer.isDestroyed()) return;
+          viewer.terrainProvider = terrainProvider;
+          viewer.scene.requestRender();
+        }).catch((error: unknown) => {
+          console.info("[Cesium terrain] World Terrain unavailable; using ellipsoid terrain.", error);
+        });
+      } else {
+        void Cesium.ArcGisMapServerImageryProvider.fromUrl(
+          "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer",
+          { enablePickFeatures: false },
+        ).then((imageryProvider) => {
+          if (!isMounted || viewer.isDestroyed()) return;
+          const satelliteLayer = new Cesium.ImageryLayer(imageryProvider, {
+            brightness: 0.98,
+            contrast: 1.12,
+            saturation: 0.96,
+            gamma: 1.01,
+            maximumAnisotropy: 16,
+          });
+          viewer.imageryLayers.add(satelliteLayer, 0);
+          viewer.imageryLayers.remove(naturalEarthLayer, true);
+          viewer.scene.requestRender();
+        }).catch((error: unknown) => {
+          console.info("[Cesium imagery] ArcGIS imagery unavailable; using offline Natural Earth.", error);
+        });
+      }
+
+      const addAtmosphericTextureLayer = (
+        url: string,
+        options: import("cesium").ImageryLayer.ConstructorOptions,
+      ) => {
+        void Cesium.SingleTileImageryProvider.fromUrl(url).then((provider) => {
+          if (!isMounted || viewer.isDestroyed()) return;
+          viewer.imageryLayers.add(new Cesium.ImageryLayer(provider, options));
+          viewer.scene.requestRender();
+        }).catch(() => {
+          // These local presentation layers are optional; the globe remains usable without them.
+        });
+      };
+
+      addAtmosphericTextureLayer("/earth-textures/nasa-black-marble-2016-3km.jpg", {
+        dayAlpha: 0,
+        nightAlpha: 0.7,
+        brightness: 1.18,
+        contrast: 1.28,
+        saturation: 0.82,
+        gamma: 0.88,
+        maximumAnisotropy: 16,
+      });
+      addAtmosphericTextureLayer("/earth-textures/nasa-clouds-2048.jpg", {
+        alpha: 0.32,
+        brightness: 1.2,
+        contrast: 1.18,
+        saturation: 0.6,
+        colorToAlpha: Cesium.Color.BLACK,
+        colorToAlphaThreshold: 0.24,
+        maximumAnisotropy: 16,
+      });
       viewer.camera.setView({
         destination: Cesium.Cartesian3.fromDegrees(
           DEFAULT_CAMERA_VIEW.longitudeDeg,
@@ -757,6 +946,17 @@ export function CesiumGlobe({
 
         const pickedId = picked?.id?.properties?.satelliteId?.getValue();
         if (typeof pickedId === "string") {
+          const panelWidth = 340;
+          const panelHeight = 430;
+          const x = movement.position.x + panelWidth + 28 <= viewer.scene.canvas.clientWidth
+            ? movement.position.x + 18
+            : Math.max(12, movement.position.x - panelWidth - 18);
+          const y = Math.min(
+            Math.max(70, movement.position.y - 34),
+            Math.max(70, viewer.scene.canvas.clientHeight - panelHeight - 18),
+          );
+          setSatellitePopup({ satelliteId: pickedId, x, y });
+          updateHoverInfo(null);
           onToggleSatelliteRef.current(pickedId);
         }
       }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
@@ -768,10 +968,16 @@ export function CesiumGlobe({
         if (typeof pickedId === "string") {
           const x = Math.min(movement.endPosition.x + 14, Math.max(0, viewer.scene.canvas.clientWidth - 190));
           const y = Math.min(movement.endPosition.y + 14, Math.max(0, viewer.scene.canvas.clientHeight - 80));
+          const pickedSnapshot = latestSnapshotsRef.current.find(
+            (snapshot) => snapshot.satellite.id === pickedId,
+          );
+          const identifier = pickedSnapshot?.satellite.noradId
+            ? `NORAD ${pickedSnapshot.satellite.noradId}`
+            : `OBJECT ${pickedId}`;
 
           updateHoverInfo({
             name: pickedEntity.name ?? "Satellite",
-            noradId: pickedId,
+            identifier,
             x,
             y,
           });
@@ -895,24 +1101,32 @@ export function CesiumGlobe({
             : fallbackPosition ?? stateToSpaceCartesian(Cesium, ephemerisStates[0]),
           point: {
             color,
-            pixelSize: isSelected ? 15 : 11,
+            pixelSize: isSelected ? 11 : 7,
             outlineColor: isSelected ? Cesium.Color.WHITE : Cesium.Color.BLACK,
-            outlineWidth: isSelected ? 3 : 1,
+            outlineWidth: isSelected ? 2 : 1,
+            scaleByDistance: new Cesium.NearFarScalar(1500000, 1, 50000000, 0.62),
+            translucencyByDistance: new Cesium.NearFarScalar(1500000, 1, 60000000, 0.42),
+            disableDepthTestDistance: 0,
           },
           label: {
             text: snapshot.satellite.name,
-            font: "700 13px monospace",
-            fillColor: color.brighten(0.35, new Cesium.Color()),
+            font: "700 13px Inter, system-ui, sans-serif",
+            fillColor: isSelected
+              ? Cesium.Color.WHITE
+              : color.brighten(0.55, new Cesium.Color()),
             outlineColor: Cesium.Color.BLACK,
-            outlineWidth: 2,
+            outlineWidth: 3,
             style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-            pixelOffset: new Cesium.Cartesian2(0, -28),
+            pixelOffset: new Cesium.Cartesian2(0, -24),
             show: showLabels,
             showBackground: true,
-            backgroundColor: Cesium.Color.BLACK.withAlpha(0.62),
-            backgroundPadding: new Cesium.Cartesian2(8, 5),
-            scale: isSelected ? 1.08 : 1,
+            backgroundColor: Cesium.Color.fromCssColorString("#03070b").withAlpha(isSelected ? 0.9 : 0.78),
+            backgroundPadding: new Cesium.Cartesian2(9, 5),
+            scale: isSelected ? 1.08 : 0.96,
+            scaleByDistance: new Cesium.NearFarScalar(1500000, 1, 50000000, 0.82),
+            translucencyByDistance: new Cesium.NearFarScalar(1500000, 1, 55000000, 0.58),
             distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 55000000),
+            disableDepthTestDistance: 0,
           },
           properties: {
             satelliteId: snapshot.satellite.id,
@@ -953,14 +1167,21 @@ export function CesiumGlobe({
       }
       if (entity.point) {
         entity.point.show = new Cesium.ConstantProperty(snapshot.satellite.visual.showMarker);
-        entity.point.pixelSize = new Cesium.ConstantProperty(isSelected ? 15 : 11);
-        entity.point.color = new Cesium.ConstantProperty(color.withAlpha(isSelected ? 1 : 0.82));
+        entity.point.pixelSize = new Cesium.ConstantProperty(isSelected ? 11 : 7);
+        entity.point.outlineWidth = new Cesium.ConstantProperty(isSelected ? 2 : 1);
+        entity.point.color = new Cesium.ConstantProperty(color.withAlpha(isSelected ? 1 : 0.88));
       }
       if (entity.label) {
         entity.label.show = new Cesium.ConstantProperty(
           snapshot.satellite.visual.showLabel && (showLabels || isSelected),
         );
-        entity.label.scale = new Cesium.ConstantProperty(isSelected ? 1.08 : 0.95);
+        entity.label.scale = new Cesium.ConstantProperty(isSelected ? 1.08 : 0.96);
+        entity.label.fillColor = new Cesium.ConstantProperty(
+          isSelected ? Cesium.Color.WHITE : color.brighten(0.55, new Cesium.Color()),
+        );
+        entity.label.backgroundColor = new Cesium.ConstantProperty(
+          Cesium.Color.fromCssColorString("#03070b").withAlpha(isSelected ? 0.9 : 0.78),
+        );
       }
     });
   }, [orbitSnapshots, runtimeTlePropagation, snapshots, selectedSatelliteIds, showLabels, viewerReady]);
@@ -1029,8 +1250,12 @@ export function CesiumGlobe({
             && (showAllOrbits || selectedSatelliteIds.includes(snapshot.satellite.id)),
           polyline: {
             positions,
-            width: 2,
-            material: new Cesium.PolylineGlowMaterialProperty({ color, glowPower: 0.08 }),
+            width: selectedSatelliteIds.includes(snapshot.satellite.id) ? 1.8 : 1.15,
+            material: new Cesium.PolylineGlowMaterialProperty({
+              color: color.withAlpha(selectedSatelliteIds.includes(snapshot.satellite.id) ? 0.9 : 0.42),
+              glowPower: selectedSatelliteIds.includes(snapshot.satellite.id) ? 0.09 : 0.045,
+              taperPower: 1,
+            }),
           },
         }));
       }
@@ -1083,16 +1308,26 @@ export function CesiumGlobe({
   }, [orbitSnapshots, runtimeSatelliteKey, runtimeTlePropagation, selectedSatelliteIds, showAllOrbits, snapshots, viewerReady]);
 
   useEffect(() => {
+    const Cesium = cesiumRef.current;
     const viewer = viewerRef.current;
-    if (!viewerReady || !viewer) return;
+    if (!viewerReady || !Cesium || !viewer) return;
     let visible = 0;
     let visibleTrails = 0;
     let visibleGroundTracks = 0;
-    latestOrbitSnapshotsRef.current.forEach((snapshot) => {
+    latestOrbitSnapshotsRef.current.forEach((snapshot, index) => {
       const entity = orbitEntitiesRef.current.get(snapshot.satellite.id);
       const selected = selectedSatelliteIds.includes(snapshot.satellite.id);
       if (entity) {
         entity.show = snapshot.satellite.visual.showOrbit && (showAllOrbits || selected);
+        if (entity.polyline && Cesium) {
+          const color = getSnapshotColor(Cesium, snapshot, index);
+          entity.polyline.width = new Cesium.ConstantProperty(selected ? 1.8 : 1.15);
+          entity.polyline.material = new Cesium.PolylineGlowMaterialProperty({
+            color: color.withAlpha(selected ? 0.9 : 0.42),
+            glowPower: selected ? 0.09 : 0.045,
+            taperPower: 1,
+          });
+        }
         if (entity.show) visible += 1;
       }
       const trail = trailEntitiesRef.current.get(snapshot.satellite.id);
@@ -1691,9 +1926,23 @@ export function CesiumGlobe({
     });
   }, [resetSignal, viewerReady]);
 
+  const popupSnapshot = satellitePopup
+    ? snapshots.find((snapshot) => snapshot.satellite.id === satellitePopup.satelliteId)
+      ?? orbitSnapshots.find((snapshot) => snapshot.satellite.id === satellitePopup.satelliteId)
+      ?? null
+    : null;
+
   return (
     <div className="relative h-full min-h-[520px] w-full overflow-hidden rounded-md bg-black">
       <div ref={containerRef} className="h-full min-h-[520px] w-full" />
+      {satellitePopup && popupSnapshot && (
+        <SatelliteInfoPopup
+          snapshot={popupSnapshot}
+          x={satellitePopup.x}
+          y={satellitePopup.y}
+          onClose={() => setSatellitePopup(null)}
+        />
+      )}
       {hoverInfo && (
         <div
           className="pointer-events-none absolute z-10 rounded-md border border-cyan-300/40 bg-black/80 px-3 py-2 text-sm text-white shadow-xl backdrop-blur"
@@ -1703,7 +1952,7 @@ export function CesiumGlobe({
           }}
         >
           <p className="font-semibold">{hoverInfo.name}</p>
-          <p className="font-mono text-xs text-zinc-400">NORAD {hoverInfo.noradId}</p>
+          <p className="font-mono text-xs text-zinc-400">{hoverInfo.identifier}</p>
         </div>
       )}
       <div className="pointer-events-none absolute right-3 bottom-3 space-y-1 border border-white/10 bg-black/70 px-3 py-2 font-mono text-[11px] text-zinc-300 shadow-xl backdrop-blur">
@@ -1740,6 +1989,155 @@ export function CesiumGlobe({
           -
         </button>
       </div>
+    </div>
+  );
+}
+
+function SatelliteInfoPopup({
+  snapshot,
+  x,
+  y,
+  onClose,
+}: {
+  snapshot: SatelliteSnapshot;
+  x: number;
+  y: number;
+  onClose: () => void;
+}) {
+  const { satellite, state } = snapshot;
+  const tle = parseTleOrbitalElements(satellite.tle?.line1, satellite.tle?.line2);
+  const velocityKmps = snapshotVelocityKmps(state);
+  const identifier = satellite.noradId
+    ? `NORAD ${satellite.noradId}`
+    : `OBJECT ${satellite.id}`;
+  const accent = satellite.visual.color ?? "#63e6be";
+  const metadata = [
+    satellite.metadata?.owner,
+    satellite.metadata?.mission,
+    satellite.metadata?.objectType?.replaceAll("_", " "),
+  ].filter((value): value is string => Boolean(value));
+
+  return (
+    <section
+      role="dialog"
+      aria-label={`${satellite.name} satellite data`}
+      className="pointer-events-auto absolute z-40 w-[340px] max-w-[calc(100%-24px)] overflow-hidden rounded-xl border border-white/10 bg-[#080a0e]/95 text-zinc-300 shadow-[0_24px_80px_rgba(0,0,0,0.72),0_0_0_1px_rgba(255,255,255,0.025)] backdrop-blur-xl"
+      style={{ left: x, top: y }}
+    >
+      <div className="max-h-[min(620px,calc(100vh-150px))] overflow-y-auto p-4">
+        <header className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-lg font-bold tracking-[-0.02em]" style={{ color: accent }}>
+              {satellite.name}
+            </h2>
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.08em] text-zinc-500">
+              <span>{identifier}</span>
+              <span className="rounded border border-white/10 bg-white/[0.03] px-1.5 py-0.5 text-zinc-400">
+                {satellite.sourceType}
+              </span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-lg text-zinc-500 transition hover:bg-white/[0.06] hover:text-white"
+            aria-label="Close satellite data"
+          >
+            ×
+          </button>
+        </header>
+
+        {metadata.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {metadata.map((value) => (
+              <span key={value} className="rounded border border-white/10 bg-white/[0.025] px-2 py-1 font-mono text-[9px] uppercase tracking-[0.08em] text-zinc-400">
+                {value}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {state && (
+          <PopupSection title="Current propagated state" accent={accent}>
+            <div className="grid grid-cols-3 gap-2">
+              <PopupMetric label="Altitude" value={`${state.altitudeKm.toFixed(1)} km`} />
+              {velocityKmps !== null && <PopupMetric label="Speed" value={`${velocityKmps.toFixed(3)} km/s`} />}
+              <PopupMetric label="Frame" value={state.frame} />
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <PopupMetric label="Latitude" value={`${state.latitudeDeg.toFixed(4)}°`} />
+              <PopupMetric label="Longitude" value={`${state.longitudeDeg.toFixed(4)}°`} />
+            </div>
+            <p className="mt-2 truncate font-mono text-[9px] text-zinc-600" title={state.timeUtc}>
+              Epoch {state.timeUtc}
+            </p>
+          </PopupSection>
+        )}
+
+        {tle && (
+          <PopupSection title="TLE orbit" accent={accent}>
+            <div className="grid grid-cols-2 gap-2">
+              <PopupMetric label="Inclination" value={`${tle.inclinationDeg.toFixed(4)}°`} />
+              <PopupMetric label="Eccentricity" value={tle.eccentricity.toFixed(7)} />
+              <PopupMetric label="RAAN" value={`${tle.raanDeg.toFixed(4)}°`} />
+              <PopupMetric label="Arg. perigee" value={`${tle.argumentOfPerigeeDeg.toFixed(4)}°`} />
+              <PopupMetric label="Mean anomaly" value={`${tle.meanAnomalyDeg.toFixed(4)}°`} />
+              <PopupMetric label="Mean motion" value={`${tle.meanMotionRevPerDay.toFixed(6)} rev/d`} />
+              <PopupMetric label="Period" value={`${tle.periodMinutes.toFixed(2)} min`} />
+              {tle.epochUtc && <PopupMetric label="TLE epoch" value={tle.epochUtc.slice(0, 10)} />}
+            </div>
+          </PopupSection>
+        )}
+
+        {satellite.tle && (
+          <details className="mt-3 border-t border-white/[0.07] pt-3">
+            <summary className="cursor-pointer font-mono text-[10px] uppercase tracking-[0.12em] text-zinc-500 transition hover:text-zinc-300">
+              Raw TLE
+            </summary>
+            <div className="mt-2 space-y-1 overflow-x-auto rounded-md border border-white/[0.07] bg-black/35 p-2 font-mono text-[9px] leading-4 text-zinc-500">
+              <p className="whitespace-nowrap">{satellite.tle.line1}</p>
+              <p className="whitespace-nowrap">{satellite.tle.line2}</p>
+            </div>
+          </details>
+        )}
+
+        {!state && !tle && (
+          <p className="mt-4 rounded-md border border-white/[0.07] bg-black/25 p-3 text-xs leading-5 text-zinc-500">
+            No propagated state or TLE orbital elements are currently available for this object.
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function PopupSection({
+  title,
+  accent,
+  children,
+}: {
+  title: string;
+  accent: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="mt-4 border-t border-white/[0.07] pt-3">
+      <h3 className="mb-2 flex items-center gap-2 font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-400">
+        <span className="h-3 w-[3px] rounded-full" style={{ backgroundColor: accent }} />
+        {title}
+      </h3>
+      {children}
+    </div>
+  );
+}
+
+function PopupMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 rounded-md border border-white/[0.07] bg-white/[0.025] px-2.5 py-2">
+      <p className="truncate font-mono text-[8px] uppercase tracking-[0.13em] text-zinc-600">{label}</p>
+      <p className="mt-1 truncate font-mono text-[11px] font-semibold tabular-nums text-zinc-300" title={value}>
+        {value}
+      </p>
     </div>
   );
 }
