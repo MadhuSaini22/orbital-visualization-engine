@@ -1100,12 +1100,12 @@ export function CesiumGlobe({
             ? createRuntimePosition()
             : fallbackPosition ?? stateToSpaceCartesian(Cesium, ephemerisStates[0]),
           point: {
-            color,
-            pixelSize: isSelected ? 11 : 7,
-            outlineColor: isSelected ? Cesium.Color.WHITE : Cesium.Color.BLACK,
-            outlineWidth: isSelected ? 2 : 1,
-            scaleByDistance: new Cesium.NearFarScalar(1500000, 1, 50000000, 0.62),
-            translucencyByDistance: new Cesium.NearFarScalar(1500000, 1, 60000000, 0.42),
+            color: color.brighten(isSelected ? 0.55 : 0.32, new Cesium.Color()),
+            pixelSize: isSelected ? 15 : 11,
+            outlineColor: Cesium.Color.WHITE.withAlpha(isSelected ? 0.95 : 0.68),
+            outlineWidth: isSelected ? 3 : 2,
+            scaleByDistance: new Cesium.NearFarScalar(1500000, 1, 50000000, 0.8),
+            translucencyByDistance: new Cesium.NearFarScalar(1500000, 1, 60000000, 0.72),
             disableDepthTestDistance: 0,
           },
           label: {
@@ -1167,9 +1167,14 @@ export function CesiumGlobe({
       }
       if (entity.point) {
         entity.point.show = new Cesium.ConstantProperty(snapshot.satellite.visual.showMarker);
-        entity.point.pixelSize = new Cesium.ConstantProperty(isSelected ? 11 : 7);
-        entity.point.outlineWidth = new Cesium.ConstantProperty(isSelected ? 2 : 1);
-        entity.point.color = new Cesium.ConstantProperty(color.withAlpha(isSelected ? 1 : 0.88));
+        entity.point.pixelSize = new Cesium.ConstantProperty(isSelected ? 15 : 11);
+        entity.point.outlineWidth = new Cesium.ConstantProperty(isSelected ? 3 : 2);
+        entity.point.outlineColor = new Cesium.ConstantProperty(
+          Cesium.Color.WHITE.withAlpha(isSelected ? 0.95 : 0.68),
+        );
+        entity.point.color = new Cesium.ConstantProperty(
+          color.brighten(isSelected ? 0.55 : 0.32, new Cesium.Color()),
+        );
       }
       if (entity.label) {
         entity.label.show = new Cesium.ConstantProperty(
@@ -1250,12 +1255,10 @@ export function CesiumGlobe({
             && (showAllOrbits || selectedSatelliteIds.includes(snapshot.satellite.id)),
           polyline: {
             positions,
-            width: selectedSatelliteIds.includes(snapshot.satellite.id) ? 1.8 : 1.15,
-            material: new Cesium.PolylineGlowMaterialProperty({
-              color: color.withAlpha(selectedSatelliteIds.includes(snapshot.satellite.id) ? 0.9 : 0.42),
-              glowPower: selectedSatelliteIds.includes(snapshot.satellite.id) ? 0.09 : 0.045,
-              taperPower: 1,
-            }),
+            width: selectedSatelliteIds.includes(snapshot.satellite.id) ? 2.4 : 1.4,
+            material: new Cesium.ColorMaterialProperty(
+              color.withAlpha(selectedSatelliteIds.includes(snapshot.satellite.id) ? 0.96 : 0.72),
+            ),
           },
         }));
       }
@@ -1321,12 +1324,10 @@ export function CesiumGlobe({
         entity.show = snapshot.satellite.visual.showOrbit && (showAllOrbits || selected);
         if (entity.polyline && Cesium) {
           const color = getSnapshotColor(Cesium, snapshot, index);
-          entity.polyline.width = new Cesium.ConstantProperty(selected ? 1.8 : 1.15);
-          entity.polyline.material = new Cesium.PolylineGlowMaterialProperty({
-            color: color.withAlpha(selected ? 0.9 : 0.42),
-            glowPower: selected ? 0.09 : 0.045,
-            taperPower: 1,
-          });
+          entity.polyline.width = new Cesium.ConstantProperty(selected ? 2.4 : 1.4);
+          entity.polyline.material = new Cesium.ColorMaterialProperty(
+            color.withAlpha(selected ? 0.96 : 0.72),
+          );
         }
         if (entity.show) visible += 1;
       }
