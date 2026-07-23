@@ -1723,6 +1723,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const lastTickRef = useRef<number | null>(null);
   const simTimeRef = useRef(simTime);
   const viewerClockAvailableRef = useRef(false);
+  const lastCesiumClockTimeMsRef = useRef<number | null>(null);
   const trajectoryRequestInFlightRef = useRef(false);
   const lastTrajectoryAnchorShiftMsRef = useRef(0);
   const hasOrbitLoaded = satellites.length > 0;
@@ -2524,6 +2525,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     setMessages(result.errors);
     setSatellites(result.satellites);
     setSelectedSatelliteIds(defaultSelectedIds);
+    setShowAllOrbits(false);
     setImportedMissionSpacecraftId(null);
     setShowRangeCheck(false);
     setShowManeuvers(false);
@@ -2693,11 +2695,12 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     }
   }, [clearActiveMissionState, loadTleText, propagationEngine, rememberOrbit]);
 
-  const handleLoadCatalogSatellite = useCallback((satellite: SatelliteObject) => {
-    rememberOrbit(storedOrbitFromCatalogSatellite(satellite, backendCatalogGroup));
+  const handleLoadCatalogSatellite = useCallback((catalogSatellites: SatelliteObject[], satellite: SatelliteObject) => {
+    catalogSatellites.forEach((item) => rememberOrbit(storedOrbitFromCatalogSatellite(item, backendCatalogGroup)));
     clearActiveMissionState();
-    setSatellites([satellite]);
+    setSatellites(catalogSatellites);
     setSelectedSatelliteIds([satellite.id]);
+    setShowAllOrbits(false);
     setShowRangeCheck(false);
     setShowManeuvers(false);
     setShowConjunctions(false);
@@ -2707,7 +2710,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     propagationEngine.clearServerCurrentStates();
     propagationEngine.replaceServerOrbitSnapshots(null);
     propagationEngine.replaceServerGroundTrackSnapshots(null);
-    setMessages([`Loaded ${satellite.name} from backend catalog ${backendCatalogGroup}.`]);
+    setMessages([`Loaded ${catalogSatellites.length} satellites from backend catalog ${backendCatalogGroup}. ${satellite.name} is active.`]);
     setActiveSourceModal(null);
   }, [backendCatalogGroup, clearActiveMissionState, propagationEngine, rememberOrbit, simTime]);
 
@@ -3290,10 +3293,12 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
 
   const handleCesiumClockTick = useCallback((timeIso: string) => {
     viewerClockAvailableRef.current = true;
-    setSimTime((current) => {
-      const next = new Date(timeIso);
-      return Number.isNaN(next.getTime()) || next.getTime() === current.getTime() ? current : next;
-    });
+    const nextTimeMs = Date.parse(timeIso);
+    if (!Number.isFinite(nextTimeMs) || lastCesiumClockTimeMsRef.current === nextTimeMs) return;
+    lastCesiumClockTimeMsRef.current = nextTimeMs;
+    const next = new Date(nextTimeMs);
+    simTimeRef.current = next;
+    setSimTime(next);
   }, []);
 
   const shiftSimulationTime = useCallback((minutes: number) => {
@@ -3767,6 +3772,11 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
 
     lastTickRef.current = Date.now();
     const intervalId = window.setInterval(() => {
+      if (viewerClockAvailableRef.current) {
+        window.clearInterval(intervalId);
+        lastTickRef.current = null;
+        return;
+      }
       const now = Date.now();
       const elapsedMs = lastTickRef.current === null ? 0 : Math.min(now - lastTickRef.current, 250);
       lastTickRef.current = now;
@@ -3788,6 +3798,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
         {hasOrbitLoaded ? (
           <CesiumGlobe
             renderModel={renderModel}
+            runtimeTlePropagation={activeDataSource === "backend" || activeDataSource === "endpoint"}
             frameMode={frameMode}
             simTimeIso={simTime.toISOString()}
             isPlaying={isPlaying}
@@ -4749,7 +4760,7 @@ function OrbitSourceModal({
   onCreateManualOrbit: (request: CreateManualOrbitRequest) => Promise<void>;
   onCreateOrbitFromTemplate: (template: OrbitTemplate) => Promise<void>;
   onLoadImportedTle: (raw: string, sourceLabel: string) => Promise<{ satellites: SatelliteObject[]; errors: string[] }>;
-  onLoadCatalogSatellite: (satellite: SatelliteObject) => void;
+  onLoadCatalogSatellite: (catalogSatellites: SatelliteObject[], satellite: SatelliteObject) => void;
   orbitTemplates: OrbitTemplate[];
   backendCatalogGroup: CatalogGroupId;
   onBackendCatalogGroupChange: (group: CatalogGroupId) => void;
@@ -5092,7 +5103,7 @@ function CatalogOrbitFlow({
 }: {
   backendCatalogGroup: CatalogGroupId;
   onBackendCatalogGroupChange: (group: CatalogGroupId) => void;
-  onLoadCatalogSatellite: (satellite: SatelliteObject) => void;
+  onLoadCatalogSatellite: (catalogSatellites: SatelliteObject[], satellite: SatelliteObject) => void;
 }) {
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<SatelliteObject[]>([]);
@@ -5182,7 +5193,7 @@ function CatalogOrbitFlow({
           <button
             type="button"
             disabled={!selected}
-            onClick={() => selected && onLoadCatalogSatellite(selected)}
+            onClick={() => selected && onLoadCatalogSatellite(items, selected)}
             className="border border-cyan-300 bg-cyan-300 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/10 disabled:text-zinc-500"
           >
             Load
