@@ -17,6 +17,9 @@ function addMinutes(date: Date, minutes: number) {
 }
 
 export class StateCacheService {
+  private groundTrackCacheKey: string | null = null;
+  private groundTrackCache: SatelliteSnapshot[] = [];
+
   constructor(
     private readonly propagator: Propagator,
     private readonly satellites: SatelliteObject[],
@@ -76,11 +79,18 @@ export class StateCacheService {
   }
 
   getGroundTrackSnapshots(timeUtc: string, options: GroundTrackWindowOptions): SatelliteSnapshot[] {
+    const cacheKey = `${timeUtc}|${options.pastMinutes}|${options.stepSec}`;
+    if (this.groundTrackCacheKey === cacheKey) {
+      return this.groundTrackCache;
+    }
+
     const endTime = new Date(timeUtc);
     const startUtc = addMinutes(endTime, -options.pastMinutes).toISOString();
     const endUtc = endTime.toISOString();
 
-    return this.satellites.map((satellite) => ({
+    this.groundTrackCache = this.satellites
+      .filter((satellite) => satellite.visual.showGroundTrack)
+      .map((satellite) => ({
       satellite,
       state: null,
       groundTrack: this.propagator.getTrajectory(
@@ -89,6 +99,8 @@ export class StateCacheService {
         endUtc,
         options.stepSec,
       ),
-    }));
+      }));
+    this.groundTrackCacheKey = cacheKey;
+    return this.groundTrackCache;
   }
 }

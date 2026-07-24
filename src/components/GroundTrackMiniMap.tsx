@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { startTransition, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import type { OrbitState, SatelliteSnapshot } from "@/domain/orbit";
 import { splitGroundTrackByLongitudeWrap } from "@/geometry/groundTrack";
@@ -13,6 +13,7 @@ type GroundTrackMiniMapProps = {
   onRangeChange: (rangeId: GroundTrackRangeId) => void;
   rangeOptions: GroundTrackRangeOption[];
   selectedRangeId: GroundTrackRangeId;
+  isRangeLoading?: boolean;
 };
 
 export type GroundTrackRangeId = "live" | "day" | "week" | "twoMonths" | "twoYears";
@@ -41,8 +42,25 @@ function buildPolylinePoints(states: OrbitState[]) {
     .join(" ");
 }
 
-function getTrackColor(snapshot: SatelliteSnapshot, index: number) {
-  return snapshot.satellite.visual.color ?? ["#63e6be", "#74c0fc", "#ffd43b", "#ff8787"][index % 4];
+const groundTrackPalette = [
+  "#63e6be",
+  "#74c0fc",
+  "#ffd43b",
+  "#ff8787",
+  "#b197fc",
+  "#ffa94d",
+  "#66d9e8",
+  "#f783ac",
+  "#a9e34b",
+  "#91a7ff",
+];
+
+function getTrackColor(snapshot: SatelliteSnapshot, index: number, trackCount: number) {
+  // A spacecraft's 3D scene color is not guaranteed to be unique. On a
+  // multi-track map, use a dedicated palette so every path remains identifiable.
+  return trackCount > 1
+    ? groundTrackPalette[index % groundTrackPalette.length]
+    : snapshot.satellite.visual.color ?? groundTrackPalette[0];
 }
 
 export function GroundTrackMiniMap({
@@ -53,8 +71,10 @@ export function GroundTrackMiniMap({
   onRangeChange,
   rangeOptions,
   selectedRangeId,
+  isRangeLoading = false,
 }: GroundTrackMiniMapProps) {
   const [isExpanded, setIsExpanded] = useState(false);
+
   const visibleTracks = useMemo(() => {
     return groundTrackSnapshots.filter((snapshot) => snapshot.satellite.visual.showGroundTrack);
   }, [groundTrackSnapshots]);
@@ -123,8 +143,18 @@ export function GroundTrackMiniMap({
             </div>
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
               <select
-                value={selectedRangeId}
-                onChange={(event) => onRangeChange(event.target.value as GroundTrackRangeId)}
+                key={selectedRangeId}
+                defaultValue={selectedRangeId}
+                onChange={(event) => {
+                  const rangeId = event.target.value as GroundTrackRangeId;
+                  // Keep the native selection responsive, then start the
+                  // potentially expensive history refresh after it has painted.
+                  requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                      startTransition(() => onRangeChange(rangeId));
+                    });
+                  });
+                }}
                 className="min-w-48 border border-cyan-300/20 bg-black/45 px-3 py-2 font-mono text-xs uppercase text-cyan-100 outline-none transition focus:border-cyan-300"
                 aria-label="Expanded ground track time range"
               >
@@ -136,12 +166,48 @@ export function GroundTrackMiniMap({
               </select>
               <span className="font-mono text-xs text-lime-200">{visibleTracks.length} ground tracks visible</span>
             </div>
-            <GroundTrackSvg
-              className="mt-4 min-h-0 flex-1 border border-cyan-300/15 bg-black/45"
-              currentById={currentById}
-              selectedSatelliteIds={selectedSatelliteIds}
-              visibleTracks={visibleTracks}
-            />
+            {visibleTracks.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2" aria-label="Ground track legend">
+                {visibleTracks.map((track, index) => (
+                  <div
+                    key={track.satellite.id}
+                    className="flex min-w-0 items-center gap-2 font-mono text-[10px] uppercase tracking-wide text-zinc-300"
+                    title={track.satellite.noradId ? `${track.satellite.name} · NORAD ${track.satellite.noradId}` : track.satellite.name}
+                  >
+                    <span
+                      className="h-2.5 w-2.5 shrink-0 rounded-full shadow-[0_0_7px_currentColor]"
+                      style={{ color: getTrackColor(track, index, visibleTracks.length), backgroundColor: "currentColor" }}
+                    />
+                    <span className="max-w-48 truncate">{track.satellite.name}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="relative mt-4 min-h-0 flex-1 overflow-hidden border border-cyan-300/15 bg-black/45">
+              <GroundTrackSvg
+                className={`h-full w-full transition duration-300 ${isRangeLoading ? "scale-[1.01] opacity-35 blur-[2px]" : "opacity-100"}`}
+                currentById={currentById}
+                selectedSatelliteIds={selectedSatelliteIds}
+                visibleTracks={visibleTracks}
+              />
+              {isRangeLoading && (
+                <div
+                  className="absolute inset-0 flex items-center justify-center bg-[#02090d]/45 backdrop-blur-[1px]"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <div className="flex min-w-64 flex-col items-center border border-cyan-300/25 bg-[#061015]/90 px-6 py-5 shadow-2xl">
+                    <span className="h-7 w-7 animate-spin rounded-full border-2 border-cyan-300/20 border-t-cyan-200" />
+                    <span className="mt-3 font-mono text-xs font-semibold uppercase tracking-[0.18em] text-cyan-100">
+                      Generating ground tracks
+                    </span>
+                    <span className="mt-1 font-mono text-[10px] uppercase tracking-wider text-zinc-400">
+                      {rangeOptions.find((option) => option.id === selectedRangeId)?.label ?? "Selected range"}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>,
         document.body,
@@ -199,7 +265,7 @@ function GroundTrackSvg({
 
       {/* Tracks are split at longitude wrap so date-line crossings do not draw across the whole map. */}
       {visibleTracks.map((snapshot, index) => {
-        const color = getTrackColor(snapshot, index);
+        const color = getTrackColor(snapshot, index, visibleTracks.length);
         const isSelected = selectedSatelliteIds.includes(snapshot.satellite.id);
         const segments = splitGroundTrackByLongitudeWrap(snapshot.groundTrack ?? []);
 
@@ -224,7 +290,7 @@ function GroundTrackSvg({
         }
 
         const point = projectLatLon(current.state);
-        const color = getTrackColor(track, index);
+        const color = getTrackColor(track, index, visibleTracks.length);
         const isSelected = selectedSatelliteIds.includes(track.satellite.id);
 
         return (

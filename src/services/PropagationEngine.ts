@@ -331,9 +331,9 @@ export class PropagationEngine {
   ): Promise<BackendSnapshotResult> {
     this.status = "loading-backend";
     const centerTime = new Date(request.centerUtc);
-    const snapshots: SatelliteSnapshot[] = [];
-
-    for (const satellite of request.satellites) {
+    const requestedStartMs = new Date(request.startUtc).getTime();
+    const requestedEndMs = new Date(request.endUtc).getTime();
+    const snapshots = await Promise.all(request.satellites.map(async (satellite): Promise<SatelliteSnapshot> => {
       try {
         const response = request.source === "manual" && request.manualOrbitId
           ? await fetchManualOrbitTrajectory(
@@ -350,9 +350,14 @@ export class PropagationEngine {
               request.stepSec,
               { signal: request.signal },
             );
-        const states = response.states.map((state) => backendEphemerisStateToOrbitState(satellite.id, state));
+        const states = response.states
+          .map((state) => backendEphemerisStateToOrbitState(satellite.id, state))
+          .filter((state) => {
+            const stateMs = new Date(state.timeUtc).getTime();
+            return stateMs >= requestedStartMs && stateMs <= requestedEndMs;
+          });
 
-        snapshots.push(kind === "trajectory"
+        return kind === "trajectory"
           ? {
               satellite,
               state: null,
@@ -365,30 +370,25 @@ export class PropagationEngine {
               satellite,
               state: null,
               groundTrack: states,
-            });
+            };
       } catch (error) {
         if (isAbortError(error)) {
           throw error;
         }
-        this.status = "error";
-        snapshots.push({
+        return {
           satellite,
           state: null,
           error: error instanceof Error ? error.message : backendTrajectoryErrorMessage(kind),
-        });
-        return {
-          status: this.status,
-          snapshots,
-          failed: true,
         };
       }
-    }
+    }));
 
-    this.status = "ready";
+    const failed = snapshots.some((snapshot) => Boolean(snapshot.error));
+    this.status = failed ? "error" : "ready";
     return {
       status: this.status,
       snapshots,
-      failed: request.satellites.length > 0 && snapshots.every((snapshot) => snapshot.error),
+      failed,
     };
   }
 

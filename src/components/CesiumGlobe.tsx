@@ -270,6 +270,27 @@ function isValidOrbitState(state: OrbitState | null): state is OrbitState {
   return Number.isFinite(radiusKm) && radiusKm > 6450;
 }
 
+function isTleConsistentOrbitState(snapshot: SatelliteSnapshot, state: OrbitState | null): state is OrbitState {
+  if (!isValidOrbitState(state)) return false;
+  const line2 = snapshot.satellite.tle?.line2;
+  if (!line2 || line2.length < 63) return true;
+
+  const meanMotionRevPerDay = Number(line2.slice(52, 63));
+  const eccentricity = Number(`0.${line2.slice(26, 33).trim()}`);
+  if (!Number.isFinite(meanMotionRevPerDay) || meanMotionRevPerDay <= 0 || !Number.isFinite(eccentricity)) {
+    return true;
+  }
+
+  const meanMotionRadSec = meanMotionRevPerDay * Math.PI * 2 / 86400;
+  const semiMajorAxisKm = Math.cbrt(398600.4418 / (meanMotionRadSec * meanMotionRadSec));
+  const position = state.positionEciKm ?? state.positionEcefKm;
+  if (!position) return false;
+  const radiusKm = Math.hypot(...position);
+  const minimumExpectedRadiusKm = semiMajorAxisKm * Math.max(1 - eccentricity, 0.05) * 0.8;
+  const maximumExpectedRadiusKm = semiMajorAxisKm * (1 + eccentricity) * 1.2;
+  return radiusKm >= minimumExpectedRadiusKm && radiusKm <= maximumExpectedRadiusKm;
+}
+
 function buildValidatedRuntimeRevolution(
   propagator: SatelliteJsPropagator,
   snapshot: SatelliteSnapshot,
@@ -287,7 +308,7 @@ function buildValidatedRuntimeRevolution(
       const timeMs = startMs + (periodMs * index) / 180;
       const state = propagator.getState(snapshot.satellite.id, new Date(timeMs).toISOString());
       const stateTimeMs = state ? new Date(state.timeUtc).getTime() : Number.NaN;
-      if (!isValidOrbitState(state) || stateTimeMs <= previousTimeMs) {
+      if (!isTleConsistentOrbitState(snapshot, state) || stateTimeMs <= previousTimeMs) {
         valid = false;
         break;
       }
@@ -615,7 +636,7 @@ export function CesiumGlobe({
         const epochMs = tleEpochMs(snapshot.satellite.tle?.line1);
         return [
           snapshot.satellite.id,
-          isValidOrbitState(requestedState) || epochMs === null ? 0 : epochMs - requestedTimeMs,
+          isTleConsistentOrbitState(snapshot, requestedState) || epochMs === null ? 0 : epochMs - requestedTimeMs,
         ];
       }));
     } else {
@@ -1082,7 +1103,7 @@ export function CesiumGlobe({
         const viewerTimeMs = Cesium.JulianDate.toDate(time).getTime();
         const propagationTimeMs = viewerTimeMs + (runtimeTimeOffsetsMsRef.current.get(snapshot.satellite.id) ?? 0);
         const state = propagator.getState(snapshot.satellite.id, new Date(propagationTimeMs).toISOString());
-        if (!isValidOrbitState(state)) return undefined;
+        if (!isTleConsistentOrbitState(snapshot, state)) return undefined;
         runtimeCesiumUpdatesRef.current.set(
           snapshot.satellite.id,
           (runtimeCesiumUpdatesRef.current.get(snapshot.satellite.id) ?? 0) + 1,
@@ -1148,7 +1169,7 @@ export function CesiumGlobe({
           callbackPositionPropertyAttached: true,
           currentJulianDate: Cesium.JulianDate.toDate(currentJulianDate).toISOString(),
           propagationTime: new Date(propagationTimeMs).toISOString(),
-          currentPropagatedPosition: isValidOrbitState(currentState) ? currentState.positionEcefKm : null,
+          currentPropagatedPosition: isTleConsistentOrbitState(snapshot, currentState) ? currentState.positionEcefKm : null,
           reactUpdates: runtimeReactUpdatesRef.current,
           cesiumUpdates: runtimeCesiumUpdatesRef.current.get(snapshot.satellite.id) ?? 0,
         });
@@ -1221,7 +1242,7 @@ export function CesiumGlobe({
     geometrySnapshots.forEach((snapshot, index) => {
       const sourceStates = snapshot.trajectory ?? snapshot.futureTrajectory ?? [];
       const key = runtimeTlePropagation
-        ? `runtime:${snapshot.satellite.tle?.line1 ?? ""}:${snapshot.satellite.tle?.line2 ?? ""}`
+        ? `runtime-v2:${snapshot.satellite.tle?.line1 ?? ""}:${snapshot.satellite.tle?.line2 ?? ""}`
         : orbitGeometryKey(snapshot, sourceStates);
       if (orbitGeometryKeysRef.current.get(snapshot.satellite.id) === key) return;
       const runtimeStates = runtimeTlePropagation && runtimePropagatorRef.current

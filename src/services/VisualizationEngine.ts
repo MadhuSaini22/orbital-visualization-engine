@@ -28,6 +28,7 @@ export class VisualizationEngine {
     const pathLayers = this.buildPathLayers(
       snapshots,
       displayOrbitSnapshots,
+      request.propagation.groundTrackSnapshots,
       groundOperationsTargetSnapshot,
       request.selectedSatelliteIds,
       request.display.allOrbits,
@@ -120,6 +121,7 @@ export class VisualizationEngine {
   private buildPathLayers(
     snapshots: SatelliteSnapshot[],
     orbitSnapshots: SatelliteSnapshot[],
+    propagatedGroundTrackSnapshots: SatelliteSnapshot[],
     groundOperationsTargetSnapshot: SatelliteSnapshot | null,
     selectedSatelliteIds: string[],
     showAllOrbits: boolean,
@@ -128,12 +130,11 @@ export class VisualizationEngine {
     const pathSourceSnapshots = orbitSnapshots.length > 0 ? orbitSnapshots : snapshots;
     const orbitPathSnapshots = pathSourceSnapshots.filter((snapshot) => snapshot.satellite.visual.showOrbit && isLayerVisible(snapshot));
     const trailSnapshots = orbitSnapshots.filter((snapshot) => snapshot.satellite.visual.showTrail && isLayerVisible(snapshot));
-    const groundTrackSnapshots = orbitSnapshots.filter((snapshot) => snapshot.satellite.visual.showGroundTrack && isLayerVisible(snapshot));
+    const groundTrackSnapshots = propagatedGroundTrackSnapshots.filter((snapshot) => snapshot.satellite.visual.showGroundTrack);
 
     if (
       groundOperationsTargetSnapshot?.groundTrack?.length
       && groundOperationsTargetSnapshot.satellite.visual.showGroundTrack
-      && isLayerVisible(groundOperationsTargetSnapshot)
     ) {
       const existingIndex = groundTrackSnapshots.findIndex(
         (snapshot) => snapshot.satellite.id === groundOperationsTargetSnapshot.satellite.id,

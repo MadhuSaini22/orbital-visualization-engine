@@ -8,7 +8,7 @@ import { ToastContainer, toast } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 import type { OrbitState, SatelliteObject, SatelliteSnapshot, SatelliteVisualSettings } from "@/domain/orbit";
 import { GroundTrackMiniMap } from "@/components/GroundTrackMiniMap";
-import type { GroundTrackRangeOption } from "@/components/GroundTrackMiniMap";
+import type { GroundTrackRangeId, GroundTrackRangeOption } from "@/components/GroundTrackMiniMap";
 import {
   GroundOperationsModalContent,
   groundOpsHorizonOptions,
@@ -431,6 +431,17 @@ function getRangePair(selectedSatelliteIds: string[]) {
 
 function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * 60 * 1000);
+}
+
+function satelliteTleEpoch(satellite: SatelliteObject) {
+  const line1 = satellite.tle?.line1;
+  if (!line1 || line1.length < 32) return null;
+  const shortYear = Number(line1.slice(18, 20));
+  const dayOfYear = Number(line1.slice(20, 32));
+  if (!Number.isFinite(shortYear) || !Number.isFinite(dayOfYear)) return null;
+  const year = shortYear >= 57 ? 1900 + shortYear : 2000 + shortYear;
+  const epoch = new Date(Date.UTC(year, 0, 1) + (dayOfYear - 1) * 86400000);
+  return Number.isFinite(epoch.getTime()) ? epoch : null;
 }
 
 function getEphemerisSampleStepSec(source: ActiveDataSource, propagatorType?: PropagatorTypeId) {
@@ -1688,6 +1699,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const [isSourcePickerOpen, setIsSourcePickerOpen] = useState(false);
   const [backendCatalogGroup, setBackendCatalogGroup] = useState<CatalogGroupId>("STATIONS");
   const [messages, setMessages] = useState<string[]>([]);
+  const [isGroundTrackRangeLoading, setIsGroundTrackRangeLoading] = useState(false);
   const [isManeuverModalOpen, setIsManeuverModalOpen] = useState(false);
   const [groundOpsHorizon, setGroundOpsHorizon] = useState<GroundOpsHorizon>({ id: "SIX_HOURS", customHours: "6" });
   const [groundOpsHorizonSnapshot, setGroundOpsHorizonSnapshot] = useState<SatelliteSnapshot | null>(null);
@@ -2542,6 +2554,11 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     setSatelliteVisual(satelliteId, key, value);
   }, [setSatelliteVisual]);
 
+  const updateGroundTrackRange = useCallback((rangeId: GroundTrackRangeId) => {
+    setIsGroundTrackRangeLoading(true);
+    setGroundTrackRangeId(rangeId);
+  }, [setGroundTrackRangeId]);
+
   const keepSatelliteInSelection = useCallback((satelliteId: string) => {
     setSelectedSatelliteIds((current) => {
       if (current.includes(satelliteId)) {
@@ -2567,7 +2584,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   ) => {
     updateSatelliteVisual(satelliteId, key, value);
 
-    if (value && ["showOrbit", "showTrail", "showGroundTrack"].includes(key)) {
+    if (value && ["showOrbit", "showTrail"].includes(key)) {
       keepSatelliteInSelection(satelliteId);
     }
   }, [keepSatelliteInSelection, updateSatelliteVisual]);
@@ -2696,6 +2713,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   }, [clearActiveMissionState, loadTleText, propagationEngine, rememberOrbit]);
 
   const handleLoadCatalogSatellite = useCallback((catalogSatellites: SatelliteObject[], satellite: SatelliteObject) => {
+    const catalogEpoch = satelliteTleEpoch(satellite) ?? simTime;
     catalogSatellites.forEach((item) => rememberOrbit(storedOrbitFromCatalogSatellite(item, backendCatalogGroup)));
     clearActiveMissionState();
     setSatellites(catalogSatellites);
@@ -2706,13 +2724,14 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     setShowConjunctions(false);
     setActiveDataSource("backend");
     setManualOrbitId(null);
-    setTrajectoryAnchorTime(simTime);
+    setSimTime(catalogEpoch);
+    setTrajectoryAnchorTime(catalogEpoch);
     propagationEngine.clearServerCurrentStates();
     propagationEngine.replaceServerOrbitSnapshots(null);
     propagationEngine.replaceServerGroundTrackSnapshots(null);
     setMessages([`Loaded ${catalogSatellites.length} satellites from backend catalog ${backendCatalogGroup}. ${satellite.name} is active.`]);
     setActiveSourceModal(null);
-  }, [backendCatalogGroup, clearActiveMissionState, propagationEngine, rememberOrbit, simTime]);
+  }, [backendCatalogGroup, clearActiveMissionState, propagationEngine, rememberOrbit, setSimTime, setTrajectoryAnchorTime, simTime]);
 
   const applySelectedPreset = useCallback(async (preset: AnalysisPresetId) => {
     const result = await analysisEngine.runAnalysis({
@@ -3566,20 +3585,21 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     async function loadServerGroundTracks() {
       if (!isServerDrivenSource(activeDataSource)) {
         propagationEngine.replaceServerGroundTrackSnapshots(null);
+        setIsGroundTrackRangeLoading(false);
         return;
       }
       if (activeDataSource === "manual" && !manualOrbitId) {
+        setIsGroundTrackRangeLoading(false);
         return;
       }
       if (backendRequestsPaused) {
+        setIsGroundTrackRangeLoading(false);
         return;
       }
 
       const end = new Date(serverGroundTrackAnchorMs);
       const start = addMinutes(end, -groundTrackRange.pastMinutes);
-      const targetSatellites = satellites.filter((satellite) => (
-        satellite.visual.showGroundTrack && (showAllOrbits || selectedSatelliteIds.includes(satellite.id))
-      ));
+      const targetSatellites = satellites.filter((satellite) => satellite.visual.showGroundTrack);
 
       let result;
       try {
@@ -3598,6 +3618,10 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
           pauseBackendRequests(error);
         }
         return;
+      } finally {
+        if (!ignore) {
+          setIsGroundTrackRangeLoading(false);
+        }
       }
 
       if (!ignore) {
@@ -3613,7 +3637,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       ignore = true;
       controller.abort();
     };
-  }, [activeDataSource, backendRequestsPaused, groundTrackRange.pastMinutes, groundTrackStepSec, manualOrbitId, pauseBackendRequests, propagationEngine, satellites, selectedSatelliteIds, serverGroundTrackAnchorMs, showAllOrbits]);
+  }, [activeDataSource, backendRequestsPaused, groundTrackRange.pastMinutes, groundTrackStepSec, manualOrbitId, pauseBackendRequests, propagationEngine, satellites, serverGroundTrackAnchorMs]);
 
   useEffect(() => {
     let ignore = false;
@@ -3908,7 +3932,8 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
             rangeLabel={groundTrackRange.label}
             rangeOptions={groundTrackRangeOptions}
             selectedRangeId={groundTrackRangeId}
-            onRangeChange={setGroundTrackRangeId}
+            onRangeChange={updateGroundTrackRange}
+            isRangeLoading={isGroundTrackRangeLoading}
           />
         )}
       </section>
