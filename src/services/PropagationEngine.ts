@@ -1,6 +1,4 @@
 import type { OrbitState, SatelliteObject, SatelliteSnapshot } from "@/domain/orbit";
-import { SatelliteJsPropagator } from "@/propagation/SatelliteJsPropagator";
-import type { Propagator } from "@/propagation/PropagatorInterface";
 import { backendEphemerisStateToOrbitState, interpolateOrbitStateSamples } from "@/services/FrameTransformService";
 import {
   fetchCurrentOrbitState,
@@ -8,7 +6,6 @@ import {
   fetchManualOrbitTrajectory,
   fetchOrbitTrajectory,
 } from "@/services/orbitServerApi";
-import { StateCacheService } from "@/services/StateCacheService";
 
 export type PropagationDataSource = "sample" | "endpoint" | "backend" | "manual";
 
@@ -101,8 +98,6 @@ export function propagationEventStateKey(satelliteId: string, timeUtc: string) {
 }
 
 export class PropagationEngine {
-  private propagator: Propagator;
-  private stateCache: StateCacheService;
   private status: PropagationStatus = "idle";
   private serverOrbitSnapshots: SatelliteSnapshot[] | null = null;
   private serverGroundTrackSnapshots: SatelliteSnapshot[] | null = null;
@@ -110,15 +105,10 @@ export class PropagationEngine {
   private serverEventStateByKey = new Map<string, OrbitState>();
   private readonly listeners = new Set<() => void>();
 
-  constructor(private satellites: SatelliteObject[] = []) {
-    this.propagator = new SatelliteJsPropagator(satellites);
-    this.stateCache = new StateCacheService(this.propagator, satellites);
-  }
+  constructor(private satellites: SatelliteObject[] = []) {}
 
   setSatellites(satellites: SatelliteObject[]) {
     this.satellites = satellites;
-    this.propagator = new SatelliteJsPropagator(satellites);
-    this.stateCache = new StateCacheService(this.propagator, satellites);
     this.notify();
   }
 
@@ -191,11 +181,20 @@ export class PropagationEngine {
   }
 
   getState(satelliteId: string, timeUtc: string) {
-    return this.propagator.getState(satelliteId, timeUtc);
+    const fromEvent = this.serverEventStateByKey.get(propagationEventStateKey(satelliteId, timeUtc));
+    return fromEvent ?? this.serverStateBySatelliteId.get(satelliteId) ?? null;
   }
 
   getTrajectory(satelliteId: string, startUtc: string, endUtc: string, stepSec: number) {
-    return this.propagator.getTrajectory(satelliteId, startUtc, endUtc, stepSec);
+    void stepSec;
+    const snapshots = this.serverOrbitSnapshots ?? this.serverGroundTrackSnapshots ?? [];
+    const startMs = new Date(startUtc).getTime();
+    const endMs = new Date(endUtc).getTime();
+    const snapshot = snapshots.find((item) => item.satellite.id === satelliteId);
+    return (snapshot?.trajectory ?? snapshot?.groundTrack ?? []).filter((state) => {
+      const timeMs = new Date(state.timeUtc).getTime();
+      return timeMs >= startMs && timeMs <= endMs;
+    });
   }
 
   interpolateState(satelliteId: string, samples: OrbitState[] | undefined, timeUtc: string) {
@@ -209,8 +208,9 @@ export class PropagationEngine {
     options: { manualOrbitId?: string | null; signal?: AbortSignal } = {},
   ) {
     this.status = "loading-backend";
-    const backendState = source === "manual" && options.manualOrbitId
-      ? await fetchManualOrbitState(options.manualOrbitId, timeUtc, { signal: options.signal })
+    const manualOrbitId = satellite.backendOrbitId ?? options.manualOrbitId;
+    const backendState = source === "manual" && manualOrbitId
+      ? await fetchManualOrbitState(manualOrbitId, timeUtc, { signal: options.signal })
       : await fetchCurrentOrbitState(satellite.noradId ?? satellite.id, timeUtc, { signal: options.signal });
     this.status = "ready";
     const state = backendEphemerisStateToOrbitState(satellite.id, backendState);
@@ -247,8 +247,9 @@ export class PropagationEngine {
 
     for (const request of uniqueRequests) {
       try {
-        const backendState = source === "manual" && options.manualOrbitId
-          ? await fetchManualOrbitState(options.manualOrbitId, request.timeUtc, { signal: options.signal })
+        const manualOrbitId = request.satellite.backendOrbitId ?? options.manualOrbitId;
+        const backendState = source === "manual" && manualOrbitId
+          ? await fetchManualOrbitState(manualOrbitId, request.timeUtc, { signal: options.signal })
           : await fetchCurrentOrbitState(request.satellite.noradId ?? request.satellite.id, request.timeUtc, { signal: options.signal });
         pairs.push([
           propagationEventStateKey(request.satellite.id, request.timeUtc),
@@ -282,7 +283,7 @@ export class PropagationEngine {
       return this.serverOrbitSnapshots;
     }
 
-    return this.stateCache.getWindowedSnapshots(request.trajectoryAnchorUtc, request.trajectoryWindow);
+    return [];
   }
 
   private currentSnapshots(request: PropagationRequest, displayOrbitSnapshots: SatelliteSnapshot[]) {
@@ -305,9 +306,7 @@ export class PropagationEngine {
         };
       }
 
-      const fallbackState = isServerDrivenSource(request.source)
-        ? this.serverStateBySatelliteId.get(satellite.id) ?? null
-        : this.propagator.getState(satellite.id, request.simTimeUtc);
+      const fallbackState = this.serverStateBySatelliteId.get(satellite.id) ?? null;
 
       return {
         satellite,
@@ -322,7 +321,7 @@ export class PropagationEngine {
       return this.serverGroundTrackSnapshots;
     }
 
-    return this.stateCache.getGroundTrackSnapshots(request.groundTrackAnchorUtc, request.groundTrackWindow);
+    return [];
   }
 
   private async loadServerSnapshots(
@@ -335,9 +334,10 @@ export class PropagationEngine {
     const requestedEndMs = new Date(request.endUtc).getTime();
     const snapshots = await Promise.all(request.satellites.map(async (satellite): Promise<SatelliteSnapshot> => {
       try {
-        const response = request.source === "manual" && request.manualOrbitId
+        const manualOrbitId = satellite.backendOrbitId ?? request.manualOrbitId;
+        const response = request.source === "manual" && manualOrbitId
           ? await fetchManualOrbitTrajectory(
-              request.manualOrbitId,
+              manualOrbitId,
               request.startUtc,
               request.endUtc,
               request.stepSec,

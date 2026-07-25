@@ -11,6 +11,8 @@ export type SatelliteObject = {
   id: string;
   name: string;
   noradId?: string;
+  /** Backend-owned manual-orbit identifier for imported/non-catalog TLEs. */
+  backendOrbitId?: string;
   sourceType: "TLE" | "EPHEMERIS" | "MANUAL_STATE";
   tle?: {
     line1: string;

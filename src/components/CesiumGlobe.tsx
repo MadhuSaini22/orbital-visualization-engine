@@ -8,7 +8,6 @@ import { getConjunctionTone } from "@/domain/conjunction";
 import { getManeuverTone } from "@/domain/maneuver";
 import type { CesiumRenderModel, GroundStationVisualizationModel } from "@/domain/visualization";
 import { splitGroundTrackByLongitudeWrap } from "@/geometry/groundTrack";
-import { SatelliteJsPropagator } from "@/propagation/SatelliteJsPropagator";
 
 type CesiumModule = typeof import("cesium");
 type Viewer = import("cesium").Viewer;
@@ -18,7 +17,6 @@ type FrameMode = "earth-fixed" | "inertial";
 
 type CesiumGlobeProps = {
   renderModel: CesiumRenderModel;
-  runtimeTlePropagation: boolean;
   frameMode: FrameMode;
   simTimeIso: string;
   isPlaying: boolean;
@@ -254,72 +252,6 @@ function tleEpochMs(line1: string | undefined) {
   return Date.UTC(year, 0, 1) + (dayOfYear - 1) * 86400000;
 }
 
-function tlePeriodMs(line2: string | undefined) {
-  if (!line2 || line2.length < 63) return 100 * 60000;
-  const revolutionsPerDay = Number(line2.slice(52, 63));
-  return Number.isFinite(revolutionsPerDay) && revolutionsPerDay > 0
-    ? 86400000 / revolutionsPerDay
-    : 100 * 60000;
-}
-
-function isValidOrbitState(state: OrbitState | null): state is OrbitState {
-  if (!state || !Number.isFinite(new Date(state.timeUtc).getTime()) || state.altitudeKm < 80) return false;
-  const position = state.positionEcefKm ?? state.positionEciKm;
-  if (!position || position.some((value) => !Number.isFinite(value))) return false;
-  const radiusKm = Math.hypot(...position);
-  return Number.isFinite(radiusKm) && radiusKm > 6450;
-}
-
-function isTleConsistentOrbitState(snapshot: SatelliteSnapshot, state: OrbitState | null): state is OrbitState {
-  if (!isValidOrbitState(state)) return false;
-  const line2 = snapshot.satellite.tle?.line2;
-  if (!line2 || line2.length < 63) return true;
-
-  const meanMotionRevPerDay = Number(line2.slice(52, 63));
-  const eccentricity = Number(`0.${line2.slice(26, 33).trim()}`);
-  if (!Number.isFinite(meanMotionRevPerDay) || meanMotionRevPerDay <= 0 || !Number.isFinite(eccentricity)) {
-    return true;
-  }
-
-  const meanMotionRadSec = meanMotionRevPerDay * Math.PI * 2 / 86400;
-  const semiMajorAxisKm = Math.cbrt(398600.4418 / (meanMotionRadSec * meanMotionRadSec));
-  const position = state.positionEciKm ?? state.positionEcefKm;
-  if (!position) return false;
-  const radiusKm = Math.hypot(...position);
-  const minimumExpectedRadiusKm = semiMajorAxisKm * Math.max(1 - eccentricity, 0.05) * 0.8;
-  const maximumExpectedRadiusKm = semiMajorAxisKm * (1 + eccentricity) * 1.2;
-  return radiusKm >= minimumExpectedRadiusKm && radiusKm <= maximumExpectedRadiusKm;
-}
-
-function buildValidatedRuntimeRevolution(
-  propagator: SatelliteJsPropagator,
-  snapshot: SatelliteSnapshot,
-  requestedStartMs: number,
-) {
-  const periodMs = tlePeriodMs(snapshot.satellite.tle?.line2);
-  const tleStartMs = tleEpochMs(snapshot.satellite.tle?.line1);
-  const candidates = [requestedStartMs, tleStartMs].filter((value): value is number => value !== null);
-
-  for (const startMs of candidates) {
-    const states: OrbitState[] = [];
-    let previousTimeMs = Number.NEGATIVE_INFINITY;
-    let valid = true;
-    for (let index = 0; index <= 180; index += 1) {
-      const timeMs = startMs + (periodMs * index) / 180;
-      const state = propagator.getState(snapshot.satellite.id, new Date(timeMs).toISOString());
-      const stateTimeMs = state ? new Date(state.timeUtc).getTime() : Number.NaN;
-      if (!isTleConsistentOrbitState(snapshot, state) || stateTimeMs <= previousTimeMs) {
-        valid = false;
-        break;
-      }
-      states.push(state);
-      previousTimeMs = stateTimeMs;
-    }
-    if (valid && states.length === 181) return states;
-  }
-  return [];
-}
-
 function eciKmToFixedCartesianAtGmst(
   Cesium: CesiumModule,
   positionEciKm: [number, number, number],
@@ -346,137 +278,6 @@ function stateToOrbitArcCartesian(
   }
 
   return stateToSpaceCartesian(Cesium, state);
-}
-
-function dot(a: [number, number, number], b: [number, number, number]) {
-  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-function cross(a: [number, number, number], b: [number, number, number]): [number, number, number] {
-  return [
-    a[1] * b[2] - a[2] * b[1],
-    a[2] * b[0] - a[0] * b[2],
-    a[0] * b[1] - a[1] * b[0],
-  ];
-}
-
-function magnitude(vector: [number, number, number]) {
-  return Math.sqrt(dot(vector, vector));
-}
-
-function normalize(vector: [number, number, number]): [number, number, number] | null {
-  const length = magnitude(vector);
-  if (length === 0) {
-    return null;
-  }
-
-  return [vector[0] / length, vector[1] / length, vector[2] / length];
-}
-
-function subtract(a: [number, number, number], b: [number, number, number]): [number, number, number] {
-  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-}
-
-function scale(vector: [number, number, number], factor: number): [number, number, number] {
-  return [vector[0] * factor, vector[1] * factor, vector[2] * factor];
-}
-
-function add(a: [number, number, number], b: [number, number, number]): [number, number, number] {
-  return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
-}
-
-function buildOsculatingOrbitArc(
-  Cesium: CesiumModule,
-  state: OrbitState,
-  displayGmstRad?: number,
-): Cartesian3[] {
-  if (state.positionEciKm && state.velocityEciKmps && typeof displayGmstRad === "number") {
-    return buildOsculatingOrbitArcFromVectors(
-      Cesium,
-      state.positionEciKm,
-      state.velocityEciKmps,
-      (pointKm) => eciKmToFixedCartesianAtGmst(Cesium, pointKm, displayGmstRad),
-    );
-  }
-
-  if (state.positionEcefKm && state.velocityEcefKmps) {
-    const earthRotationRadPerSec = 7.2921159e-5;
-    const [xKm, yKm] = state.positionEcefKm;
-    const inertialVelocityApproxKmps = add(state.velocityEcefKmps, [
-      -earthRotationRadPerSec * yKm,
-      earthRotationRadPerSec * xKm,
-      0,
-    ]);
-
-    return buildOsculatingOrbitArcFromVectors(
-      Cesium,
-      state.positionEcefKm,
-      inertialVelocityApproxKmps,
-      (pointKm) => new Cesium.Cartesian3(pointKm[0] * 1000, pointKm[1] * 1000, pointKm[2] * 1000),
-    );
-  }
-
-    return [];
-}
-
-function buildOsculatingOrbitArcFromVectors(
-  Cesium: CesiumModule,
-  positionKm: [number, number, number],
-  velocityKmps: [number, number, number],
-  toCartesian: (pointKm: [number, number, number]) => Cartesian3,
-): Cartesian3[] {
-  const muEarthKm3S2 = 398600.4418;
-  const r = positionKm;
-  const v = velocityKmps;
-  const rMag = magnitude(r);
-  const h = cross(r, v);
-  const hMag = magnitude(h);
-  if (rMag === 0 || hMag === 0) {
-    return [];
-  }
-
-  const eccentricityVector = subtract(scale(cross(v, h), 1 / muEarthKm3S2), scale(r, 1 / rMag));
-  const eccentricity = magnitude(eccentricityVector);
-  const semiLatusRectumKm = (hMag * hMag) / muEarthKm3S2;
-
-  // Low-Earth TLE examples are nearly circular. For those, using the current
-  // radius direction as the first basis vector makes the live marker sit on
-  // the drawn arc instead of drifting beside an arbitrary perigee direction.
-  const perigeeBasis = eccentricity > 0.01
-    ? normalize(eccentricityVector)
-    : normalize(r);
-  if (!perigeeBasis) {
-    return [];
-  }
-
-  const normalBasis = normalize(h);
-  if (!normalBasis) {
-    return [];
-  }
-
-  const transverseBasis = normalize(cross(normalBasis, perigeeBasis));
-  if (!transverseBasis) {
-    return [];
-  }
-
-  const points: Cartesian3[] = [];
-  for (let index = 0; index <= 360; index += 2) {
-    const trueAnomaly = Cesium.Math.toRadians(index);
-    const denominator = 1 + eccentricity * Math.cos(trueAnomaly);
-    if (denominator <= 0) {
-      continue;
-    }
-
-    const radiusKm = semiLatusRectumKm / denominator;
-    const eciPoint = add(
-      scale(perigeeBasis, radiusKm * Math.cos(trueAnomaly)),
-      scale(transverseBasis, radiusKm * Math.sin(trueAnomaly)),
-    );
-
-    points.push(toCartesian(eciPoint));
-  }
-
-  return points;
 }
 
 function stateToGroundCartesian(Cesium: CesiumModule, state: OrbitState): Cartesian3 {
@@ -526,7 +327,6 @@ function isFiniteStationCoordinate(station: GroundStationVisualizationModel["mar
 
 export function CesiumGlobe({
   renderModel,
-  runtimeTlePropagation,
   frameMode,
   simTimeIso,
   isPlaying,
@@ -563,14 +363,7 @@ export function CesiumGlobe({
   const trailEntitiesRef = useRef<Map<string, Entity>>(new Map());
   const groundTrackEntitiesRef = useRef<Map<string, Entity[]>>(new Map());
   const orbitGeometryKeysRef = useRef<Map<string, string>>(new Map());
-  const runtimeDebugKeyRef = useRef<string>("");
   const latestOrbitSnapshotsRef = useRef<SatelliteSnapshot[]>(orbitSnapshots);
-  const runtimePropagatorRef = useRef<SatelliteJsPropagator | null>(null);
-  const runtimePropagationEnabledRef = useRef(runtimeTlePropagation);
-  const runtimePositionEntityIdsRef = useRef<Set<string>>(new Set());
-  const runtimeReactUpdatesRef = useRef(0);
-  const runtimeCesiumUpdatesRef = useRef<Map<string, number>>(new Map());
-  const runtimeTimeOffsetsMsRef = useRef<Map<string, number>>(new Map());
   const rangeEntityRef = useRef<Entity | null>(null);
   const rangeLabelEntityRef = useRef<Entity | null>(null);
   const rangeDotEntitiesRef = useRef<Entity[]>([]);
@@ -583,7 +376,6 @@ export function CesiumGlobe({
   const groundStationContactLineEntitiesRef = useRef<Entity[]>([]);
   const latestSnapshotsRef = useRef<SatelliteSnapshot[]>(snapshots);
   const latestClockTickMsRef = useRef(0);
-  const runtimeClockHandshakeSentRef = useRef(false);
   const onClockTickRef = useRef(onClockTick);
   const onSelectConjunctionRef = useRef(onSelectConjunction);
   const onSelectManeuverRef = useRef(onSelectManeuver);
@@ -599,51 +391,17 @@ export function CesiumGlobe({
   const [hoverInfo, setHoverInfo] = useState<HoverInfo>(null);
   const [satellitePopup, setSatellitePopup] = useState<SatellitePopup>(null);
   const [viewerReady, setViewerReady] = useState(false);
-  const runtimeSatelliteKey = snapshots
-    .map((snapshot) => `${snapshot.satellite.id}:${snapshot.satellite.tle?.line1 ?? ""}:${snapshot.satellite.tle?.line2 ?? ""}`)
-    .join("|");
-  const orbitVisibilityKey = (runtimeTlePropagation ? snapshots : orbitSnapshots)
+  const orbitVisibilityKey = orbitSnapshots
     .map((snapshot) => `${snapshot.satellite.id}:${snapshot.satellite.visual.showOrbit ? 1 : 0}`)
     .join("|");
 
   useEffect(() => {
     latestSnapshotsRef.current = snapshots;
-    if (runtimeTlePropagation) runtimeReactUpdatesRef.current += 1;
-  }, [runtimeTlePropagation, snapshots]);
+  }, [snapshots]);
 
   useEffect(() => {
-    if (!runtimeTlePropagation) {
-      latestOrbitSnapshotsRef.current = orbitSnapshots;
-      return;
-    }
-    const orbitById = new Map(orbitSnapshots.map((snapshot) => [snapshot.satellite.id, snapshot]));
-    latestOrbitSnapshotsRef.current = snapshots.map((snapshot) => ({
-      ...snapshot,
-      ...orbitById.get(snapshot.satellite.id),
-      satellite: snapshot.satellite,
-    }));
-  }, [orbitSnapshots, runtimeTlePropagation, snapshots]);
-
-  useEffect(() => {
-    runtimePropagationEnabledRef.current = runtimeTlePropagation;
-    if (runtimeTlePropagation) {
-      const runtimeSnapshots = latestSnapshotsRef.current;
-      const propagator = new SatelliteJsPropagator(runtimeSnapshots.map((snapshot) => snapshot.satellite));
-      runtimePropagatorRef.current = propagator;
-      const requestedTimeMs = Date.parse(simTimeIso);
-      runtimeTimeOffsetsMsRef.current = new Map(runtimeSnapshots.map((snapshot) => {
-        const requestedState = propagator.getState(snapshot.satellite.id, new Date(requestedTimeMs).toISOString());
-        const epochMs = tleEpochMs(snapshot.satellite.tle?.line1);
-        return [
-          snapshot.satellite.id,
-          isTleConsistentOrbitState(snapshot, requestedState) || epochMs === null ? 0 : epochMs - requestedTimeMs,
-        ];
-      }));
-    } else {
-      runtimePropagatorRef.current = null;
-      runtimeTimeOffsetsMsRef.current.clear();
-    }
-  }, [runtimeSatelliteKey, runtimeTlePropagation, simTimeIso]);
+    latestOrbitSnapshotsRef.current = orbitSnapshots;
+  }, [orbitSnapshots]);
 
   useEffect(() => {
     onClockTickRef.current = onClockTick;
@@ -678,16 +436,10 @@ export function CesiumGlobe({
       return;
     }
 
-    if (runtimeTlePropagation && !isPlaying && viewer.clock.shouldAnimate) {
-      const Cesium = cesiumRef.current;
-      if (Cesium) {
-        onClockTickRef.current(Cesium.JulianDate.toDate(viewer.clock.currentTime).toISOString());
-      }
-    }
     viewer.clock.shouldAnimate = isPlaying;
     viewer.clock.multiplier = simulationSpeed;
     viewer.scene.requestRender();
-  }, [isPlaying, runtimeTlePropagation, simulationSpeed, viewerReady]);
+  }, [isPlaying, simulationSpeed, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;
@@ -1010,13 +762,6 @@ export function CesiumGlobe({
       }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
       removeClockTick = viewer.clock.onTick.addEventListener((clock) => {
-        if (runtimePropagationEnabledRef.current) {
-          if (!runtimeClockHandshakeSentRef.current) {
-            runtimeClockHandshakeSentRef.current = true;
-            onClockTickRef.current(Cesium.JulianDate.toDate(clock.currentTime).toISOString());
-          }
-          return;
-        }
         const nowMs = Date.now();
         if (nowMs - latestClockTickMsRef.current < 200) {
           return;
@@ -1053,10 +798,6 @@ export function CesiumGlobe({
       hoverInfoRef.current = null;
       entityMap.clear();
       entityEphemerisKeyMap.clear();
-      runtimePositionEntityIdsRef.current.clear();
-      runtimeCesiumUpdatesRef.current.clear();
-      runtimeTimeOffsetsMsRef.current.clear();
-      runtimeClockHandshakeSentRef.current = false;
       orbitEntitiesRef.current.clear();
       trailEntitiesRef.current.clear();
       groundTrackEntitiesRef.current.clear();
@@ -1090,36 +831,20 @@ export function CesiumGlobe({
     }
     snapshots.forEach((snapshot, index) => {
       const ephemerisStates = ephemerisById.get(snapshot.satellite.id) ?? [];
-      if (!runtimeTlePropagation && !snapshot.state && ephemerisStates.length === 0) {
+      if (!snapshot.state && ephemerisStates.length === 0) {
         return;
       }
 
       const isSelected = selectedSatelliteIds.includes(snapshot.satellite.id);
       const color = getSnapshotColor(Cesium, snapshot, index);
       const fallbackPosition = snapshot.state ? stateToSpaceCartesian(Cesium, snapshot.state) : null;
-      const createRuntimePosition = () => new Cesium.CallbackPositionProperty((time, result) => {
-        const propagator = runtimePropagatorRef.current;
-        if (!time || !runtimePropagationEnabledRef.current || !propagator) return undefined;
-        const viewerTimeMs = Cesium.JulianDate.toDate(time).getTime();
-        const propagationTimeMs = viewerTimeMs + (runtimeTimeOffsetsMsRef.current.get(snapshot.satellite.id) ?? 0);
-        const state = propagator.getState(snapshot.satellite.id, new Date(propagationTimeMs).toISOString());
-        if (!isTleConsistentOrbitState(snapshot, state)) return undefined;
-        runtimeCesiumUpdatesRef.current.set(
-          snapshot.satellite.id,
-          (runtimeCesiumUpdatesRef.current.get(snapshot.satellite.id) ?? 0) + 1,
-        );
-        return Cesium.Cartesian3.clone(stateToSpaceCartesian(Cesium, state), result);
-      }, false);
-
       let entity = entitiesRef.current.get(snapshot.satellite.id);
 
       if (!entity) {
         entity = viewer.entities.add({
           id: snapshot.satellite.id,
           name: snapshot.satellite.name,
-          position: runtimeTlePropagation
-            ? createRuntimePosition()
-            : fallbackPosition ?? stateToSpaceCartesian(Cesium, ephemerisStates[0]),
+          position: fallbackPosition ?? stateToSpaceCartesian(Cesium, ephemerisStates[0]),
           point: {
             color: color.brighten(isSelected ? 0.55 : 0.32, new Cesium.Color()),
             pixelSize: isSelected ? 15 : 11,
@@ -1156,33 +881,14 @@ export function CesiumGlobe({
         entitiesRef.current.set(snapshot.satellite.id, entity);
       }
 
-      if (runtimeTlePropagation && !runtimePositionEntityIdsRef.current.has(snapshot.satellite.id)) {
-        entity.position = createRuntimePosition();
-        runtimePositionEntityIdsRef.current.add(snapshot.satellite.id);
-        const currentJulianDate = viewer.clock.currentTime;
-        const viewerTimeMs = Cesium.JulianDate.toDate(currentJulianDate).getTime();
-        const propagationTimeMs = viewerTimeMs + (runtimeTimeOffsetsMsRef.current.get(snapshot.satellite.id) ?? 0);
-        const currentState = runtimePropagatorRef.current?.getState(snapshot.satellite.id, new Date(propagationTimeMs).toISOString()) ?? null;
-        console.info("[Cesium runtime satellite]", {
-          satelliteId: snapshot.satellite.id,
-          propagationSource: "SatelliteJsPropagator/SGP4",
-          callbackPositionPropertyAttached: true,
-          currentJulianDate: Cesium.JulianDate.toDate(currentJulianDate).toISOString(),
-          propagationTime: new Date(propagationTimeMs).toISOString(),
-          currentPropagatedPosition: isTleConsistentOrbitState(snapshot, currentState) ? currentState.positionEcefKm : null,
-          reactUpdates: runtimeReactUpdatesRef.current,
-          cesiumUpdates: runtimeCesiumUpdatesRef.current.get(snapshot.satellite.id) ?? 0,
-        });
-      }
-
       const nextEphemerisKey = ephemerisKey(ephemerisStates);
-      if (!runtimeTlePropagation && ephemerisStates.length > 0 && entityEphemerisKeysRef.current.get(snapshot.satellite.id) !== nextEphemerisKey) {
+      if (ephemerisStates.length > 0 && entityEphemerisKeysRef.current.get(snapshot.satellite.id) !== nextEphemerisKey) {
         const sampledPosition = buildSampledPositionProperty(Cesium, ephemerisStates);
         if (sampledPosition) {
           entity.position = sampledPosition;
           entityEphemerisKeysRef.current.set(snapshot.satellite.id, nextEphemerisKey);
         }
-      } else if (!runtimeTlePropagation && ephemerisStates.length === 0 && fallbackPosition) {
+      } else if (ephemerisStates.length === 0 && fallbackPosition) {
         entity.position = new Cesium.ConstantPositionProperty(fallbackPosition);
         entityEphemerisKeysRef.current.delete(snapshot.satellite.id);
       }
@@ -1210,7 +916,7 @@ export function CesiumGlobe({
         );
       }
     });
-  }, [orbitSnapshots, runtimeTlePropagation, snapshots, selectedSatelliteIds, showLabels, viewerReady]);
+  }, [orbitSnapshots, snapshots, selectedSatelliteIds, showLabels, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;
@@ -1241,29 +947,13 @@ export function CesiumGlobe({
 
     geometrySnapshots.forEach((snapshot, index) => {
       const sourceStates = snapshot.trajectory ?? snapshot.futureTrajectory ?? [];
-      const key = runtimeTlePropagation
-        ? `runtime-v2:${snapshot.satellite.tle?.line1 ?? ""}:${snapshot.satellite.tle?.line2 ?? ""}`
-        : orbitGeometryKey(snapshot, sourceStates);
+      const key = orbitGeometryKey(snapshot, sourceStates);
       if (orbitGeometryKeysRef.current.get(snapshot.satellite.id) === key) return;
-      const runtimeStates = runtimeTlePropagation && runtimePropagatorRef.current
-        ? buildValidatedRuntimeRevolution(
-            runtimePropagatorRef.current,
-            snapshot,
-            Cesium.JulianDate.toDate(viewer.clock.currentTime).getTime(),
-          )
+      const states = sourceStates;
+      const positions = states.length > 1
+        ? buildInterpolatedPathPositions(Cesium, states, (item) => stateToOrbitArcCartesian(Cesium, item, states[0]?.gmstRad))
         : [];
-      const states = runtimeTlePropagation ? runtimeStates : sourceStates;
-      const state = snapshot.state ?? states[0] ?? null;
-      const gmst = state?.gmstRad;
-      const positions = runtimeTlePropagation
-        ? states.map((item) => stateToSpaceCartesian(Cesium, item))
-        : states.length > 1
-          ? buildInterpolatedPathPositions(Cesium, states, (item) => stateToOrbitArcCartesian(Cesium, item, gmst))
-          : state ? buildOsculatingOrbitArc(Cesium, state, gmst) : [];
-      if (positions.length !== (runtimeTlePropagation ? 181 : positions.length) || positions.length < 2) {
-        console.warn("[Cesium runtime] rejected invalid orbit revolution", snapshot.satellite.id);
-        return;
-      }
+      if (positions.length < 2) return;
 
       const existing = orbitEntitiesRef.current.get(snapshot.satellite.id);
       if (existing?.polyline) {
@@ -1319,17 +1009,7 @@ export function CesiumGlobe({
       groundTrackEntitiesRef.current.set(snapshot.satellite.id, groundEntities);
       orbitGeometryKeysRef.current.set(snapshot.satellite.id, key);
     });
-
-    if (runtimeTlePropagation && runtimeDebugKeyRef.current !== runtimeSatelliteKey) {
-      runtimeDebugKeyRef.current = runtimeSatelliteKey;
-      console.info("[Cesium runtime] satellites loaded", {
-        runtimeSatellitesCreated: geometrySnapshots.length,
-        orbitEntitiesCreated: orbitEntitiesRef.current.size,
-        dotEntitiesCreated: entitiesRef.current.size,
-        callbackPositionPropertiesAttached: entitiesRef.current.size,
-      });
-    }
-  }, [orbitSnapshots, runtimeSatelliteKey, runtimeTlePropagation, selectedSatelliteIds, showAllOrbits, snapshots, viewerReady]);
+  }, [orbitSnapshots, selectedSatelliteIds, showAllOrbits, snapshots, viewerReady]);
 
   useEffect(() => {
     const Cesium = cesiumRef.current;

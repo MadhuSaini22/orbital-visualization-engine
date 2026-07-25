@@ -465,11 +465,13 @@ function backendStateToOrbitState(satelliteId: string, state: BackendEphemerisSt
   return backendEphemerisStateToOrbitState(satelliteId, state);
 }
 
-function manualOrbitToSatellite(orbit: BackendManualOrbitResponse): SatelliteObject {
+function manualOrbitToSatellite(orbit: BackendManualOrbitResponse, tle?: SatelliteObject["tle"]): SatelliteObject {
   return {
     id: orbit.id,
+    backendOrbitId: orbit.id,
     name: orbit.name,
     sourceType: orbit.type === "TLE" ? "TLE" : "MANUAL_STATE",
+    tle,
     visual: {
       showMarker: true,
       showLabel: true,
@@ -1838,7 +1840,8 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const selectedSnapshot = visualizationModel.selectedSnapshot;
   const groundOperationsTargetSnapshot = renderModel.groundOperationsGroundTrackSnapshot;
   const effectiveGroundOperationsTargetSnapshot = visualizationModel.groundOperationsTargetSnapshot;
-  const missionSubjectSnapshot = activeDataSource === "endpoint" && importedMissionSpacecraftId
+  const hasImportedMissionSubjects = satellites.some((satellite) => Boolean(satellite.backendOrbitId && satellite.tle));
+  const missionSubjectSnapshot = hasImportedMissionSubjects && importedMissionSpacecraftId
     ? snapshots.find((item) => item.satellite.id === importedMissionSpacecraftId) ?? selectedSnapshot
     : selectedSnapshot;
   const maneuverTemplateOrbitSummary = useMemo(
@@ -1848,7 +1851,7 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
   const selectedNoradId = activeDataSource === "manual" ? null : selectedSnapshot?.satellite.noradId ?? selectedSnapshot?.satellite.id ?? null;
   const canUseAnalysisConfig = activeDataSource === "backend" && Boolean(selectedNoradId);
   const importedMissionSubjectCandidates = useMemo<MissionSubjectOption[]>(() => {
-    if (activeDataSource !== "endpoint") {
+    if (!hasImportedMissionSubjects) {
       return [];
     }
     return snapshots
@@ -1859,9 +1862,9 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
         detail: `NORAD ${snapshot.satellite.noradId ?? snapshot.satellite.id}`,
         satellite: snapshot.satellite,
       }));
-  }, [activeDataSource, snapshots]);
+  }, [hasImportedMissionSubjects, snapshots]);
   const missionSubjectOptions = useMemo<MissionSubjectOption[]>(() => {
-    if (activeDataSource === "endpoint") {
+    if (hasImportedMissionSubjects) {
       return importedMissionSubjectCandidates;
     }
     if (!missionSubjectSnapshot?.satellite) {
@@ -1875,13 +1878,13 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
         : `Manual orbit ${manualOrbitId ?? missionSubjectSnapshot.satellite.id}`,
       satellite: missionSubjectSnapshot.satellite,
     }];
-  }, [activeDataSource, importedMissionSubjectCandidates, manualOrbitId, missionSubjectSnapshot]);
+  }, [activeDataSource, hasImportedMissionSubjects, importedMissionSubjectCandidates, manualOrbitId, missionSubjectSnapshot]);
   const canUseMissionTimeline = canUseAnalysisConfig || Boolean(manualOrbitId) || importedMissionSubjectCandidates.length > 0;
   const missionTimelineUnavailableReason = canUseMissionTimeline
     ? null
     : activeDataSource === "manual"
       ? "Create a manual Cartesian or Classical Elements orbit first, then create a mission."
-      : activeDataSource === "endpoint"
+      : hasImportedMissionSubjects
         ? "Import at least one valid TLE spacecraft, then choose the mission subject inside Create Mission."
         : "Load a backend catalog orbit to create a mission timeline.";
   const canUseRangeCheck = visualizationModel.layerState.range.available;
@@ -2531,21 +2534,6 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
     }
   }, [missionLibrary, orbitLibrary, saveMissionLibrary, saveOrbitLibrary]);
 
-  const loadTleText = useCallback((raw: string) => {
-    const result = parseSatelliteSource(raw);
-    const defaultSelectedIds = getInitialSelectedIds(result.satellites);
-    setMessages(result.errors);
-    setSatellites(result.satellites);
-    setSelectedSatelliteIds(defaultSelectedIds);
-    setShowAllOrbits(false);
-    setImportedMissionSpacecraftId(null);
-    setShowRangeCheck(false);
-    setShowManeuvers(false);
-    setShowConjunctions(false);
-    setTrajectoryAnchorTime(simTime);
-    return result;
-  }, [simTime]);
-
   const updateSatelliteVisual = useCallback((
     satelliteId: string,
     key: keyof SatelliteVisualSettings,
@@ -2688,13 +2676,27 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
 
   const handleLoadImportedTle = useCallback(async (raw: string, sourceLabel: string) => {
     setActiveOperationLabel("Importing TLE...");
-    const result = loadTleText(raw);
+    const result = parseSatelliteSource(raw);
+    let importedCount = 0;
     try {
       if (result.satellites.length > 0) {
-        storedOrbitsFromImportedTle(result.satellites, raw, sourceLabel).forEach(rememberOrbit);
+        const backendSatellites = await Promise.all(result.satellites.map(async (satellite) => {
+          if (!satellite.tle) throw new Error(`Imported object ${satellite.name} has no TLE.`);
+          const orbit = await createManualOrbit({
+            name: satellite.name,
+            type: "TLE",
+            propagatorType: "TLE_SGP4",
+            tle: satellite.tle,
+          });
+          return manualOrbitToSatellite(orbit, satellite.tle);
+        }));
+        importedCount = backendSatellites.length;
+        storedOrbitsFromImportedTle(backendSatellites, raw, sourceLabel).forEach(rememberOrbit);
         clearActiveMissionState();
-        setActiveDataSource("endpoint");
-        setManualOrbitId(null);
+        setSatellites(backendSatellites);
+        setSelectedSatelliteIds(getInitialSelectedIds(backendSatellites));
+        setActiveDataSource("manual");
+        setManualOrbitId(backendSatellites[0]?.backendOrbitId ?? null);
         setImportedMissionSpacecraftId(null);
         propagationEngine.clearServerCurrentStates();
         propagationEngine.replaceServerOrbitSnapshots(null);
@@ -2704,13 +2706,13 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       setMessages(
         result.errors.length > 0
           ? result.errors
-          : [`Loaded ${result.satellites.length} satellites from ${sourceLabel}. All imported spacecraft remain visible; choose the mission subject during Create Mission.`],
+          : [`Loaded ${importedCount} satellites from ${sourceLabel} through backend Orekit ephemeris.`],
       );
       return result;
     } finally {
       setActiveOperationLabel(null);
     }
-  }, [clearActiveMissionState, loadTleText, propagationEngine, rememberOrbit]);
+  }, [clearActiveMissionState, propagationEngine, rememberOrbit]);
 
   const handleLoadCatalogSatellite = useCallback((catalogSatellites: SatelliteObject[], satellite: SatelliteObject) => {
     const catalogEpoch = satelliteTleEpoch(satellite) ?? simTime;
@@ -3531,12 +3533,15 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
       const centerTime = trajectoryAnchorTime;
       const start = addMinutes(centerTime, -trajectoryOptions.pastMinutes);
       const end = addMinutes(centerTime, trajectoryOptions.futureMinutes);
-      const targetSatellites = satellites.filter((satellite) => {
-        if (!(showAllOrbits || selectedSatelliteIds.includes(satellite.id))) {
-          return false;
-        }
-        return satellite.visual.showOrbit || satellite.visual.showTrail || satellite.visual.showGroundTrack;
-      });
+      // Every loaded satellite needs authoritative ephemeris for its moving
+      // marker and for the satellite-control list. Selection and ALL ORBITS
+      // are presentation concerns only; they must not restrict propagation.
+      const targetSatellites = satellites.filter((satellite) => (
+        satellite.visual.showMarker
+        || satellite.visual.showOrbit
+        || satellite.visual.showTrail
+        || satellite.visual.showGroundTrack
+      ));
       if (targetSatellites.length === 0) {
         propagationEngine.replaceServerOrbitSnapshots([]);
         return;
@@ -3822,7 +3827,6 @@ function OrbitalDashboardContent({ workspaceId }: { workspaceId: string }) {
         {hasOrbitLoaded ? (
           <CesiumGlobe
             renderModel={renderModel}
-            runtimeTlePropagation={activeDataSource === "backend" || activeDataSource === "endpoint"}
             frameMode={frameMode}
             simTimeIso={simTime.toISOString()}
             isPlaying={isPlaying}
